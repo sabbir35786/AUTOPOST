@@ -6,8 +6,11 @@ venv/
 
 # Local databases
 *.db
+*.db-*
 *.sqlite
+*.sqlite-*
 *.sqlite3
+*.sqlite3-*
 
 # JavaScript
 node_modules/
