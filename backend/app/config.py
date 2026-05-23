@@ -21,7 +21,7 @@ _load_env_file()
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://autopost-woad.vercel.app")
 
 
 def _normalize_database_url(database_url: str) -> str:
@@ -57,7 +57,7 @@ FACEBOOK_OAUTH_SCOPES = os.getenv(
 )
 FACEBOOK_REDIRECT_URI = os.getenv(
     "FACEBOOK_REDIRECT_URI",
-    "http://localhost:8000/auth/facebook/callback",
+    "https://autopost-qwgw.onrender.com/auth/facebook/callback",
 )
 FACEBOOK_TOKEN_ENCRYPTION_KEY = os.getenv("FACEBOOK_TOKEN_ENCRYPTION_KEY", "")
 FACEBOOK_GRAPH_API_BASE_URL = os.getenv(

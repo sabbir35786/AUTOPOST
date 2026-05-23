@@ -5,7 +5,7 @@ import axios from "axios"
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ||
   process.env.BACKEND_URL ||
-  "http://localhost:8000"
+  "https://autopost-qwgw.onrender.com"
 
 export const api = axios.create({
   baseURL: API_BASE_URL,
