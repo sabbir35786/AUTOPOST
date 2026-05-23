@@ -40,6 +40,7 @@ function FacebookCallbackContent() {
     }
 
     const code = searchParams.get("code")
+    const state = searchParams.get("state")
     if (!code) {
       toast.error("Facebook did not return an authorization code.")
       setIsConnecting(false)
@@ -53,7 +54,8 @@ function FacebookCallbackContent() {
           "/facebook/connect",
           {
             code,
-            redirect_uri: "http://localhost:3000/auth/facebook/callback",
+            state,
+            redirect_uri: window.location.href.split("?")[0],
           }
         )
         setPages(response.data.pages)
@@ -75,6 +77,11 @@ function FacebookCallbackContent() {
     try {
       await api.post("/facebook/select-page", { page_id: page.page_id })
       toast.success(`Connected ${page.page_name}.`)
+      if (window.opener) {
+        window.opener.postMessage({ type: "facebook-connected" }, window.location.origin)
+        window.close()
+        return
+      }
       router.push("/dashboard")
     } catch {
       toast.error("Could not select that page.")

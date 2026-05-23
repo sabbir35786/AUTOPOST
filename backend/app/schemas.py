@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class UserCreate(BaseModel):
@@ -18,6 +18,9 @@ class UserRead(BaseModel):
     id: int
     email: str
     name: str
+    email_verified: bool = True
+    timezone: str = "UTC"
+    plan: str = "free"
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -32,6 +35,17 @@ class FacebookConnectRequest(BaseModel):
     short_lived_token: str | None = None
     code: str | None = None
     redirect_uri: str | None = None
+    state: str | None = None
+
+
+class FacebookOAuthUrlRequest(BaseModel):
+    app_id: str
+    app_secret: str
+    redirect_uri: str
+
+
+class FacebookOAuthUrlResponse(BaseModel):
+    authorization_url: str
 
 
 class FacebookPage(BaseModel):
@@ -52,12 +66,35 @@ class FacebookSelectPageResponse(BaseModel):
     page_name: str
 
 
+class FacebookManualConnectRequest(BaseModel):
+    page_id: str
+    page_access_token: str
+
+
 class FacebookStatus(BaseModel):
     connected: bool
     is_connected: bool | None = None
     page_name: str | None = None
     page_id: str | None = None
+    page_picture_url: str | None = None
+    connection_status: str | None = None
     instagram_business_account_id: str | None = None
+
+
+class UserUpdate(BaseModel):
+    email: str | None = None
+    timezone: str | None = None
+
+
+class PageConnectionRead(BaseModel):
+    id: int
+    page_id: str
+    page_name: str
+    page_picture_url: str | None = None
+    connection_status: str
+    connected_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class ScheduleUpsert(BaseModel):
@@ -75,14 +112,29 @@ class ScheduleRead(ScheduleUpsert):
 
 
 class PostGenerateResponse(BaseModel):
-    id: int
     content: str
+
+
+class PostGenerateRequest(BaseModel):
+    prompt: str | None = None
+
+
+class PostPublishRequest(BaseModel):
+    message: str
+    page_connection_id: int | None = None
+    image_url: str | None = None
+    media_urls: list[str] = Field(default_factory=list)
+    link_url: str | None = None
+    link_preview_data: dict | None = None
+    scheduled_at: datetime | None = None
+    save_as_draft: bool = False
 
 
 class PostPublishResponse(BaseModel):
     success: bool
-    id: int
-    status: str
+    id: int | None = None
+    status: str | None = None
+    post_url: str | None = None
     error_message: str | None = None
 
 
@@ -91,5 +143,121 @@ class PostHistoryItem(BaseModel):
     content: str
     status: str
     posted_at: datetime | None = None
+    scheduled_at: datetime | None = None
+    media_urls: list[str] = Field(default_factory=list)
+    link_url: str | None = None
+    link_preview_data: dict | None = None
+    page_name: str | None = None
+    page_picture_url: str | None = None
+    facebook_post_id: str | None = None
+    failure_reason: str | None = None
+    ai_generated: bool = False
+    auto_generated: bool = False
+    likes_count: int = 0
+    comments_count: int = 0
+    shares_count: int = 0
+    reach_count: int = 0
+    engagement_score: float = 0
+    low_engagement: bool = False
 
     model_config = {"from_attributes": True}
+
+
+class AIPersonaBase(BaseModel):
+    persona_name: str
+    niche: str
+    tone_tags: list[str] = Field(default_factory=list)
+    custom_instructions: str | None = None
+    language: str = "English"
+    hashtags_enabled: bool = False
+    hashtag_count: int = 5
+    assigned_days: list[str] = Field(default_factory=list)
+    posting_time_slots: list[str] = Field(default_factory=lambda: ["09:00"])
+    priority_level: str = "Normal"
+    is_active: bool = True
+    learning_mode_enabled: bool = True
+    minimum_engagement_threshold: float = 0
+
+
+class AIPersonaCreate(AIPersonaBase):
+    pass
+
+
+class AIPersonaUpdate(AIPersonaBase):
+    pass
+
+
+class AIPersonaRead(AIPersonaBase):
+    id: int
+    page_connection_id: int
+    user_id: int
+    performance_score: float = 0.5
+    total_posts_published: int = 0
+    total_likes_received: int = 0
+    total_comments_received: int = 0
+    total_shares_received: int = 0
+    total_reach_received: int = 0
+    last_performance_update_at: datetime | None = None
+    last_auto_post_at: datetime | None = None
+    learned_patterns_summary: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+AIPageSettingsBase = AIPersonaBase
+AIPageSettingsUpsert = AIPersonaCreate
+AIPageSettingsRead = AIPersonaRead
+
+
+class AIGenerateRequest(BaseModel):
+    page_connection_id: int
+    topic_hint: str | None = None
+
+
+class AIGenerateResponse(BaseModel):
+    content: str
+
+
+class PostUpdateRequest(BaseModel):
+    message: str | None = None
+    media_urls: list[str] | None = None
+    scheduled_at: datetime | None = None
+    link_url: str | None = None
+    link_preview_data: dict | None = None
+    status: str | None = None
+
+
+class AnalyticsResponse(BaseModel):
+    total_posts: int
+    total_likes: int
+    total_comments: int
+    total_shares: int
+    posts_per_day: list[dict]
+
+
+class PerformanceInsightsResponse(BaseModel):
+    enabled: bool
+    reason: str | None = None
+    persona_scores: list[dict] = Field(default_factory=list)
+    time_slot_heatmap: list[dict] = Field(default_factory=list)
+    top_posts: list[dict] = Field(default_factory=list)
+    recommendations: list[dict] = Field(default_factory=list)
+
+
+class PersonaLearningResetResponse(BaseModel):
+    success: bool
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: list[ChatMessage] = Field(default_factory=list)
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    model: str

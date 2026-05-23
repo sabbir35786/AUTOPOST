@@ -29,6 +29,10 @@ export function AppNav() {
     router.push("/login")
   }
 
+  if (pathname.startsWith("/dashboard")) {
+    return null
+  }
+
   const navLinks = (
     <>
       {visibleItems.map((item) => (
@@ -54,8 +58,17 @@ export function AppNav() {
   return (
     <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur">
       <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-4">
-        <Link href="/" className="text-sm font-semibold">
-          Auto Poster
+        <Link
+          href="/"
+          aria-label="auto poster"
+          title="auto poster"
+          className="flex h-10 w-10 items-center justify-center rounded-md transition-opacity hover:opacity-80"
+        >
+          <img
+            src="/logo.png"
+            alt="auto poster"
+            className="h-8 w-8 object-contain"
+          />
         </Link>
         <nav className="hidden items-center gap-2 md:flex">{navLinks}</nav>
         <div className="md:hidden">

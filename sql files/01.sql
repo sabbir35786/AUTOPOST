@@ -15,10 +15,13 @@ create table if not exists facebook_connections (
   page_id varchar not null,
   page_name varchar not null,
   page_access_token text not null,
+  app_id varchar,
+  app_secret text,
   instagram_business_account_id varchar,
   long_lived_user_token text not null,
   token_expires_at timestamptz,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 
 create index if not exists ix_facebook_connections_id on facebook_connections (id);

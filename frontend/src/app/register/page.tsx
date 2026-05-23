@@ -17,7 +17,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { useAuth } from "@/contexts/auth-context"
 
-function validate(email: string, password: string, name: string) {
+function validate(email: string, password: string, confirmPassword: string, name: string) {
   if (!name.trim()) {
     return "Enter your name."
   }
@@ -26,6 +26,9 @@ function validate(email: string, password: string, name: string) {
   }
   if (password.length < 6) {
     return "Password must be at least 6 characters."
+  }
+  if (password !== confirmPassword) {
+    return "Passwords do not match."
   }
   return null
 }
@@ -36,11 +39,12 @@ export default function RegisterPage() {
   const [name, setName] = React.useState("")
   const [email, setEmail] = React.useState("")
   const [password, setPassword] = React.useState("")
+  const [confirmPassword, setConfirmPassword] = React.useState("")
   const [isSubmitting, setIsSubmitting] = React.useState(false)
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const error = validate(email, password, name)
+    const error = validate(email, password, confirmPassword, name)
     if (error) {
       toast.error(error)
       return
@@ -94,6 +98,17 @@ export default function RegisterPage() {
                 type="password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
+                autoComplete="new-password"
+                required
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="confirm_password">Confirm password</Label>
+              <Input
+                id="confirm_password"
+                type="password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
                 autoComplete="new-password"
                 required
               />

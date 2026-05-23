@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import Link from "next/link"
+import axios from "axios"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 
@@ -46,8 +47,9 @@ export default function LoginPage() {
     try {
       await login(email, password)
       router.push("/dashboard")
-    } catch {
-      toast.error("Could not sign in. Check your email and password.")
+    } catch (error) {
+      const detail = axios.isAxiosError(error) ? error.response?.data?.detail : null
+      toast.error(detail || "Could not sign in. Check your email and password.")
     } finally {
       setIsSubmitting(false)
     }
