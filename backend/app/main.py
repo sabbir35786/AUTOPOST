@@ -185,7 +185,7 @@ def login(credentials: schemas.UserLogin, db: Session = Depends(get_db)):
 
 @app.get("/users/me", response_model=schemas.UserRead)
 def read_users_me(current_user: models.User = Depends(get_current_user)):
-    return current_user
+    return schemas.UserRead.from_orm(current_user)
 
 
 @app.post("/chat", response_model=schemas.ChatResponse)
@@ -193,6 +193,7 @@ async def chat(
     payload: schemas.ChatRequest,
     current_user: models.User = Depends(get_current_user),
 ):
+    
     try:
         reply = await create_chat_reply(
             payload.message,
