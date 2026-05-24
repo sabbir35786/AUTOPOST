@@ -144,27 +144,46 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
     if (!isAuthenticated) return
     setLoading(true)
     try {
+      // health check (unprotected)
       await api.get("/health")
-      const [pageResponse, postResponse] = await Promise.all([
-        api.get<PageConnection[]>("/facebook/pages"),
-        api.get<Post[]>("/posts", { params: { limit: 50 } }),
-      ])
-      setPages(pageResponse.data)
-      setPosts(postResponse.data)
+      // Load pages – if none are connected, show empty state without error
+      let pageResponse
+      try {
+        pageResponse = await api.get<PageConnection[]>("/facebook/pages")
+        setPages(pageResponse.data)
+      } catch (err) {
+        const status = axios.isAxiosError(err) ? err.response?.status : undefined
+        if (status && status >= 400 && status < 500) {
+          // Likely unauthorized or not found – treat as no pages
+          setPages([])
+        } else {
+          console.error("Failed to load pages:", err)
+          toast.error(axios.isAxiosError(err) ? err.response?.data?.detail || err.message : String(err))
+        }
+      }
+      // Load posts – this can fail if no posts yet, show empty list
+      try {
+        const postResponse = await api.get<Post[]>("/posts", { params: { limit: 50 } })
+        setPosts(postResponse.data)
+      } catch (err) {
+        console.error("Failed to load posts:", err)
+        // If no posts exist, API may return 404 or empty list – treat as empty
+        setPosts([])
+      }
       if (view === "analytics") {
         const analyticsResponse = await api.get<Analytics>("/analytics", { params: { days: 30 } })
         setAnalytics(analyticsResponse.data)
       }
     } catch (error) {
-      const statusCode = axios.isAxiosError(error) ? error.response?.status : undefined
-      if (statusCode === 401 || statusCode === 403) {
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined
+      if (status === 401 || status === 403) {
         logout()
         router.replace("/login")
         return
       }
-      if (!statusCode || statusCode >= 500) {
-        toast.error("Could not load your workspace.")
-      }
+      const errMsg = axios.isAxiosError(error) ? error.response?.data?.detail || error.message : String(error)
+      console.error("Workspace load error:", errMsg)
+      toast.error(errMsg || "Could not load your workspace.")
     } finally {
       setLoading(false)
     }
