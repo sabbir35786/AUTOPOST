@@ -21,7 +21,7 @@ _load_env_file()
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://autopost-woad.vercel.app")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://autopost-woad.vercel.app").rstrip("/")
 
 
 def _normalize_database_url(database_url: str) -> str:

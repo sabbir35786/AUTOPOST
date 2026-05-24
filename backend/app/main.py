@@ -1190,7 +1190,9 @@ async def publish_composer_post(
             current_user.id,
             connection,
             message,
-            media_urls[0] if media_urls else None,
+            media_urls=media_urls,
+            link_url=payload.link_url,
+            link_preview_data=payload.link_preview_data,
         )
         return {
             "success": success,

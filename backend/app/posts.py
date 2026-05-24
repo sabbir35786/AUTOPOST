@@ -146,13 +146,19 @@ async def publish_post_to_facebook(
     connection: models.FacebookConnection,
     post_date: date | None = None,
 ) -> bool:
+    params = {
+        "message": post_log.content,
+        "access_token": decrypt_token(connection.page_access_token),
+    }
+    if post_log.link_url:
+        params["link"] = post_log.link_url
+    elif post_log.media_urls and post_log.media_urls[0]:
+        params["link"] = post_log.media_urls[0]
+
     async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL) as client:
         response = await client.post(
             f"{connection.page_id}/feed",
-            params={
-                "message": post_log.content,
-                "access_token": decrypt_token(connection.page_access_token),
-            },
+            params=params,
         )
 
     if response.status_code < 400:
@@ -209,20 +215,27 @@ async def publish_message_to_facebook(
     user_id: int,
     connection: models.FacebookConnection,
     message: str,
-    image_url: str | None = None,
+    media_urls: list[str] | None = None,
+    link_url: str | None = None,
+    link_preview_data: dict | None = None,
 ) -> tuple[bool, models.PostLog, str | None]:
     params = {
         "message": message,
         "access_token": decrypt_token(connection.page_access_token),
     }
-    if image_url:
-        params["link"] = image_url
+    if link_url:
+        params["link"] = link_url
+    elif media_urls and media_urls[0]:
+        params["link"] = media_urls[0]
 
     post_log = models.PostLog(
         user_id=user_id,
         facebook_connection_id=connection.id,
         content=message,
         status="draft",
+        media_urls=media_urls or [],
+        link_url=link_url,
+        link_preview_data=link_preview_data,
     )
     db.add(post_log)
     db.flush()
