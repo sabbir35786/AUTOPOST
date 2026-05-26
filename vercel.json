@@ -1,8 +1,8 @@
 {
   "rewrites": [
     {
-      "source": "/api/(.*)",
-      "destination": "/api/$1"
+      "source": "/backend/:path*",
+      "destination": "https://autopost-qwgw.onrender.com/:path*"
     }
   ],
   "env": {

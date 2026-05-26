@@ -2,15 +2,27 @@
 
 import axios from "axios"
 
-let resolvedBackend = process.env.NEXT_PUBLIC_BACKEND_URL;
-if (!resolvedBackend) {
-  if (typeof window !== "undefined" && window.location.hostname === "localhost") {
-    resolvedBackend = "http://localhost:8000";
-  } else {
-    resolvedBackend = "https://autopost-qwgw.onrender.com";
+const DEFAULT_REMOTE_BACKEND = "https://autopost-qwgw.onrender.com"
+const VERCEL_BACKEND_PROXY = "/backend"
+
+function getBackendUrl() {
+  const configuredBackend = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, "")
+
+  if (typeof window !== "undefined") {
+    const isLocalhost = ["localhost", "127.0.0.1"].includes(window.location.hostname)
+    if (isLocalhost) {
+      return configuredBackend || "http://localhost:8000"
+    }
+
+    if (!configuredBackend || configuredBackend === DEFAULT_REMOTE_BACKEND) {
+      return VERCEL_BACKEND_PROXY
+    }
   }
+
+  return configuredBackend || DEFAULT_REMOTE_BACKEND
 }
-export const API_BASE_URL = resolvedBackend.replace(/\/$/, "");
+
+export const API_BASE_URL = getBackendUrl()
 
 export const api = axios.create({
   baseURL: API_BASE_URL,

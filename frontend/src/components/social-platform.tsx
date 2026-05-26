@@ -435,6 +435,7 @@ function emptyPersona(): AIPersona {
     language: "English",
     hashtags_enabled: false,
     hashtag_count: 5,
+    always_include_engagement_hook: false,
     assigned_days: [],
     posting_time_slots: ["09:00"],
     priority_level: "Normal",
