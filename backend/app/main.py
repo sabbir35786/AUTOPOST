@@ -30,6 +30,7 @@ from app.config import (
     MISTRAL_API_KEY,
     MISTRAL_MODEL,
     SECRET_KEY,
+    CRON_SECRET,
 )
 from app.crypto import encrypt_token
 from app.database import create_database_tables, get_db
@@ -41,6 +42,7 @@ from app.posts import (
     publish_message_to_facebook,
     publish_post_to_facebook,
     release_user_posting,
+    run_scheduled_posts,
     try_claim_user_posting,
 )
 from app.mistral_service import generate_ai_facebook_post
@@ -48,6 +50,8 @@ from app.learning.service import (
     build_learning_prompt_hint,
     get_performance_insights,
     reset_persona_learning,
+    run_engagement_snapshot_job,
+    run_weekly_learning_job,
     user_has_learning_access,
 )
 
@@ -67,6 +71,7 @@ def _print_startup_config_status() -> None:
         "FACEBOOK_TOKEN_ENCRYPTION_KEY": bool(FACEBOOK_TOKEN_ENCRYPTION_KEY),
         "FACEBOOK_OAUTH_SCOPES": bool(FACEBOOK_OAUTH_SCOPES),
         "MISTRAL_API_KEY": bool(MISTRAL_API_KEY),
+        "CRON_SECRET": bool(CRON_SECRET and CRON_SECRET != "your_cron_secret_here"),
     }
     print("Environment configuration:")
     for name, loaded in required_env.items():
@@ -121,6 +126,33 @@ def health_check():
 @app.get("/api/health")
 def api_health_check():
     return "ok"
+
+
+@app.get("/api/internal/run-scheduler")
+async def run_internal_scheduler(request: Request):
+    try:
+        cron_header = request.headers.get("X-Cron-Secret")
+        if not cron_header or cron_header != CRON_SECRET:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized",
+            )
+        
+        await run_scheduled_posts()
+        
+        return {
+            "status": "ok",
+            "message": "Scheduler run completed",
+            "timestamp": str(datetime.now(timezone.utc)),
+        }
+    except HTTPException as exc:
+        raise exc
+    except Exception as exc:
+        print(f"Error running scheduler endpoint: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
 
 
 @app.post("/auth/register", response_model=schemas.UserRead, status_code=status.HTTP_201_CREATED)

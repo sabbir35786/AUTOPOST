@@ -322,7 +322,7 @@ def release_user_posting(user_id: int) -> None:
 async def run_scheduled_posts() -> None:
     from datetime import timedelta
     now_utc = datetime.now(timezone.utc)
-    print(f"Scheduler tick — checking for posts to publish at {now_utc}")
+    print(f"Scheduler triggered via cron endpoint at {now_utc}")
     db = SessionLocal()
     try:
         due_posts = (

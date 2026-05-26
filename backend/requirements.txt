@@ -5,6 +5,5 @@ pydantic
 python-jose[cryptography]
 bcrypt
 httpx
-apscheduler
 openai
 psycopg[binary]
