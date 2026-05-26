@@ -155,6 +155,33 @@ async def run_internal_scheduler(request: Request):
         )
 
 
+@app.get("/api/internal/init-db")
+def init_db(request: Request):
+    try:
+        cron_header = request.headers.get("X-Cron-Secret")
+        if not cron_header or cron_header != CRON_SECRET:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized",
+            )
+        
+        create_database_tables()
+        
+        return {
+            "status": "ok",
+            "message": "Database tables and columns initialized successfully",
+            "timestamp": str(datetime.now(timezone.utc)),
+        }
+    except HTTPException as exc:
+        raise exc
+    except Exception as exc:
+        print(f"Error running database initialization endpoint: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+
+
 @app.post("/auth/register", response_model=schemas.UserRead, status_code=status.HTTP_201_CREATED)
 def register(user_data: schemas.UserCreate, db: Session = Depends(get_db)):
     email = user_data.email.strip().lower()
