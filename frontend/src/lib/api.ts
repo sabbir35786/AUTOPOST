@@ -14,7 +14,11 @@ function getBackendUrl() {
       return configuredBackend || "http://localhost:8000"
     }
 
-    if (!configuredBackend || configuredBackend === DEFAULT_REMOTE_BACKEND) {
+    const configuredForLocalhost =
+      configuredBackend?.startsWith("http://localhost") ||
+      configuredBackend?.startsWith("http://127.0.0.1")
+
+    if (!configuredBackend || configuredBackend === DEFAULT_REMOTE_BACKEND || configuredForLocalhost) {
       return VERCEL_BACKEND_PROXY
     }
   }
