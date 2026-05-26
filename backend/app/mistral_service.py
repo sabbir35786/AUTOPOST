@@ -29,6 +29,8 @@ def generate_ai_facebook_post(
     language: str,
     hashtags_enabled: bool,
     hashtag_count: int,
+    always_include_engagement_hook: bool = False,
+    recent_topics: list[str] | None = None,
     topic_hint: str | None = None,
     model: str = "mistral-small-latest",
 ) -> str:
@@ -40,7 +42,14 @@ def generate_ai_facebook_post(
         "Facebook posts. You always stay on topic, match the requested tone exactly, "
         "follow all custom instructions strictly, write in the requested language, "
         "and never add any explanation or commentary. Return only the post text "
-        "itself with no labels, no quotation marks, no preamble."
+        "itself with no labels, no quotation marks, no preamble. "
+        "Every post must have a different structure from the last. Rotate between these formats — "
+        "sometimes ask a question, sometimes share a short story, sometimes give a numbered tip list, "
+        "sometimes make a bold statement, sometimes share a surprising fact. "
+        "Never use the same opening word twice in a row. "
+        "Vary the post length randomly — sometimes write 3 short punchy lines, "
+        "sometimes write a longer 100 to 150 word post with a story, "
+        "sometimes write just one powerful sentence. Never write the same length twice in a row."
     )
     prompt_parts = [
         f"Write one Facebook post for a page about: {niche}.",
@@ -50,7 +59,18 @@ def generate_ai_facebook_post(
         prompt_parts.append(f"You must follow these rules: {custom_instructions.strip()}.")
     prompt_parts.append(f"Write the post in {language}.")
     if hashtags_enabled:
-        prompt_parts.append(f"Add {max(1, min(hashtag_count, 30))} relevant hashtags at the end.")
+        prompt_parts.append(f"Add {max(1, min(hashtag_count, 5))} relevant hashtags at the end.")
+    if always_include_engagement_hook:
+        prompt_parts.append(
+            "Every post must end with either a direct question to the reader, "
+            "a call to action like 'tag someone who needs this', or an invitation "
+            "to share their opinion in the comments. This is mandatory."
+        )
+    if recent_topics:
+        prompt_parts.append(
+            f"These topics were already covered recently, do not repeat them: {', '.join(recent_topics)}. "
+            "Pick a fresh angle."
+        )
     if topic_hint and topic_hint.strip():
         prompt_parts.append(f"Focus this post on: {topic_hint.strip()}.")
     prompt_parts.append("Return only the post text. Nothing else.")
@@ -71,6 +91,64 @@ def generate_ai_facebook_post(
     if not content or not content.strip():
         raise RuntimeError("AI post generation failed: Mistral returned empty content")
     return content.strip()
+
+
+def extract_post_topic(post_content: str, model: str = "mistral-small-latest") -> str | None:
+    if not MISTRAL_API_KEY:
+        return None
+    try:
+        topic = _complete_with_mistral(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a content labeling assistant. Extract a brief 2 to 4 word "
+                        "topic description of the social media post. Return ONLY the topic text "
+                        "itself with no labels, no quotation marks, no punctuation, and no preamble."
+                    )
+                },
+                {"role": "user", "content": f"Post:\n{post_content}"},
+            ],
+            temperature=0.3,
+            max_tokens=20,
+        )
+        if topic:
+            return topic.strip().strip('"').strip("'").strip()
+    except Exception as exc:
+        print(f"Error extracting topic: {exc}")
+    return None
+
+
+def check_post_quality(post_content: str, model: str = "mistral-small-latest") -> int:
+    if not MISTRAL_API_KEY:
+        return 7
+    try:
+        rating_str = _complete_with_mistral(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a social media quality auditor. Rate the Facebook post "
+                        "from 1 to 10 for engagement potential. Return ONLY the integer number "
+                        "(e.g. 7) with no explanation or extra text."
+                    )
+                },
+                {"role": "user", "content": f"Post:\n{post_content}"},
+            ],
+            temperature=0.1,
+            max_tokens=5,
+        )
+        if rating_str:
+            import re
+            match = re.search(r'\d+', rating_str)
+            if match:
+                return int(match.group())
+    except Exception as exc:
+        print(f"Error checking post quality: {exc}")
+    return 7
+
 
 
 def generate_ai_recommendations(

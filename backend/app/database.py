@@ -125,6 +125,7 @@ def _ensure_product_blueprint_columns() -> None:
             "learning_mode_enabled": "boolean default true not null",
             "minimum_engagement_threshold": "numeric(10,4) default 0 not null",
             "learned_patterns_summary": "text",
+            "always_include_engagement_hook": "boolean default false not null",
         },
     )
 
@@ -194,6 +195,7 @@ def _migrate_ai_page_settings_to_personas() -> None:
             "auto_generated": "boolean default false not null",
             "created_at": "timestamp",
             "updated_at": "timestamp",
+            "topic": "text",
         },
     )
     _add_missing_columns(

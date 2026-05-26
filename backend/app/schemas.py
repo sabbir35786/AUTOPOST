@@ -170,7 +170,8 @@ class AIPersonaBase(BaseModel):
     custom_instructions: str | None = None
     language: str = "English"
     hashtags_enabled: bool = False
-    hashtag_count: int = 5
+    hashtag_count: int = 3
+    always_include_engagement_hook: bool = False
     assigned_days: list[str] = Field(default_factory=list)
     posting_time_slots: list[str] = Field(default_factory=lambda: ["09:00"])
     priority_level: str = "Normal"

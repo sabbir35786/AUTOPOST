@@ -16,7 +16,7 @@ from app.config import (
 )
 from app.crypto import decrypt_token
 from app.database import SessionLocal
-from app.mistral_service import generate_ai_facebook_post
+from app.mistral_service import generate_ai_facebook_post, check_post_quality, extract_post_topic
 from app.learning.service import build_learning_prompt_hint, should_persona_post_now, user_has_learning_access
 
 
@@ -320,7 +320,9 @@ def release_user_posting(user_id: int) -> None:
 
 
 async def run_scheduled_posts() -> None:
+    from datetime import timedelta
     now_utc = datetime.now(timezone.utc)
+    print(f"Scheduler tick — checking for posts to publish at {now_utc}")
     db = SessionLocal()
     try:
         due_posts = (
@@ -331,7 +333,15 @@ async def run_scheduled_posts() -> None:
             )
             .all()
         )
+        cutoff_time = now_utc - timedelta(hours=12)
         for post_log in due_posts:
+            if post_log.scheduled_at < cutoff_time:
+                post_log.status = "missed"
+                post_log.error_message = "Post missed its scheduling window (older than 12 hours)."
+                db.commit()
+                print(f"Marked post {post_log.id} as missed (scheduled at {post_log.scheduled_at})")
+                continue
+
             connection = db.get(models.FacebookConnection, post_log.facebook_connection_id)
             if connection is None or connection.connection_status != "connected":
                 post_log.status = "failed"
@@ -437,15 +447,42 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
         )[0]
 
         try:
-            content = generate_ai_facebook_post(
-                settings.niche,
-                [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
-                settings.custom_instructions,
-                settings.language,
-                settings.hashtags_enabled,
-                settings.hashtag_count,
-                build_learning_prompt_hint(db, settings) if user_has_learning_access(user) else None,
-            )
+            # Fix 6 — Topic rotation: fetch last 5 topics for this page
+            recent_topics = [
+                row[0]
+                for row in db.query(models.PostLog.topic)
+                .filter(
+                    models.PostLog.facebook_connection_id == connection.id,
+                    models.PostLog.topic.isnot(None),
+                )
+                .order_by(models.PostLog.created_at.desc())
+                .limit(5)
+                .all()
+            ]
+
+            # Fix 7 — Quality score check loop (up to 3 attempts)
+            content = ""
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                content = generate_ai_facebook_post(
+                    settings.niche,
+                    [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
+                    settings.custom_instructions,
+                    settings.language,
+                    settings.hashtags_enabled,
+                    settings.hashtag_count,
+                    settings.always_include_engagement_hook,
+                    recent_topics,
+                    build_learning_prompt_hint(db, settings) if user_has_learning_access(user) else None,
+                )
+                score = check_post_quality(content)
+                if score >= 6:
+                    break
+                print(f"Auto post scored {score}/10 (below 6), regenerating (attempt {attempt + 1}/{max_attempts})...")
+
+            # Extract topic for rotation memory
+            topic = extract_post_topic(content)
+
             post_log = models.PostLog(
                 user_id=settings.user_id,
                 facebook_connection_id=connection.id,
@@ -454,6 +491,7 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
                 ai_generated=True,
                 auto_generated=True,
                 ai_persona_id=settings.id,
+                topic=topic,
             )
             db.add(post_log)
             db.flush()

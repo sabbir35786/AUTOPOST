@@ -4,8 +4,6 @@ from secrets import token_urlsafe
 from urllib.parse import urlencode
 
 import httpx
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,7 +41,6 @@ from app.posts import (
     publish_message_to_facebook,
     publish_post_to_facebook,
     release_user_posting,
-    run_scheduled_posts,
     try_claim_user_posting,
 )
 from app.mistral_service import generate_ai_facebook_post
@@ -51,15 +48,12 @@ from app.learning.service import (
     build_learning_prompt_hint,
     get_performance_insights,
     reset_persona_learning,
-    run_engagement_snapshot_job,
-    run_weekly_learning_job,
     user_has_learning_access,
 )
 
 pending_facebook_pages: dict[int, dict] = {}
 pending_facebook_credentials: dict[int, dict] = {}
 pending_facebook_states: dict[str, int] = {}
-scheduler = AsyncIOScheduler()
 
 
 def _print_startup_config_status() -> None:
@@ -85,41 +79,17 @@ def _print_startup_config_status() -> None:
 async def lifespan(app: FastAPI):
     _print_startup_config_status()
     create_database_tables()
-    scheduler.add_job(
-        run_scheduled_posts,
-        CronTrigger(minute="*/5"),
-        id="scheduled_posts",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
-    scheduler.add_job(
-        run_engagement_snapshot_job,
-        CronTrigger(hour="*/6"),
-        id="engagement_snapshots",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
-    scheduler.add_job(
-        run_weekly_learning_job,
-        CronTrigger(day_of_week="sun", hour=0, minute=0),
-        id="weekly_learning",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
-    scheduler.start()
     try:
         yield
     finally:
-        scheduler.shutdown(wait=False)
+        pass
 
 
 app = FastAPI(title="Auto Poster API", lifespan=lifespan)
 
 _allowed_origins = [
     FRONTEND_URL,
+    "https://autopost-woad.vercel.app",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:3001",
@@ -711,6 +681,7 @@ def _serialize_ai_persona(persona: models.AIPersona) -> dict:
         "language": persona.language,
         "hashtags_enabled": persona.hashtags_enabled,
         "hashtag_count": persona.hashtag_count,
+        "always_include_engagement_hook": persona.always_include_engagement_hook,
         "assigned_days": [day.strip() for day in persona.assigned_days.split(",") if day.strip()],
         "posting_time_slots": persona.posting_time_slots or [],
         "priority_level": persona.priority_level,
@@ -743,6 +714,25 @@ def _get_owned_page(db: Session, user_id: int, connection_id: int) -> models.Fac
     return connection
 
 
+def _validate_posting_time_slots(slots: list[str]) -> bool:
+    if len(slots) <= 1:
+        return True
+    minutes = []
+    for s in slots:
+        try:
+            h, m = map(int, s.split(':'))
+            minutes.append(h * 60 + m)
+        except ValueError:
+            return False
+    minutes.sort()
+    for i in range(len(minutes) - 1):
+        if minutes[i+1] - minutes[i] < 240:
+            return False
+    if (minutes[0] + 1440) - minutes[-1] < 240:
+        return False
+    return True
+
+
 def _validate_persona_payload(payload: schemas.AIPersonaBase) -> tuple[str, str, list[str], list[str], list[str], str]:
     name = payload.persona_name.strip()
     niche = payload.niche.strip()
@@ -758,6 +748,11 @@ def _validate_persona_payload(payload: schemas.AIPersonaBase) -> tuple[str, str,
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one tone is required")
     if not posting_time_slots:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one posting time is required")
+    if not _validate_posting_time_slots(posting_time_slots):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Posting times must be at least 4 hours apart to prevent spamming."
+        )
     return name, niche, tone_tags, assigned_days, posting_time_slots, priority
 
 
@@ -844,7 +839,8 @@ def create_ai_persona(
     persona.custom_instructions = payload.custom_instructions
     persona.language = payload.language
     persona.hashtags_enabled = payload.hashtags_enabled
-    persona.hashtag_count = max(1, min(payload.hashtag_count, 30))
+    persona.hashtag_count = max(1, min(payload.hashtag_count, 5))
+    persona.always_include_engagement_hook = payload.always_include_engagement_hook
     persona.assigned_days = ",".join(assigned_days)
     persona.posting_time_slots = posting_time_slots
     persona.priority_level = priority
@@ -874,7 +870,8 @@ def update_ai_persona(
     persona.custom_instructions = payload.custom_instructions
     persona.language = payload.language
     persona.hashtags_enabled = payload.hashtags_enabled
-    persona.hashtag_count = max(1, min(payload.hashtag_count, 30))
+    persona.hashtag_count = max(1, min(payload.hashtag_count, 5))
+    persona.always_include_engagement_hook = payload.always_include_engagement_hook
     persona.assigned_days = ",".join(assigned_days)
     persona.posting_time_slots = posting_time_slots
     persona.priority_level = priority
@@ -926,6 +923,17 @@ def generate_ai_post(
     db: Session = Depends(get_db),
 ):
     settings = _get_ai_settings(db, current_user.id, payload.page_connection_id)
+    recent_topics = [
+        row[0]
+        for row in db.query(models.PostLog.topic)
+        .filter(
+            models.PostLog.facebook_connection_id == payload.page_connection_id,
+            models.PostLog.topic.isnot(None),
+        )
+        .order_by(models.PostLog.created_at.desc())
+        .limit(5)
+        .all()
+    ]
     try:
         content = generate_ai_facebook_post(
             settings.niche,
@@ -934,6 +942,8 @@ def generate_ai_post(
             settings.language,
             settings.hashtags_enabled,
             settings.hashtag_count,
+            settings.always_include_engagement_hook,
+            recent_topics,
             payload.topic_hint or (build_learning_prompt_hint(db, settings) if user_has_learning_access(current_user) else None),
             MISTRAL_MODEL,
         )
@@ -950,17 +960,40 @@ async def generate_and_publish_ai_post(
 ):
     connection = _get_owned_page(db, current_user.id, payload.page_connection_id)
     settings = _get_ai_settings(db, current_user.id, payload.page_connection_id)
-    try:
-        content = generate_ai_facebook_post(
-            settings.niche,
-            [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
-            settings.custom_instructions,
-            settings.language,
-            settings.hashtags_enabled,
-            settings.hashtag_count,
-            payload.topic_hint or (build_learning_prompt_hint(db, settings) if user_has_learning_access(current_user) else None),
-            MISTRAL_MODEL,
+    from app.mistral_service import check_post_quality
+    recent_topics = [
+        row[0]
+        for row in db.query(models.PostLog.topic)
+        .filter(
+            models.PostLog.facebook_connection_id == payload.page_connection_id,
+            models.PostLog.topic.isnot(None),
         )
+        .order_by(models.PostLog.created_at.desc())
+        .limit(5)
+        .all()
+    ]
+    try:
+        # Quality check loop
+        content = ""
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            content = generate_ai_facebook_post(
+                settings.niche,
+                [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
+                settings.custom_instructions,
+                settings.language,
+                settings.hashtags_enabled,
+                settings.hashtag_count,
+                settings.always_include_engagement_hook,
+                recent_topics,
+                payload.topic_hint or (build_learning_prompt_hint(db, settings) if user_has_learning_access(current_user) else None),
+                MISTRAL_MODEL,
+            )
+            score = check_post_quality(content, MISTRAL_MODEL)
+            if score >= 6:
+                break
+            print(f"Generated post scored {score}/10 (below threshold 6), regenerating (attempt {attempt + 1}/{max_attempts})...")
+
         post_log = models.PostLog(
             user_id=current_user.id,
             facebook_connection_id=connection.id,

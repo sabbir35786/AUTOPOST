@@ -75,6 +75,7 @@ type AIPersona = {
   language: string
   hashtags_enabled: boolean
   hashtag_count: number
+  always_include_engagement_hook: boolean
   assigned_days: string[]
   posting_time_slots: string[]
   priority_level: "High" | "Normal" | "Low"
