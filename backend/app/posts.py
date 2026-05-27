@@ -319,6 +319,14 @@ def release_user_posting(user_id: int) -> None:
         user_posting_locks.discard(user_id)
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 async def run_scheduled_posts() -> None:
     from datetime import timedelta
     now_utc = datetime.now(timezone.utc)
@@ -335,7 +343,14 @@ async def run_scheduled_posts() -> None:
         )
         cutoff_time = now_utc - timedelta(hours=12)
         for post_log in due_posts:
-            if post_log.scheduled_at < cutoff_time:
+            scheduled_at = _as_utc(post_log.scheduled_at)
+            if scheduled_at is None:
+                post_log.status = "failed"
+                post_log.error_message = "Scheduled post is missing a scheduled time."
+                db.commit()
+                continue
+
+            if scheduled_at < cutoff_time:
                 post_log.status = "missed"
                 post_log.error_message = "Post missed its scheduling window (older than 12 hours)."
                 db.commit()

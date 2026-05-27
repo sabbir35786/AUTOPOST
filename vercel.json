@@ -1,4 +1,10 @@
 {
+  "crons": [
+    {
+      "path": "/backend/api/internal/run-scheduler",
+      "schedule": "* * * * *"
+    }
+  ],
   "rewrites": [
     {
       "source": "/backend/:path*",

@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 from datetime import datetime, timedelta, timezone
 from secrets import token_urlsafe
 from urllib.parse import urlencode
@@ -31,6 +32,7 @@ from app.config import (
     MISTRAL_MODEL,
     SECRET_KEY,
     CRON_SECRET,
+    SCHEDULER_INTERVAL_SECONDS,
 )
 from app.crypto import encrypt_token
 from app.database import create_database_tables, get_db
@@ -58,6 +60,18 @@ from app.learning.service import (
 pending_facebook_pages: dict[int, dict] = {}
 pending_facebook_credentials: dict[int, dict] = {}
 pending_facebook_states: dict[str, int] = {}
+scheduler_task: asyncio.Task | None = None
+
+
+async def _scheduled_post_worker() -> None:
+    while True:
+        try:
+            await run_scheduled_posts()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"Scheduled post worker failed: {exc}")
+        await asyncio.sleep(SCHEDULER_INTERVAL_SECONDS)
 
 
 def _print_startup_config_status() -> None:
@@ -82,12 +96,20 @@ def _print_startup_config_status() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global scheduler_task
     _print_startup_config_status()
     create_database_tables()
+    scheduler_task = asyncio.create_task(_scheduled_post_worker())
     try:
         yield
     finally:
-        pass
+        if scheduler_task is not None:
+            scheduler_task.cancel()
+            try:
+                await scheduler_task
+            except asyncio.CancelledError:
+                pass
+            scheduler_task = None
 
 
 app = FastAPI(title="Auto Poster API", lifespan=lifespan)
@@ -132,7 +154,9 @@ def api_health_check():
 async def run_internal_scheduler(request: Request):
     try:
         cron_header = request.headers.get("X-Cron-Secret")
-        if not cron_header or cron_header != CRON_SECRET:
+        auth_header = request.headers.get("Authorization")
+        expected_bearer = f"Bearer {CRON_SECRET}"
+        if cron_header != CRON_SECRET and auth_header != expected_bearer:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Unauthorized",
