@@ -2,13 +2,14 @@ from contextlib import asynccontextmanager
 import asyncio
 from datetime import datetime, timedelta, timezone
 from secrets import token_urlsafe
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
+from sqlalchemy import func
 from sqlalchemy.orm import Session, object_session
 
 from app import models, schemas
@@ -34,7 +35,7 @@ from app.config import (
     CRON_SECRET,
     SCHEDULER_INTERVAL_SECONDS,
 )
-from app.crypto import encrypt_token
+from app.crypto import decrypt_token, encrypt_token
 from app.database import create_database_tables, get_db
 from app.posts import (
     create_draft_post,
@@ -47,9 +48,18 @@ from app.posts import (
     run_scheduled_posts,
     try_claim_user_posting,
 )
-from app.mistral_service import generate_ai_facebook_post
+from app.mistral_service import (
+    analyze_style_with_mistral,
+    classify_post_topic,
+    generate_ai_facebook_post,
+    generate_ai_facebook_post_from_prompt,
+    generate_ai_recommendations,
+    suggest_prompt_improvement,
+    synthesize_learned_strategy,
+)
 from app.learning.service import (
     build_learning_prompt_hint,
+    build_strategy_prompt_hint,
     get_performance_insights,
     reset_persona_learning,
     run_engagement_snapshot_job,
@@ -61,12 +71,16 @@ pending_facebook_pages: dict[int, dict] = {}
 pending_facebook_credentials: dict[int, dict] = {}
 pending_facebook_states: dict[str, int] = {}
 scheduler_task: asyncio.Task | None = None
+last_scheduler_run_at: datetime | None = None
 
 
 async def _scheduled_post_worker() -> None:
+    global last_scheduler_run_at
     while True:
         try:
             await run_scheduled_posts()
+            await refresh_due_tracked_pages_all()
+            last_scheduler_run_at = datetime.now(timezone.utc)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -152,6 +166,7 @@ def api_health_check():
 
 @app.get("/api/internal/run-scheduler")
 async def run_internal_scheduler(request: Request):
+    global last_scheduler_run_at
     try:
         cron_header = request.headers.get("X-Cron-Secret")
         auth_header = request.headers.get("Authorization")
@@ -163,6 +178,8 @@ async def run_internal_scheduler(request: Request):
             )
         
         await run_scheduled_posts()
+        await refresh_due_tracked_pages_all()
+        last_scheduler_run_at = datetime.now(timezone.utc)
         
         return {
             "status": "ok",
@@ -761,6 +778,9 @@ def _serialize_ai_persona(persona: models.AIPersona) -> dict:
         "niche": persona.niche,
         "tone_tags": [tag.strip() for tag in persona.tone_tags.split(",") if tag.strip()],
         "custom_instructions": persona.custom_instructions,
+        "prompt_config": persona.prompt_config,
+        "custom_prompt": persona.custom_prompt,
+        "creativity_level": persona.creativity_level,
         "language": persona.language,
         "hashtags_enabled": persona.hashtags_enabled,
         "hashtag_count": persona.hashtag_count,
@@ -795,6 +815,346 @@ def _get_owned_page(db: Session, user_id: int, connection_id: int) -> models.Fac
     if connection is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Facebook connection not found")
     return connection
+
+
+def _facebook_page_identifier(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Facebook Page URL or ID is required")
+    if cleaned.startswith("http://") or cleaned.startswith("https://"):
+        parsed = urlparse(cleaned)
+        parts = [part for part in parsed.path.split("/") if part]
+        if parts:
+            return parts[0]
+    return cleaned.strip("/")
+
+
+def _analysis_token(db: Session, current_user: models.User, own_page_connection_id: int | None = None) -> str:
+    connection = None
+    if own_page_connection_id is not None:
+        connection = _get_owned_page(db, current_user.id, own_page_connection_id)
+    else:
+        connection = (
+            db.query(models.FacebookConnection)
+            .filter(models.FacebookConnection.user_id == current_user.id, models.FacebookConnection.connection_status == "connected")
+            .first()
+        )
+    if connection is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Connect a Facebook Page before analyzing public pages")
+    return decrypt_token(connection.page_access_token)
+
+
+async def _fetch_page_posts_for_analysis(page_identifier: str, access_token: str, limit: int = 25) -> tuple[str | None, list[dict]]:
+    async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL, timeout=45) as client:
+        page_response = await client.get(page_identifier, params={"fields": "id,name", "access_token": access_token})
+        if page_response.status_code >= 400:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Facebook could not access this page. Public page analysis may require a page token with read permissions.")
+        page_data = page_response.json()
+        posts_response = await client.get(
+            f"{page_data.get('id')}/posts",
+            params={
+                "fields": "id,message,created_time,likes.summary(true),comments.summary(true),shares",
+                "limit": limit,
+                "access_token": access_token,
+            },
+        )
+    if posts_response.status_code >= 400:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Facebook could not fetch posts for this page")
+    posts = []
+    for item in posts_response.json().get("data", []):
+        message = (item.get("message") or "").strip()
+        if not message:
+            continue
+        likes = int(item.get("likes", {}).get("summary", {}).get("total_count") or 0)
+        comments = int(item.get("comments", {}).get("summary", {}).get("total_count") or 0)
+        shares = int(item.get("shares", {}).get("count") or 0)
+        created_time = item.get("created_time")
+        posted_at = datetime.fromisoformat(created_time.replace("Z", "+00:00")) if created_time else None
+        posts.append({
+            "facebook_post_id": item.get("id"),
+            "content": message,
+            "posted_at": posted_at,
+            "likes_count": likes,
+            "comments_count": comments,
+            "shares_count": shares,
+            "engagement_score": likes + comments * 3 + shares * 5,
+        })
+    return page_data.get("name"), posts
+
+
+def _emoji_count(text: str) -> int:
+    return sum(1 for char in text if ord(char) > 10000)
+
+
+def _hashtag_count(text: str) -> int:
+    import re
+    return len(re.findall(r"#\w+", text))
+
+
+def _style_report_from_posts(page_name: str | None, posts: list[dict]) -> dict:
+    import re
+    words = []
+    for post in posts:
+        words.extend(re.findall(r"[A-Za-z\u0980-\u09FF]{3,}", post["content"].lower()))
+    stop = {"the", "and", "for", "with", "that", "this", "you", "your", "are", "from", "have", "will", "they", "but", "not"}
+    counts: dict[str, int] = {}
+    for word in words:
+        if word not in stop:
+            counts[word] = counts.get(word, 0) + 1
+    post_count = max(len(posts), 1)
+    word_lengths = [len(post["content"].split()) for post in posts]
+    emoji_counts = [_emoji_count(post["content"]) for post in posts]
+    hashtag_counts = [_hashtag_count(post["content"]) for post in posts]
+    question_count = sum(1 for post in posts if post["content"].strip().endswith("?"))
+    ai = analyze_style_with_mistral([post["content"] for post in posts], MISTRAL_MODEL)
+    day_scores: dict[str, list[float]] = {}
+    hour_scores: dict[str, list[float]] = {}
+    for post in posts:
+        posted_at = post.get("posted_at")
+        if posted_at:
+            day_scores.setdefault(posted_at.strftime("%a"), []).append(float(post["engagement_score"]))
+            hour_scores.setdefault(str(posted_at.hour), []).append(float(post["engagement_score"]))
+    return {
+        "page_name": page_name,
+        "writing_style": {
+            "average_words": round(sum(word_lengths) / post_count, 1) if word_lengths else 0,
+            "sentence_structure": "short punchy" if (sum(word_lengths) / post_count if word_lengths else 0) < 80 else "long narrative",
+            "reading_level": "simple conversational" if (sum(word_lengths) / post_count if word_lengths else 0) < 120 else "detailed",
+            "top_words": [{"text": word, "count": count} for word, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)[:30]],
+            "question_ending_percent": round((question_count / post_count) * 100, 1),
+            "emoji_post_percent": round((sum(1 for count in emoji_counts if count) / post_count) * 100, 1),
+            "average_emoji_count": round(sum(emoji_counts) / post_count, 1),
+            "hashtag_post_percent": round((sum(1 for count in hashtag_counts if count) / post_count) * 100, 1),
+            "average_hashtag_count": round(sum(hashtag_counts) / post_count, 1),
+        },
+        "topics": ai.get("topics", []),
+        "posting_behavior": {
+            "best_days": [{"day": day, "score": sum(scores) / len(scores)} for day, scores in day_scores.items()],
+            "best_hours": [{"hour": hour, "score": sum(scores) / len(scores)} for hour, scores in hour_scores.items()],
+            "average_posts_per_week": round(len(posts) / 4, 1),
+            "average_engagement_score": round(sum(float(post["engagement_score"]) for post in posts) / post_count, 1),
+        },
+        "top_posts": sorted(posts, key=lambda post: post["engagement_score"], reverse=True)[:5],
+        "summary": ai.get("summary") or "No AI summary was generated.",
+    }
+
+
+def _save_tracked_posts(db: Session, tracked: models.TrackedPage, posts: list[dict]) -> None:
+    for post in posts:
+        facebook_post_id = post.get("facebook_post_id")
+        if not facebook_post_id:
+            continue
+        exists = (
+            db.query(models.TrackedPagePost)
+            .filter(
+                models.TrackedPagePost.tracked_page_id == tracked.id,
+                models.TrackedPagePost.facebook_post_id == facebook_post_id,
+            )
+            .first()
+        )
+        if exists:
+            continue
+        topic = classify_post_topic(post["content"], MISTRAL_MODEL)
+        tracked_post = models.TrackedPagePost(
+            tracked_page_id=tracked.id,
+            facebook_post_id=facebook_post_id,
+            content=post["content"],
+            posted_at=post.get("posted_at"),
+            likes_count=post.get("likes_count", 0),
+            comments_count=post.get("comments_count", 0),
+            shares_count=post.get("shares_count", 0),
+            engagement_score=post.get("engagement_score", 0),
+            topic=topic,
+        )
+        db.add(tracked_post)
+        if topic:
+            _record_learning_signal(
+                db,
+                tracked.user_id,
+                None,
+                "competitor_trend",
+                {"tracked_page_id": tracked.id, "topic": topic, "content": post["content"][:500]},
+                float(post.get("engagement_score", 0) or 0),
+            )
+
+
+def _record_learning_signal(
+    db: Session,
+    user_id: int,
+    persona_id: int | None,
+    signal_type: str,
+    signal_data: dict,
+    outcome_score: float,
+) -> None:
+    db.add(models.LearningSignal(
+        user_id=user_id,
+        persona_id=persona_id,
+        signal_type=signal_type,
+        signal_data=signal_data,
+        outcome_score=outcome_score,
+    ))
+
+
+def _save_prompt_template_snapshot(db: Session, persona: models.AIPersona) -> None:
+    config = persona.prompt_config or {}
+    template_name = str(config.get("template") or persona.persona_name or "Custom")
+    existing = (
+        db.query(models.PromptTemplate)
+        .filter(models.PromptTemplate.persona_id == persona.id)
+        .order_by(models.PromptTemplate.created_at.desc())
+        .first()
+    )
+    target = existing or models.PromptTemplate(user_id=persona.user_id, persona_id=persona.id)
+    if existing is None:
+        db.add(target)
+    target.template_name = template_name
+    target.question_answers = config
+    target.assembled_prompt = persona.custom_instructions
+    target.raw_prompt = persona.custom_prompt
+    target.creativity_level = persona.creativity_level
+    examples = config.get("examples", "")
+    target.style_examples = [examples] if isinstance(examples, str) and examples.strip() else []
+    target.updated_at = datetime.now(timezone.utc)
+
+
+def _latest_learned_strategy_hint(db: Session, persona: models.AIPersona) -> str | None:
+    strategy = (
+        db.query(models.LearnedStrategy)
+        .filter(models.LearnedStrategy.persona_id == persona.id)
+        .order_by(models.LearnedStrategy.week_start_date.desc(), models.LearnedStrategy.created_at.desc())
+        .first()
+    )
+    if not strategy or float(strategy.confidence_score or 0) <= 0:
+        return None
+    data = strategy.strategy_data or {}
+    bits = []
+    if data.get("best_post_length"):
+        bits.append(f"best length: {data['best_post_length']}")
+    if data.get("best_posting_times"):
+        bits.append(f"best posting hours: {', '.join(map(str, data['best_posting_times']))}")
+    if data.get("best_content_formats"):
+        bits.append(f"formats: {', '.join(map(str, data['best_content_formats'][:4]))}")
+    if data.get("topics_to_increase"):
+        bits.append(f"increase topics: {', '.join(map(str, data['topics_to_increase'][:5]))}")
+    if data.get("topics_to_decrease"):
+        bits.append(f"avoid low-performing topics: {', '.join(map(str, data['topics_to_decrease'][:5]))}")
+    if not bits:
+        return None
+    return "Based on recent performance data, prioritize these approaches: " + "; ".join(bits) + "."
+
+
+def _week_start(value: datetime) -> date:
+    local_date = value.date()
+    return local_date - timedelta(days=local_date.weekday())
+
+
+def _synthesize_persona_strategy(db: Session, persona: models.AIPersona, week_start: date | None = None) -> models.LearnedStrategy | None:
+    since = datetime.now(timezone.utc) - timedelta(days=30)
+    signals = (
+        db.query(models.LearningSignal)
+        .filter(models.LearningSignal.persona_id == persona.id, models.LearningSignal.created_at >= since)
+        .order_by(models.LearningSignal.created_at.desc())
+        .all()
+    )
+    if not signals:
+        return None
+    signal_payload = [
+        {
+            "type": signal.signal_type,
+            "data": signal.signal_data,
+            "outcome_score": float(signal.outcome_score or 0),
+            "created_at": signal.created_at,
+        }
+        for signal in signals
+    ]
+    strategy_data = synthesize_learned_strategy(signal_payload, MISTRAL_MODEL)
+    confidence = float(strategy_data.get("confidence_score") or 0)
+    current_prompt = persona.custom_prompt or persona.custom_instructions or persona.niche
+    suggested_prompt = suggest_prompt_improvement(current_prompt, strategy_data, MISTRAL_MODEL)
+    target_week = week_start or _week_start(datetime.now(timezone.utc))
+    existing = (
+        db.query(models.LearnedStrategy)
+        .filter(models.LearnedStrategy.persona_id == persona.id, models.LearnedStrategy.week_start_date == target_week)
+        .first()
+    )
+    strategy = existing or models.LearnedStrategy(persona_id=persona.id, week_start_date=target_week)
+    if existing is None:
+        db.add(strategy)
+    strategy.strategy_data = strategy_data
+    strategy.suggested_prompt = suggested_prompt
+    strategy.confidence_score = confidence
+    strategy.applied_to_prompt = False
+    return strategy
+
+
+async def refresh_tracked_pages(db: Session, current_user: models.User) -> None:
+    tracked_pages = db.query(models.TrackedPage).filter(models.TrackedPage.user_id == current_user.id, models.TrackedPage.is_active.is_(True)).all()
+    if not tracked_pages:
+        return
+    token = _analysis_token(db, current_user)
+    now = datetime.now(timezone.utc)
+    for tracked in tracked_pages:
+        if tracked.last_checked_at and now - tracked.last_checked_at < timedelta(hours=20):
+            continue
+        page_name, posts = await _fetch_page_posts_for_analysis(tracked.page_identifier, token, limit=25)
+        tracked.page_name = page_name or tracked.page_name
+        _save_tracked_posts(db, tracked, posts)
+        tracked.last_checked_at = now
+    _detect_tracker_trends(db, current_user.id)
+    db.commit()
+
+
+async def refresh_due_tracked_pages_all() -> None:
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        user_ids = [
+            row[0]
+            for row in db.query(models.TrackedPage.user_id)
+            .filter(
+                models.TrackedPage.is_active.is_(True),
+                (models.TrackedPage.last_checked_at.is_(None)) | (models.TrackedPage.last_checked_at <= now - timedelta(hours=20)),
+            )
+            .distinct()
+            .all()
+        ]
+        for user_id in user_ids:
+            user = db.get(models.User, user_id)
+            if user:
+                try:
+                    await refresh_tracked_pages(db, user)
+                except Exception as exc:
+                    print(f"Tracked page refresh failed for user {user_id}: {exc}")
+    finally:
+        db.close()
+
+
+def _detect_tracker_trends(db: Session, user_id: int) -> None:
+    since = datetime.now(timezone.utc) - timedelta(days=7)
+    rows = (
+        db.query(models.TrackedPagePost, models.TrackedPage)
+        .join(models.TrackedPage, models.TrackedPage.id == models.TrackedPagePost.tracked_page_id)
+        .filter(models.TrackedPage.user_id == user_id, models.TrackedPagePost.posted_at >= since, models.TrackedPagePost.topic.isnot(None))
+        .all()
+    )
+    by_topic: dict[str, set[int]] = {}
+    scores: dict[str, list[float]] = {}
+    for post, page in rows:
+        topic = post.topic or ""
+        by_topic.setdefault(topic, set()).add(page.id)
+        scores.setdefault(topic, []).append(float(post.engagement_score or 0))
+    db.query(models.TrackerTrend).filter(models.TrackerTrend.user_id == user_id, models.TrackerTrend.generated_at >= since).delete()
+    for topic, page_ids in by_topic.items():
+        average = sum(scores.get(topic, [0])) / max(len(scores.get(topic, [])), 1)
+        if len(page_ids) >= 2 and average > 0:
+            db.add(models.TrackerTrend(
+                user_id=user_id,
+                topic=topic,
+                summary=f"Trending topic detected in your niche this week: {topic}. {len(page_ids)} pages you track have posted about this with above-average engagement.",
+                page_count=len(page_ids),
+            ))
 
 
 def _validate_posting_time_slots(slots: list[str]) -> bool:
@@ -920,6 +1280,9 @@ def create_ai_persona(
     persona.niche = niche
     persona.tone_tags = ",".join(tone_tags)
     persona.custom_instructions = payload.custom_instructions
+    persona.prompt_config = payload.prompt_config
+    persona.custom_prompt = payload.custom_prompt
+    persona.creativity_level = max(1, min(payload.creativity_level, 10))
     persona.language = payload.language
     persona.hashtags_enabled = payload.hashtags_enabled
     persona.hashtag_count = max(1, min(payload.hashtag_count, 5))
@@ -930,6 +1293,8 @@ def create_ai_persona(
     persona.is_active = payload.is_active
     persona.learning_mode_enabled = payload.learning_mode_enabled
     persona.minimum_engagement_threshold = max(0, payload.minimum_engagement_threshold)
+    db.flush()
+    _save_prompt_template_snapshot(db, persona)
     db.commit()
     db.refresh(persona)
     return _serialize_ai_persona(persona)
@@ -951,6 +1316,9 @@ def update_ai_persona(
     persona.niche = niche
     persona.tone_tags = ",".join(tone_tags)
     persona.custom_instructions = payload.custom_instructions
+    persona.prompt_config = payload.prompt_config
+    persona.custom_prompt = payload.custom_prompt
+    persona.creativity_level = max(1, min(payload.creativity_level, 10))
     persona.language = payload.language
     persona.hashtags_enabled = payload.hashtags_enabled
     persona.hashtag_count = max(1, min(payload.hashtag_count, 5))
@@ -962,6 +1330,7 @@ def update_ai_persona(
     persona.learning_mode_enabled = payload.learning_mode_enabled
     persona.minimum_engagement_threshold = max(0, payload.minimum_engagement_threshold)
     persona.updated_at = datetime.now(timezone.utc)
+    _save_prompt_template_snapshot(db, persona)
     db.commit()
     db.refresh(persona)
     return _serialize_ai_persona(persona)
@@ -981,6 +1350,416 @@ def ai_performance_insights(
 ):
     _get_owned_page(db, current_user.id, page_connection_id)
     return get_performance_insights(db, page_connection_id, current_user)
+
+
+@app.post("/api/style/analyze", response_model=schemas.StyleAnalysisRead)
+async def analyze_facebook_style(
+    payload: schemas.StyleAnalyzeRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    source_type = "own_page" if payload.own_page_connection_id else "public_page"
+    if payload.own_page_connection_id:
+        connection = _get_owned_page(db, current_user.id, payload.own_page_connection_id)
+        identifier = connection.page_id
+        token = decrypt_token(connection.page_access_token)
+    else:
+        identifier = _facebook_page_identifier(payload.page or "")
+        token = _analysis_token(db, current_user)
+    page_name, posts = await _fetch_page_posts_for_analysis(identifier, token)
+    if not posts:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No readable posts were found for this page")
+    report = _style_report_from_posts(page_name, posts)
+    analysis = models.StyleAnalysis(
+        user_id=current_user.id,
+        source_type=source_type,
+        source_identifier=identifier,
+        page_name=page_name,
+        report=report,
+    )
+    db.add(analysis)
+    db.commit()
+    db.refresh(analysis)
+    return analysis
+
+
+@app.get("/api/style/analyses", response_model=list[schemas.StyleAnalysisRead])
+def list_style_analyses(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(models.StyleAnalysis)
+        .filter(models.StyleAnalysis.user_id == current_user.id)
+        .order_by(models.StyleAnalysis.created_at.desc())
+        .limit(10)
+        .all()
+    )
+
+
+@app.post("/api/style/apply")
+def apply_style_to_persona(
+    payload: schemas.StyleApplyRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    persona = db.query(models.AIPersona).filter(models.AIPersona.id == payload.persona_id, models.AIPersona.user_id == current_user.id).first()
+    if persona is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persona not found")
+    style_text = ""
+    if payload.analysis_id:
+        analysis = db.query(models.StyleAnalysis).filter(models.StyleAnalysis.id == payload.analysis_id, models.StyleAnalysis.user_id == current_user.id).first()
+        if analysis is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Style analysis not found")
+        report = analysis.report or {}
+        style_text = (
+            f"Use this analyzed style as inspiration: {report.get('summary', '')} "
+            f"Common topics: {', '.join(str(topic.get('name', topic)) for topic in report.get('topics', [])[:8])}. "
+            "Do not copy exact wording; adapt the pattern for my own page."
+        )
+    elif payload.inspiration_post:
+        style_text = f"Use this post as style inspiration, without copying it: {payload.inspiration_post.strip()}"
+    if not style_text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Analysis or inspiration post is required")
+    existing = persona.custom_instructions or ""
+    persona.custom_instructions = f"{existing}\n\n{style_text}".strip()
+    if persona.custom_prompt:
+        persona.custom_prompt = f"{persona.custom_prompt.strip()}\n\nSTYLE INSPIRATION:\n{style_text}"
+    _record_learning_signal(
+        db,
+        current_user.id,
+        persona.id,
+        "style_match",
+        {"style_text": style_text[:1200], "analysis_id": payload.analysis_id},
+        0.5,
+    )
+    persona.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"success": True}
+
+
+@app.get("/api/tracker", response_model=schemas.TrackerDashboardResponse)
+def tracker_dashboard(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    tracked = db.query(models.TrackedPage).filter(models.TrackedPage.user_id == current_user.id).order_by(models.TrackedPage.created_at.desc()).all()
+    since = datetime.now(timezone.utc) - timedelta(days=7)
+    rows = (
+        db.query(models.TrackedPagePost, models.TrackedPage)
+        .join(models.TrackedPage, models.TrackedPage.id == models.TrackedPagePost.tracked_page_id)
+        .filter(models.TrackedPage.user_id == current_user.id, models.TrackedPagePost.posted_at >= since)
+        .order_by(models.TrackedPagePost.engagement_score.desc())
+        .limit(50)
+        .all()
+    )
+    comparison = []
+    for page in tracked:
+        page_posts = [post for post, owner in rows if owner.id == page.id]
+        if not page_posts:
+            comparison.append({"id": page.id, "nickname": page.nickname, "posts": 0, "average_likes": 0, "average_comments": 0, "average_shares": 0, "most_active_day": "-", "most_used_topics": "-"})
+            continue
+        day_counts: dict[str, int] = {}
+        topic_counts: dict[str, int] = {}
+        for post in page_posts:
+            if post.posted_at:
+                day_counts[post.posted_at.strftime("%a")] = day_counts.get(post.posted_at.strftime("%a"), 0) + 1
+            if post.topic:
+                topic_counts[post.topic] = topic_counts.get(post.topic, 0) + 1
+        comparison.append({
+            "id": page.id,
+            "nickname": page.nickname,
+            "posts": len(page_posts),
+            "average_likes": round(sum(post.likes_count for post in page_posts) / len(page_posts), 1),
+            "average_comments": round(sum(post.comments_count for post in page_posts) / len(page_posts), 1),
+            "average_shares": round(sum(post.shares_count for post in page_posts) / len(page_posts), 1),
+            "most_active_day": max(day_counts.items(), key=lambda item: item[1])[0] if day_counts else "-",
+            "most_used_topics": ", ".join(topic for topic, _ in sorted(topic_counts.items(), key=lambda item: item[1], reverse=True)[:3]) or "-",
+        })
+    trends = (
+        db.query(models.TrackerTrend)
+        .filter(models.TrackerTrend.user_id == current_user.id, models.TrackerTrend.is_dismissed.is_(False))
+        .order_by(models.TrackerTrend.generated_at.desc())
+        .limit(5)
+        .all()
+    )
+    return {
+        "tracked_pages": [{"id": page.id, "nickname": page.nickname, "page_identifier": page.page_identifier, "page_name": page.page_name, "is_active": page.is_active, "last_checked_at": page.last_checked_at} for page in tracked],
+        "posts": [{"id": post.id, "page_name": page.nickname, "content": post.content, "posted_at": post.posted_at, "likes_count": post.likes_count, "comments_count": post.comments_count, "shares_count": post.shares_count, "engagement_score": float(post.engagement_score or 0), "topic": post.topic} for post, page in rows],
+        "comparison": comparison,
+        "trends": [{"id": trend.id, "topic": trend.topic, "summary": trend.summary, "page_count": trend.page_count, "generated_at": trend.generated_at} for trend in trends],
+    }
+
+
+@app.post("/api/tracker/pages", response_model=schemas.TrackedPageRead, status_code=status.HTTP_201_CREATED)
+async def add_tracked_page(
+    payload: schemas.TrackedPageCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if db.query(models.TrackedPage).filter(models.TrackedPage.user_id == current_user.id).count() >= 10:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You can track up to 10 pages")
+    identifier = _facebook_page_identifier(payload.page)
+    token = _analysis_token(db, current_user)
+    page_name, posts = await _fetch_page_posts_for_analysis(identifier, token, limit=10)
+    tracked = models.TrackedPage(user_id=current_user.id, page_identifier=identifier, page_name=page_name, nickname=payload.nickname.strip() or page_name or identifier)
+    db.add(tracked)
+    db.flush()
+    _save_tracked_posts(db, tracked, posts)
+    tracked.last_checked_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(tracked)
+    return tracked
+
+
+@app.post("/api/tracker/refresh")
+async def refresh_tracker_now(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    await refresh_tracked_pages(db, current_user)
+    return {"success": True}
+
+
+@app.delete("/api/tracker/pages/{tracked_page_id}")
+def delete_tracked_page(
+    tracked_page_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    tracked = db.query(models.TrackedPage).filter(models.TrackedPage.id == tracked_page_id, models.TrackedPage.user_id == current_user.id).first()
+    if tracked is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tracked page not found")
+    db.query(models.TrackedPagePost).filter(models.TrackedPagePost.tracked_page_id == tracked.id).delete()
+    db.delete(tracked)
+    db.commit()
+    return {"success": True}
+
+
+def _latest_snapshot_map(db: Session, post_ids: list[int]) -> dict[int, models.PostEngagementSnapshot]:
+    if not post_ids:
+        return {}
+    snapshots = (
+        db.query(models.PostEngagementSnapshot)
+        .filter(models.PostEngagementSnapshot.post_id.in_(post_ids))
+        .order_by(models.PostEngagementSnapshot.snapshot_taken_at.desc())
+        .all()
+    )
+    latest = {}
+    for snapshot in snapshots:
+        latest.setdefault(snapshot.post_id, snapshot)
+    return latest
+
+
+def _dashboard_action_items(
+    personas: list[models.AIPersona],
+    posts: list[models.PostLog],
+    recommendations: list[models.AIRecommendation],
+) -> list[dict]:
+    now = datetime.now(timezone.utc)
+    actions = [
+        {"id": f"ai-{item.id}", "text": item.recommendation_text, "action_label": "Review", "href": "/dashboard/analytics", "priority": "high"}
+        for item in recommendations[:3]
+    ]
+    for persona in personas:
+        if persona.last_auto_post_at is None or now - persona.last_auto_post_at > timedelta(days=4):
+            actions.append({
+                "id": f"persona-stale-{persona.id}",
+                "text": f"{persona.persona_name} has not posted in 4 days. Consider generating a post now.",
+                "action_label": "Generate Now",
+                "href": "/dashboard/create",
+                "priority": "high",
+            })
+            break
+    recent = posts[:5]
+    zero_comments = sum(1 for post in recent if getattr(post, "latest_comments_count", 0) == 0)
+    if len(recent) >= 5 and zero_comments >= 3:
+        actions.append({
+            "id": "weak-comments",
+            "text": "3 of your last 5 posts had zero comments. Try adding a stronger question at the end of your prompt.",
+            "action_label": "Edit Prompt",
+            "href": "/dashboard/ai-settings",
+            "priority": "medium",
+        })
+    lengths = [len((post.content or "").split()) for post in posts[:10]]
+    if len(lengths) >= 5 and max(lengths) - min(lengths) <= 25:
+        actions.append({
+            "id": "length-variety",
+            "text": "Your recent posts are very similar in length. Try a short 1-3 line post for variety.",
+            "action_label": "Generate Short Post",
+            "href": "/dashboard/create",
+            "priority": "medium",
+        })
+    return actions[:5]
+
+
+def _refresh_daily_dashboard_recommendations(db: Session, pages: list[models.FacebookConnection], user: models.User) -> None:
+    if not pages or not MISTRAL_API_KEY:
+        return
+    now = datetime.now(timezone.utc)
+    for page in pages:
+        latest = (
+            db.query(models.AIRecommendation)
+            .filter(models.AIRecommendation.page_connection_id == page.id)
+            .order_by(models.AIRecommendation.generated_at.desc())
+            .first()
+        )
+        if latest and latest.generated_at and now - latest.generated_at < timedelta(hours=20):
+            continue
+        summary = get_performance_insights(db, page.id, user)
+        if not summary.get("enabled"):
+            summary = {
+                "page": page.page_name,
+                "personas": [
+                    {"name": persona.persona_name, "score": float(persona.performance_score or 0.5), "failures": persona.consecutive_failures}
+                    for persona in db.query(models.AIPersona).filter(models.AIPersona.page_connection_id == page.id).all()
+                ],
+                "recent_posts": [
+                    {"content": post.content[:240], "status": post.status, "posted_at": post.posted_at}
+                    for post in db.query(models.PostLog).filter(models.PostLog.facebook_connection_id == page.id).order_by(models.PostLog.id.desc()).limit(10).all()
+                ],
+            }
+        texts = generate_ai_recommendations(page.page_name, summary, MISTRAL_MODEL)
+        if not texts:
+            continue
+        db.query(models.AIRecommendation).filter(models.AIRecommendation.page_connection_id == page.id).update({"is_dismissed": True})
+        for text in texts[:3]:
+            db.add(models.AIRecommendation(page_connection_id=page.id, recommendation_text=text, generated_at=now))
+    db.commit()
+
+
+@app.get("/api/dashboard/intelligence", response_model=schemas.DashboardIntelligenceResponse)
+def dashboard_intelligence(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    pages = (
+        db.query(models.FacebookConnection)
+        .filter(models.FacebookConnection.user_id == current_user.id)
+        .order_by(models.FacebookConnection.connected_at.desc())
+        .all()
+    )
+    page_ids = [page.id for page in pages]
+    _refresh_daily_dashboard_recommendations(db, pages, current_user)
+    personas = db.query(models.AIPersona).filter(models.AIPersona.user_id == current_user.id).all()
+    posts = (
+        db.query(models.PostLog)
+        .filter(models.PostLog.user_id == current_user.id)
+        .order_by(models.PostLog.posted_at.desc().nullslast(), models.PostLog.id.desc())
+        .limit(30)
+        .all()
+    )
+    latest_snapshots = _latest_snapshot_map(db, [post.id for post in posts])
+    for post in posts:
+        snapshot = latest_snapshots.get(post.id)
+        post.latest_comments_count = snapshot.comments_count if snapshot else 0
+
+    next_post = (
+        db.query(models.PostLog)
+        .filter(
+            models.PostLog.user_id == current_user.id,
+            models.PostLog.status == "scheduled",
+            models.PostLog.scheduled_at >= now,
+        )
+        .order_by(models.PostLog.scheduled_at.asc())
+        .first()
+    )
+    last_post = next((post for post in posts if post.status in ("published", "success")), None)
+    last_snapshot = latest_snapshots.get(last_post.id) if last_post else None
+
+    since_7 = now - timedelta(days=7)
+    top_post_row = (
+        db.query(models.PostLog, models.PostEngagementSnapshot)
+        .join(models.PostEngagementSnapshot, models.PostEngagementSnapshot.post_id == models.PostLog.id)
+        .filter(models.PostLog.user_id == current_user.id, models.PostLog.posted_at >= since_7)
+        .order_by(models.PostEngagementSnapshot.engagement_score.desc())
+        .first()
+    )
+    slot_rows = (
+        db.query(models.PostLog, models.PostEngagementSnapshot)
+        .join(models.PostEngagementSnapshot, models.PostEngagementSnapshot.post_id == models.PostLog.id)
+        .filter(models.PostLog.user_id == current_user.id, models.PostLog.posted_at >= since_7)
+        .all()
+    )
+    slot_scores: dict[str, list[float]] = {}
+    persona_scores: dict[int, list[float]] = {}
+    for post, snapshot in slot_rows:
+        if post.posted_at:
+            slot_scores.setdefault(post.posted_at.strftime("%a %I%p"), []).append(float(snapshot.engagement_score or 0))
+        if post.ai_persona_id:
+            persona_scores.setdefault(post.ai_persona_id, []).append(float(snapshot.engagement_score or 0))
+    best_slot = max(slot_scores.items(), key=lambda item: sum(item[1]) / len(item[1])) if slot_scores else None
+    best_persona_id = max(persona_scores.items(), key=lambda item: sum(item[1]) / len(item[1]))[0] if persona_scores else None
+    best_persona = next((persona for persona in personas if persona.id == best_persona_id), None)
+
+    recommendations = (
+        db.query(models.AIRecommendation)
+        .filter(models.AIRecommendation.page_connection_id.in_(page_ids), models.AIRecommendation.is_dismissed.is_(False))
+        .order_by(models.AIRecommendation.generated_at.desc())
+        .limit(5)
+        .all()
+        if page_ids else []
+    )
+    published_count = db.query(func.count(models.PostLog.id)).filter(models.PostLog.user_id == current_user.id, models.PostLog.status.in_(["published", "success"])).scalar() or 0
+    prompt_done = any(bool(persona.custom_prompt and persona.custom_prompt.strip()) for persona in personas)
+    auto_schedule_done = any(persona.assigned_days and persona.posting_time_slots for persona in personas)
+    first_post_at = db.query(func.min(models.PostLog.posted_at)).filter(models.PostLog.user_id == current_user.id, models.PostLog.status.in_(["published", "success"])).scalar()
+    learned_7_days = bool(first_post_at and now - first_post_at >= timedelta(days=7))
+    report_ready = bool(top_post_row or recommendations)
+    onboarding = [
+        {"label": "Connect your Facebook Page", "done": bool(pages), "href": "/dashboard/settings"},
+        {"label": "Build your first AI Persona", "done": bool(personas), "href": "/dashboard/ai-settings"},
+        {"label": "Build your custom prompt", "done": prompt_done, "href": "/dashboard/ai-settings"},
+        {"label": "Generate and publish your first post", "done": published_count > 0, "href": "/dashboard/create"},
+        {"label": "Set up auto posting schedule", "done": auto_schedule_done, "href": "/dashboard/ai-settings"},
+        {"label": "Let the system learn for 7 days", "done": learned_7_days, "href": "/dashboard/analytics"},
+        {"label": "Review your first performance report", "done": report_ready, "href": "/dashboard/analytics"},
+    ]
+    cron_age_seconds = (now - last_scheduler_run_at).total_seconds() if last_scheduler_run_at else None
+    warnings = []
+    for page in pages:
+        if page.connection_status != "connected":
+            warnings.append({"level": "amber", "text": f"{page.page_name} needs reconnection.", "href": "/dashboard/settings"})
+        elif page.token_expires_at and page.token_expires_at <= now + timedelta(days=7):
+            warnings.append({"level": "amber", "text": f"{page.page_name} token expires soon. Reconnect to avoid interrupted posting.", "href": "/dashboard/settings"})
+    if cron_age_seconds is None or cron_age_seconds > 600:
+        warnings.append({"level": "red", "text": "Scheduler health has not checked in within 10 minutes. Auto posting may be broken.", "href": "/dashboard"})
+    for persona in personas:
+        if persona.consecutive_failures >= 3:
+            warnings.append({"level": "amber", "text": f"{persona.persona_name} has failed to generate or publish 3 times in a row.", "href": "/dashboard/ai-settings"})
+        if float(persona.performance_score or 0.5) < 0.3:
+            warnings.append({"level": "amber", "text": f"{persona.persona_name} performance dropped below 0.3. Review its prompt.", "href": "/dashboard/ai-settings"})
+
+    return {
+        "now": now,
+        "next_scheduled_post": None if not next_post else {
+            "id": next_post.id,
+            "content": next_post.content,
+            "scheduled_at": next_post.scheduled_at,
+            "minutes_until": max(0, int(((next_post.scheduled_at or now) - now).total_seconds() // 60)),
+        },
+        "last_published_post": None if not last_post else {
+            "id": last_post.id,
+            "content": last_post.content,
+            "posted_at": last_post.posted_at,
+            "likes_count": last_snapshot.likes_count if last_snapshot else 0,
+            "comments_count": last_snapshot.comments_count if last_snapshot else 0,
+            "shares_count": last_snapshot.shares_count if last_snapshot else 0,
+            "reach_count": last_snapshot.reach_count if last_snapshot else 0,
+            "engagement_score": float(last_snapshot.engagement_score or 0) if last_snapshot else 0,
+        },
+        "facebook_connections": [{"id": page.id, "page_name": page.page_name, "status": page.connection_status, "token_expires_at": page.token_expires_at} for page in pages],
+        "cron_health": {"ok": bool(cron_age_seconds is not None and cron_age_seconds <= 300), "last_run_at": last_scheduler_run_at, "age_seconds": cron_age_seconds},
+        "onboarding_steps": onboarding,
+        "learned_insights": {
+            "best_post": None if not top_post_row else {"id": top_post_row[0].id, "content": top_post_row[0].content, "score": float(top_post_row[1].engagement_score or 0), "insight": "This was your strongest post in the last 7 days. Use its angle as a reference for the next prompt test."},
+            "best_time_slot": None if not best_slot else {"slot": best_slot[0], "score": sum(best_slot[1]) / len(best_slot[1]), "insight": f"{best_slot[0]} is your strongest recent slot. Consider scheduling another test post there."},
+            "best_persona": None if not best_persona else {"id": best_persona.id, "name": best_persona.persona_name, "score": float(best_persona.performance_score or 0.5), "insight": f"{best_persona.persona_name} is leading this week. Let it post more often while it is working."},
+        },
+        "action_items": _dashboard_action_items(personas, posts, recommendations),
+        "warnings": warnings[:5],
+    }
 
 
 @app.post("/api/ai/personas/{persona_id}/reset-learning", response_model=schemas.PersonaLearningResetResponse)
@@ -1018,18 +1797,33 @@ def generate_ai_post(
         .all()
     ]
     try:
-        content = generate_ai_facebook_post(
-            settings.niche,
-            [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
-            settings.custom_instructions,
-            settings.language,
-            settings.hashtags_enabled,
-            settings.hashtag_count,
-            settings.always_include_engagement_hook,
-            recent_topics,
-            payload.topic_hint or (build_learning_prompt_hint(db, settings) if user_has_learning_access(current_user) else None),
-            MISTRAL_MODEL,
-        )
+        hint_parts = [
+            build_learning_prompt_hint(db, settings) if user_has_learning_access(current_user) else None,
+            build_strategy_prompt_hint(db, settings),
+        ]
+        learning_hint = " ".join(part for part in hint_parts if part)
+        if settings.custom_prompt and settings.custom_prompt.strip():
+            content = generate_ai_facebook_post_from_prompt(
+                settings.custom_prompt,
+                settings.creativity_level,
+                recent_topics,
+                payload.topic_hint,
+                learning_hint,
+                MISTRAL_MODEL,
+            )
+        else:
+            content = generate_ai_facebook_post(
+                settings.niche,
+                [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
+                settings.custom_instructions,
+                settings.language,
+                settings.hashtags_enabled,
+                settings.hashtag_count,
+                settings.always_include_engagement_hook,
+                recent_topics,
+                payload.topic_hint or learning_hint,
+                MISTRAL_MODEL,
+            )
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     return {"content": content}
@@ -1060,18 +1854,33 @@ async def generate_and_publish_ai_post(
         content = ""
         max_attempts = 3
         for attempt in range(max_attempts):
-            content = generate_ai_facebook_post(
-                settings.niche,
-                [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
-                settings.custom_instructions,
-                settings.language,
-                settings.hashtags_enabled,
-                settings.hashtag_count,
-                settings.always_include_engagement_hook,
-                recent_topics,
-                payload.topic_hint or (build_learning_prompt_hint(db, settings) if user_has_learning_access(current_user) else None),
-                MISTRAL_MODEL,
-            )
+            hint_parts = [
+                build_learning_prompt_hint(db, settings) if user_has_learning_access(current_user) else None,
+                build_strategy_prompt_hint(db, settings),
+            ]
+            learning_hint = " ".join(part for part in hint_parts if part)
+            if settings.custom_prompt and settings.custom_prompt.strip():
+                content = generate_ai_facebook_post_from_prompt(
+                    settings.custom_prompt,
+                    settings.creativity_level,
+                    recent_topics,
+                    payload.topic_hint,
+                    learning_hint,
+                    MISTRAL_MODEL,
+                )
+            else:
+                content = generate_ai_facebook_post(
+                    settings.niche,
+                    [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
+                    settings.custom_instructions,
+                    settings.language,
+                    settings.hashtags_enabled,
+                    settings.hashtag_count,
+                    settings.always_include_engagement_hook,
+                    recent_topics,
+                    payload.topic_hint or learning_hint,
+                    MISTRAL_MODEL,
+                )
             score = check_post_quality(content, MISTRAL_MODEL)
             if score >= 6:
                 break

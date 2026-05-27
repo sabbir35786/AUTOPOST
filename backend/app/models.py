@@ -182,6 +182,113 @@ class AIRecommendation(Base):
     is_dismissed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
+class PromptTemplate(Base):
+    __tablename__ = "prompt_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    persona_id: Mapped[int] = mapped_column(ForeignKey("ai_personas.id"), index=True, nullable=False)
+    template_name: Mapped[str] = mapped_column(String, default="Custom", nullable=False)
+    question_answers: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    assembled_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    creativity_level: Mapped[int] = mapped_column(Integer, default=7, nullable=False)
+    style_examples: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class LearningSignal(Base):
+    __tablename__ = "learning_signals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    persona_id: Mapped[int | None] = mapped_column(ForeignKey("ai_personas.id"), index=True, nullable=True)
+    signal_type: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    signal_data: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    outcome_score: Mapped[float] = mapped_column(Numeric(10, 4), default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class LearnedStrategy(Base):
+    __tablename__ = "learned_strategy"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    persona_id: Mapped[int] = mapped_column(ForeignKey("ai_personas.id"), index=True, nullable=False)
+    strategy_data: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    suggested_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence_score: Mapped[float] = mapped_column(Numeric(5, 4), default=0, nullable=False)
+    week_start_date: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    applied_to_prompt: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class DashboardSuggestion(Base):
+    __tablename__ = "dashboard_suggestions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    suggestion_text: Mapped[str] = mapped_column(Text, nullable=False)
+    action_type: Mapped[str] = mapped_column(String, nullable=False)
+    action_data: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    is_dismissed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class StyleAnalysis(Base):
+    __tablename__ = "style_analyses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    source_type: Mapped[str] = mapped_column(String, nullable=False)
+    source_identifier: Mapped[str] = mapped_column(Text, nullable=False)
+    page_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    report: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class TrackedPage(Base):
+    __tablename__ = "tracked_pages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    page_identifier: Mapped[str] = mapped_column(Text, nullable=False)
+    page_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    nickname: Mapped[str] = mapped_column(String, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class TrackedPagePost(Base):
+    __tablename__ = "tracked_page_posts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tracked_page_id: Mapped[int] = mapped_column(ForeignKey("tracked_pages.id"), index=True, nullable=False)
+    facebook_post_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    likes_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    comments_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    shares_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    engagement_score: Mapped[float] = mapped_column(Numeric(10, 4), default=0, nullable=False)
+    topic: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class TrackerTrend(Base):
+    __tablename__ = "tracker_trends"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
+    topic: Mapped[str] = mapped_column(String, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    page_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    is_dismissed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
 class AIPersona(Base):
     __tablename__ = "ai_personas"
 
@@ -196,6 +303,9 @@ class AIPersona(Base):
     niche: Mapped[str] = mapped_column(Text, nullable=False)
     tone_tags: Mapped[str] = mapped_column(Text, nullable=False)
     custom_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    custom_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    creativity_level: Mapped[int] = mapped_column(Integer, default=7, nullable=False)
     language: Mapped[str] = mapped_column(String, default="English", nullable=False)
     hashtags_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     hashtag_count: Mapped[int] = mapped_column(Integer, default=3, nullable=False)

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
@@ -168,6 +168,9 @@ class AIPersonaBase(BaseModel):
     niche: str
     tone_tags: list[str] = Field(default_factory=list)
     custom_instructions: str | None = None
+    prompt_config: dict | None = None
+    custom_prompt: str | None = None
+    creativity_level: int = 7
     language: str = "English"
     hashtags_enabled: bool = False
     hashtag_count: int = 3
@@ -245,8 +248,84 @@ class PerformanceInsightsResponse(BaseModel):
     recommendations: list[dict] = Field(default_factory=list)
 
 
+class DashboardIntelligenceResponse(BaseModel):
+    now: datetime
+    next_scheduled_post: dict | None = None
+    last_published_post: dict | None = None
+    facebook_connections: list[dict] = Field(default_factory=list)
+    cron_health: dict
+    onboarding_steps: list[dict] = Field(default_factory=list)
+    learned_insights: dict
+    action_items: list[dict] = Field(default_factory=list)
+    warnings: list[dict] = Field(default_factory=list)
+
+
 class PersonaLearningResetResponse(BaseModel):
     success: bool
+
+
+class StyleAnalyzeRequest(BaseModel):
+    page: str | None = None
+    own_page_connection_id: int | None = None
+
+
+class StyleAnalysisRead(BaseModel):
+    id: int
+    source_type: str
+    source_identifier: str
+    page_name: str | None = None
+    report: dict
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class StyleApplyRequest(BaseModel):
+    persona_id: int
+    analysis_id: int | None = None
+    inspiration_post: str | None = None
+
+
+class TrackedPageCreate(BaseModel):
+    page: str
+    nickname: str
+
+
+class TrackedPageRead(BaseModel):
+    id: int
+    page_identifier: str
+    page_name: str | None = None
+    nickname: str
+    is_active: bool
+    last_checked_at: datetime | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TrackerDashboardResponse(BaseModel):
+    tracked_pages: list[dict] = Field(default_factory=list)
+    posts: list[dict] = Field(default_factory=list)
+    comparison: list[dict] = Field(default_factory=list)
+    trends: list[dict] = Field(default_factory=list)
+
+
+class LearnedStrategyRead(BaseModel):
+    id: int
+    persona_id: int
+    strategy_data: dict
+    suggested_prompt: str | None = None
+    confidence_score: float
+    week_start_date: date
+    applied_to_prompt: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class StrategyDecisionRequest(BaseModel):
+    action: str
+    prompt: str | None = None
 
 
 class ChatMessage(BaseModel):

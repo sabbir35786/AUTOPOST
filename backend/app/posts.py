@@ -16,8 +16,8 @@ from app.config import (
 )
 from app.crypto import decrypt_token
 from app.database import SessionLocal
-from app.mistral_service import generate_ai_facebook_post, check_post_quality, extract_post_topic
-from app.learning.service import build_learning_prompt_hint, should_persona_post_now, user_has_learning_access
+from app.mistral_service import generate_ai_facebook_post, generate_ai_facebook_post_from_prompt, check_post_quality, extract_post_topic
+from app.learning.service import build_learning_prompt_hint, build_strategy_prompt_hint, should_persona_post_now, user_has_learning_access
 
 
 posting_lock = Lock()
@@ -479,17 +479,31 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
             content = ""
             max_attempts = 3
             for attempt in range(max_attempts):
-                content = generate_ai_facebook_post(
-                    settings.niche,
-                    [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
-                    settings.custom_instructions,
-                    settings.language,
-                    settings.hashtags_enabled,
-                    settings.hashtag_count,
-                    settings.always_include_engagement_hook,
-                    recent_topics,
+                hint_parts = [
                     build_learning_prompt_hint(db, settings) if user_has_learning_access(user) else None,
-                )
+                    build_strategy_prompt_hint(db, settings),
+                ]
+                learning_hint = " ".join(part for part in hint_parts if part)
+                if settings.custom_prompt and settings.custom_prompt.strip():
+                    content = generate_ai_facebook_post_from_prompt(
+                        settings.custom_prompt,
+                        settings.creativity_level,
+                        recent_topics,
+                        None,
+                        learning_hint,
+                    )
+                else:
+                    content = generate_ai_facebook_post(
+                        settings.niche,
+                        [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
+                        settings.custom_instructions,
+                        settings.language,
+                        settings.hashtags_enabled,
+                        settings.hashtag_count,
+                        settings.always_include_engagement_hook,
+                        recent_topics,
+                        learning_hint,
+                    )
                 score = check_post_quality(content)
                 if score >= 6:
                     break

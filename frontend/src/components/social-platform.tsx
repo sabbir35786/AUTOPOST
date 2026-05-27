@@ -7,6 +7,7 @@ import { usePathname, useRouter } from "next/navigation"
 import {
   BarChart3,
   CalendarClock,
+  Check,
   FileText,
   Home,
   Loader2,
@@ -14,8 +15,10 @@ import {
   PenLine,
   Plus,
   Plug,
+  Radar,
   RefreshCw,
   RotateCcw,
+  Search,
   Settings,
   Sparkles,
   Trash2,
@@ -72,6 +75,9 @@ type AIPersona = {
   niche: string
   tone_tags: string[]
   custom_instructions: string | null
+  prompt_config?: PromptStudioConfig | null
+  custom_prompt?: string | null
+  creativity_level: number
   language: string
   hashtags_enabled: boolean
   hashtag_count: number
@@ -85,6 +91,21 @@ type AIPersona = {
   performance_score?: number
   total_posts_published?: number
   learned_patterns_summary?: string | null
+}
+
+type PromptStudioConfig = {
+  template: string
+  audience: string
+  goal: string
+  brand_personality: string[]
+  always_topics: string[]
+  never_topics: string[]
+  every_post_includes: string[]
+  never_do: string[]
+  length: "Short" | "Medium" | "Long"
+  vary_length: boolean
+  structure: string
+  examples: string
 }
 
 type PerformanceInsights = {
@@ -114,17 +135,50 @@ type Analytics = {
   posts_per_day: { date: string; count: number }[]
 }
 
+type DashboardIntelligence = {
+  next_scheduled_post?: { id: number; content: string; scheduled_at?: string | null; minutes_until: number } | null
+  last_published_post?: { id: number; content: string; posted_at?: string | null; likes_count: number; comments_count: number; shares_count: number; reach_count: number; engagement_score: number } | null
+  facebook_connections: { id: number; page_name: string; status: string; token_expires_at?: string | null }[]
+  cron_health: { ok: boolean; last_run_at?: string | null; age_seconds?: number | null }
+  onboarding_steps: { label: string; done: boolean; href: string }[]
+  learned_insights: {
+    best_post?: { id: number; content: string; score: number; insight: string } | null
+    best_time_slot?: { slot: string; score: number; insight: string } | null
+    best_persona?: { id: number; name: string; score: number; insight: string } | null
+  }
+  action_items: { id: string; text: string; action_label: string; href: string; priority: string }[]
+  warnings: { level: "red" | "amber"; text: string; href: string }[]
+}
+
+type StyleAnalysis = {
+  id: number
+  source_type: string
+  source_identifier: string
+  page_name?: string | null
+  report: any
+  created_at: string
+}
+
+type TrackerDashboard = {
+  tracked_pages: { id: number; nickname: string; page_identifier: string; page_name?: string | null; is_active: boolean; last_checked_at?: string | null }[]
+  posts: { id: number; page_name: string; content: string; posted_at?: string | null; likes_count: number; comments_count: number; shares_count: number; engagement_score: number; topic?: string | null }[]
+  comparison: { id: number; nickname: string; posts: number; average_likes: number; average_comments: number; average_shares: number; most_active_day: string; most_used_topics: string }[]
+  trends: { id: number; topic: string; summary: string; page_count: number; generated_at: string }[]
+}
+
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: Home },
   { href: "/dashboard/create", label: "Create Post", icon: PenLine },
-  { href: "/dashboard/ai-settings", label: "AI Personas", icon: Sparkles },
+  { href: "/dashboard/ai-settings", label: "Prompt Studio", icon: Sparkles },
+  { href: "/dashboard/style-analyzer", label: "Style Analyzer", icon: Search },
+  { href: "/dashboard/page-tracker", label: "Page Tracker", icon: Radar },
   { href: "/dashboard/scheduled", label: "Scheduled Posts", icon: CalendarClock },
   { href: "/dashboard/published", label: "Published Posts", icon: FileText },
   { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ]
 
-export function SocialPlatform({ view }: { view: "home" | "create" | "ai-settings" | "scheduled" | "published" | "analytics" | "settings" }) {
+export function SocialPlatform({ view }: { view: "home" | "create" | "ai-settings" | "style-analyzer" | "page-tracker" | "scheduled" | "published" | "analytics" | "settings" }) {
   const router = useRouter()
   const pathname = usePathname()
   const { user, isAuthenticated, isLoading, logout } = useAuth()
@@ -240,6 +294,8 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
         {!loading && view === "home" ? <HomeView pages={pages} posts={posts} onConnected={load} timezone={timezone} /> : null}
         {!loading && view === "create" ? <Composer pages={pages} timezone={timezone} onSaved={load} /> : null}
         {!loading && view === "ai-settings" ? <AISettingsView pages={pages} /> : null}
+        {!loading && view === "style-analyzer" ? <StyleAnalyzerView pages={pages} /> : null}
+        {!loading && view === "page-tracker" ? <PageTrackerView pages={pages} /> : null}
         {!loading && view === "scheduled" ? <PostList title="Scheduled Posts" posts={posts.filter((post) => post.status === "scheduled")} emptyAction="/dashboard/create" emptyText="No upcoming posts yet." timezone={timezone} onChanged={load} /> : null}
         {!loading && view === "published" ? <PostList title="Published Posts" posts={posts.filter((post) => post.status === "published" || post.status === "success")} emptyAction="/dashboard/create" emptyText="No published posts yet." timezone={timezone} published onChanged={load} /> : null}
         {!loading && view === "analytics" ? <AnalyticsView analytics={analytics} setAnalytics={setAnalytics} /> : null}
@@ -250,21 +306,42 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
 }
 
 function HomeView({ pages, posts, onConnected, timezone }: { pages: PageConnection[]; posts: Post[]; onConnected: () => void; timezone: string }) {
+  const [intel, setIntel] = React.useState<DashboardIntelligence | null>(null)
+  React.useEffect(() => {
+    api.get<DashboardIntelligence>("/api/dashboard/intelligence").then((response) => setIntel(response.data)).catch(() => setIntel(null))
+  }, [])
   const published = posts.filter((post) => post.status === "published" || post.status === "success").length
   const scheduled = posts.filter((post) => post.status === "scheduled").length
   const failed = posts.filter((post) => post.status.includes("failed")).length
+  const onboardingDone = intel?.onboarding_steps.every((step) => step.done)
   return (
     <>
-      <PageTitle title="Dashboard" subtitle="Manage your Facebook Page posts without touching the API." />
+      <PageTitle title="Smart Dashboard" subtitle="Live status, learned patterns, and the next best action." />
+      {intel?.warnings.map((warning) => <div key={warning.text} className={cn("rounded-md border p-4 text-sm", warning.level === "red" ? "border-red-200 bg-red-50 text-red-700" : "border-amber-200 bg-amber-50 text-amber-700")}><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><span>{warning.text}</span><Button asChild variant="outline"><Link href={warning.href}>Fix Now</Link></Button></div></div>)}
       {!pages.length ? <ConnectEmpty onConnected={onConnected} /> : <ConnectedBanner page={pages[0]} onConnected={onConnected} />}
       <section className="grid gap-4 md:grid-cols-3">
         <Stat label="Posts Published This Month" value={published} tone="green" />
         <Stat label="Posts Scheduled" value={scheduled} tone="amber" />
         <Stat label="Posts Failed" value={failed} tone="red" />
       </section>
+      {intel ? <section className="grid gap-4 lg:grid-cols-3">
+        <Card><CardHeader><CardTitle>What Is Happening Right Now</CardTitle></CardHeader><CardContent className="grid gap-3 text-sm"><div><p className="font-medium">Next scheduled post</p><p className="text-slate-500">{intel.next_scheduled_post ? `Publishes in ${intel.next_scheduled_post.minutes_until} minutes` : "No scheduled post"}</p></div><div><p className="font-medium">Last published post</p><p className="line-clamp-2 text-slate-500">{intel.last_published_post?.content || "No published posts yet"}</p>{intel.last_published_post ? <p className="mt-1 text-xs text-slate-500">Likes {intel.last_published_post.likes_count} · Comments {intel.last_published_post.comments_count} · Shares {intel.last_published_post.shares_count} · Score {intel.last_published_post.engagement_score.toFixed(1)}</p> : null}</div><div><p className="font-medium">System health</p><p className={cn("flex items-center gap-2", intel.cron_health.ok ? "text-green-700" : "text-red-700")}><span className={cn("size-2 rounded-full", intel.cron_health.ok ? "bg-green-600" : "bg-red-600")} />Cron {intel.cron_health.ok ? "healthy" : "needs attention"}</p><p className="text-xs text-slate-500">{intel.facebook_connections.every((page) => page.status === "connected") ? "Facebook connections healthy" : "A Facebook page needs attention"}</p></div></CardContent></Card>
+        {!onboardingDone ? <Card><CardHeader><CardTitle>Contextual Onboarding</CardTitle></CardHeader><CardContent className="grid gap-2">{intel.onboarding_steps.map((step, index) => <div key={step.label} className="flex items-center justify-between gap-3 rounded-md border p-2 text-sm"><span className={step.done ? "text-slate-500 line-through" : "font-medium"}>{index + 1}. {step.label}</span>{step.done ? <span className="text-green-700">Done</span> : <Button asChild size="sm" variant="outline"><Link href={step.href}>Do this now</Link></Button>}</div>)}</CardContent></Card> : <LearnedInsightsPanel insights={intel.learned_insights} />}
+        <Card><CardHeader><CardTitle>What You Should Do Next</CardTitle></CardHeader><CardContent className="grid gap-3">{intel.action_items.map((item) => <div key={item.id} className="grid gap-2 rounded-md border p-3 text-sm"><p>{item.text}</p><Button asChild className="w-fit bg-blue-700 hover:bg-blue-800"><Link href={item.href}>{item.action_label}</Link></Button></div>)}{!intel.action_items.length ? <p className="text-sm text-slate-500">No urgent actions. Keep publishing and let the system gather more signal.</p> : null}</CardContent></Card>
+      </section> : null}
+      {intel && onboardingDone ? <LearnedInsightsPanel insights={intel.learned_insights} wide /> : null}
       <Card><CardHeader><CardTitle>Recent Activity</CardTitle></CardHeader><CardContent className="grid gap-3">{posts.slice(0, 10).map((post) => <PostRow key={post.id} post={post} timezone={timezone} />)} {!posts.length ? <Empty text="No activity yet." action="/dashboard/create" /> : null}</CardContent></Card>
     </>
   )
+}
+
+function LearnedInsightsPanel({ insights, wide }: { insights: DashboardIntelligence["learned_insights"]; wide?: boolean }) {
+  const items = [
+    { label: "Best post, last 7 days", value: insights.best_post ? `Score ${insights.best_post.score.toFixed(1)}` : "Not enough data", detail: insights.best_post?.insight },
+    { label: "Best time slot", value: insights.best_time_slot ? `${insights.best_time_slot.slot}` : "Not enough data", detail: insights.best_time_slot?.insight },
+    { label: "Best persona", value: insights.best_persona ? insights.best_persona.name : "Not enough data", detail: insights.best_persona?.insight },
+  ]
+  return <Card className={wide ? "" : ""}><CardHeader><CardTitle>What The System Has Learned</CardTitle></CardHeader><CardContent className={cn("grid gap-3", wide && "md:grid-cols-3")}>{items.map((item) => <div key={item.label} className="rounded-md border p-3"><p className="text-sm text-slate-500">{item.label}</p><p className="mt-1 font-semibold">{item.value}</p><p className="mt-2 text-sm text-slate-600">{item.detail || "Publish more posts and collect engagement snapshots to unlock this insight."}</p></div>)}</CardContent></Card>
 }
 
 function ConnectEmpty({ onConnected }: { onConnected: () => void }) {
@@ -421,10 +498,124 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
   )
 }
 
-const toneOptions = ["Professional", "Casual", "Funny", "Inspirational", "Educational", "Promotional", "Storytelling", "Controversial", "Friendly", "Bold"]
-const languages = ["English", "Bengali", "Hindi", "Arabic", "Spanish", "French", "Portuguese", "Indonesian"]
+function StyleAnalyzerView({ pages }: { pages: PageConnection[] }) {
+  const [page, setPage] = React.useState("")
+  const [analysis, setAnalysis] = React.useState<StyleAnalysis | null>(null)
+  const [loading, setLoading] = React.useState(false)
+  const [personas, setPersonas] = React.useState<AIPersona[]>([])
+  const [personaId, setPersonaId] = React.useState("")
+  const selectedPage = pages[0]
+  React.useEffect(() => {
+    if (!selectedPage?.id) return
+    api.get<AIPersona[]>(`/api/ai/personas/${selectedPage.id}`).then((response) => setPersonas(response.data)).catch(() => setPersonas([]))
+  }, [selectedPage?.id])
+  async function analyze(own = false) {
+    setLoading(true)
+    try {
+      const response = await api.post<StyleAnalysis>("/api/style/analyze", own ? { own_page_connection_id: selectedPage?.id } : { page })
+      setAnalysis(response.data)
+      toast.success("Style analysis complete.")
+    } catch (error: any) {
+      toast.error(error?.response?.data?.detail || "Could not analyze this page.")
+    } finally {
+      setLoading(false)
+    }
+  }
+  async function applyStyle() {
+    if (!personaId || !analysis) return toast.error("Choose a persona first.")
+    await api.post("/api/style/apply", { persona_id: Number(personaId), analysis_id: analysis.id })
+    toast.success("Style added to persona prompt.")
+  }
+  const report = analysis?.report
+  return <><PageTitle title="Style Analyzer" subtitle="Study public Facebook Page style and apply the patterns to your own prompts." /><Card><CardContent className="grid gap-3 p-5"><Label>Enter a Facebook Page URL or Page ID to analyze.</Label><div className="flex flex-col gap-2 sm:flex-row"><Input value={page} onChange={(event) => setPage(event.target.value)} placeholder="https://facebook.com/page or Page ID" /><Button className="bg-blue-700 hover:bg-blue-800" onClick={() => analyze(false)} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Analyze</Button><Button variant="outline" onClick={() => analyze(true)} disabled={loading || !selectedPage}>Analyze My Own Page</Button></div></CardContent></Card>{report ? <div className="grid gap-4"><Card><CardHeader><CardTitle>Writing Style Profile</CardTitle></CardHeader><CardContent className="grid gap-3 md:grid-cols-3"><Stat label="Average words" value={Number(report.writing_style?.average_words || 0)} /><Stat label="Question endings %" value={Number(report.writing_style?.question_ending_percent || 0)} /><Stat label="Avg engagement" value={Number(report.posting_behavior?.average_engagement_score || 0)} /><div className="md:col-span-3 flex flex-wrap gap-2">{(report.writing_style?.top_words || []).slice(0, 24).map((word: any) => <span key={word.text} className="rounded-full border bg-white px-3 py-1 text-sm" style={{ fontSize: `${Math.min(22, 11 + word.count)}px` }}>{word.text}</span>)}</div></CardContent></Card><Card><CardHeader><CardTitle>Content Topics</CardTitle></CardHeader><CardContent className="flex flex-wrap gap-2">{(report.topics || []).map((topic: any) => <span key={topic.name || topic} className="rounded-full bg-blue-50 px-3 py-1 text-blue-700" style={{ fontSize: `${Math.min(24, 12 + Number(topic.count || 1) * 2)}px` }}>{topic.name || topic}</span>)}</CardContent></Card><Card><CardHeader><CardTitle>Posting Behavior</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><MiniBars items={(report.posting_behavior?.best_days || []).map((item: any) => ({ label: item.day, value: item.score }))} /><MiniBars items={(report.posting_behavior?.best_hours || []).map((item: any) => ({ label: `${item.hour}:00`, value: item.score }))} /></CardContent></Card><Card><CardHeader><CardTitle>Top 5 Posts</CardTitle></CardHeader><CardContent className="grid gap-3">{(report.top_posts || []).map((post: any) => <div key={post.facebook_post_id || post.content} className="rounded-md border p-3"><p className="whitespace-pre-wrap text-sm">{post.content}</p><p className="mt-2 text-xs text-slate-500">Likes {post.likes_count} · Comments {post.comments_count} · Shares {post.shares_count} · Score {post.engagement_score}</p></div>)}</CardContent></Card><Card><CardHeader><CardTitle>AI Style Summary</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="text-sm text-slate-700">{report.summary}</p><div className="flex flex-col gap-2 sm:flex-row"><Select value={personaId} onChange={(event) => setPersonaId(event.target.value)}><option value="">Choose persona</option>{personas.map((persona) => <option key={persona.id} value={persona.id}>{persona.persona_name}</option>)}</Select><Button className="bg-blue-700 hover:bg-blue-800" onClick={applyStyle}>Apply This Style to My Persona</Button></div></CardContent></Card></div> : null}</>
+}
+
+function PageTrackerView({ pages }: { pages: PageConnection[] }) {
+  const [data, setData] = React.useState<TrackerDashboard | null>(null)
+  const [page, setPage] = React.useState("")
+  const [nickname, setNickname] = React.useState("")
+  const [loading, setLoading] = React.useState(false)
+  const [personas, setPersonas] = React.useState<AIPersona[]>([])
+  const [personaId, setPersonaId] = React.useState("")
+  const selectedPage = pages[0]
+  const load = React.useCallback(() => api.get<TrackerDashboard>("/api/tracker").then((response) => setData(response.data)), [])
+  React.useEffect(() => { load().catch(() => setData(null)) }, [load])
+  React.useEffect(() => {
+    if (!selectedPage?.id) return
+    api.get<AIPersona[]>(`/api/ai/personas/${selectedPage.id}`).then((response) => setPersonas(response.data)).catch(() => setPersonas([]))
+  }, [selectedPage?.id])
+  async function addPage() {
+    setLoading(true)
+    try {
+      await api.post("/api/tracker/pages", { page, nickname })
+      setPage("")
+      setNickname("")
+      toast.success("Page added to tracker.")
+      await load()
+    } catch (error: any) {
+      toast.error(error?.response?.data?.detail || "Could not add page.")
+    } finally {
+      setLoading(false)
+    }
+  }
+  async function refresh() {
+    setLoading(true)
+    await api.post("/api/tracker/refresh").finally(() => setLoading(false))
+    await load()
+  }
+  async function useInspiration(content: string) {
+    if (!personaId) return toast.error("Choose a persona first.")
+    await api.post("/api/style/apply", { persona_id: Number(personaId), inspiration_post: content })
+    toast.success("Post added as style inspiration.")
+  }
+  return <><PageTitle title="Page Tracker" subtitle="Track public pages, spot winning posts, and borrow style inspiration responsibly." /><Card><CardContent className="grid gap-3 p-5"><div className="grid gap-2 md:grid-cols-[1fr_220px_auto_auto]"><Input value={page} onChange={(event) => setPage(event.target.value)} placeholder="Facebook Page URL or ID" /><Input value={nickname} onChange={(event) => setNickname(event.target.value)} placeholder="Nickname" /><Button className="bg-blue-700 hover:bg-blue-800" onClick={addPage} disabled={loading}>Add Page</Button><Button variant="outline" onClick={refresh} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div><Select className="max-w-sm" value={personaId} onChange={(event) => setPersonaId(event.target.value)}><option value="">Persona for style inspiration</option>{personas.map((persona) => <option key={persona.id} value={persona.id}>{persona.persona_name}</option>)}</Select><p className="text-xs text-slate-500">{data?.tracked_pages.length || 0}/10 pages tracked.</p></CardContent></Card>{data?.trends.map((trend) => <div key={trend.id} className="rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><span>{trend.summary}</span><Button asChild variant="outline"><Link href={`/dashboard/create?topic=${encodeURIComponent(trend.topic)}`}>Generate</Link></Button></div></div>)}<Card><CardHeader><CardTitle>Top Tracked Posts This Week</CardTitle></CardHeader><CardContent className="grid gap-3">{data?.posts.map((post) => <div key={post.id} className="grid gap-2 rounded-md border p-3"><div className="flex flex-wrap justify-between gap-2 text-sm"><span className="font-medium">{post.page_name}</span><span className="text-slate-500">Score {post.engagement_score.toFixed(1)}</span></div><p className="whitespace-pre-wrap text-sm text-slate-700">{post.content}</p><p className="text-xs text-slate-500">Likes {post.likes_count} · Comments {post.comments_count} · Shares {post.shares_count} · Topic {post.topic || "-"}</p><Button variant="outline" className="w-fit" onClick={() => useInspiration(post.content)}>Use This as Style Inspiration</Button></div>)}{!data?.posts.length ? <p className="text-sm text-slate-500">No tracked posts yet. Add a page to start collecting examples.</p> : null}</CardContent></Card><Card><CardHeader><CardTitle>Weekly Comparison</CardTitle></CardHeader><CardContent className="overflow-x-auto"><table className="w-full min-w-[760px] text-sm"><thead><tr className="text-left text-slate-500"><th className="p-2">Page</th><th className="p-2">Posts</th><th className="p-2">Avg Likes</th><th className="p-2">Avg Comments</th><th className="p-2">Avg Shares</th><th className="p-2">Active Day</th><th className="p-2">Topics</th></tr></thead><tbody>{data?.comparison.map((row) => <tr key={row.id} className="border-t"><td className="p-2 font-medium">{row.nickname}</td><td className="p-2">{row.posts}</td><td className="p-2">{row.average_likes}</td><td className="p-2">{row.average_comments}</td><td className="p-2">{row.average_shares}</td><td className="p-2">{row.most_active_day}</td><td className="p-2">{row.most_used_topics}</td></tr>)}</tbody></table></CardContent></Card></>
+}
+
+function MiniBars({ items }: { items: { label: string; value: number }[] }) {
+  const max = Math.max(...items.map((item) => item.value), 1)
+  return <div className="grid gap-2">{items.slice(0, 12).map((item) => <div key={item.label} className="grid grid-cols-[64px_1fr_56px] items-center gap-2 text-xs"><span>{item.label}</span><div className="h-3 rounded bg-slate-100"><div className="h-3 rounded bg-blue-700" style={{ width: `${Math.max(4, (item.value / max) * 100)}%` }} /></div><span className="text-right text-slate-500">{item.value.toFixed(1)}</span></div>)}</div>
+}
+
+const toneOptions = ["Friendly", "Professional", "Bold", "Witty", "Empathetic", "Authoritative", "Casual", "Luxury", "Rebellious", "Minimalist", "Energetic", "Calm"]
+const languages = ["English", "Bengali", "Hindi", "Arabic", "Spanish", "French", "Indonesian", "Portuguese", "Auto-detect from examples"]
 const dayOptions = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 const personaColors = ["bg-blue-50 text-blue-800 border-blue-200", "bg-emerald-50 text-emerald-800 border-emerald-200", "bg-amber-50 text-amber-800 border-amber-200", "bg-rose-50 text-rose-800 border-rose-200", "bg-violet-50 text-violet-800 border-violet-200"]
+const templateNames = ["Custom (blank)", "E-commerce Product Page", "Personal Brand / Creator", "Local Restaurant", "Real Estate Agent", "Fitness Coach", "Educational Content", "News and Commentary", "Motivational Page", "Tech and Startup"]
+const goalOptions = ["Educate my audience", "Sell a product or service", "Build a community", "Entertain", "Inspire and motivate", "Drive traffic to my website"]
+const includeOptions = ["A question at the end", "A call to action", "Emojis", "A personal story angle", "A surprising fact", "A numbered list", "A relatable struggle"]
+const neverOptions = ["Use formal language", "Use slang", "Make promises", "Use more than 5 hashtags", "Start with the word 'I'", "Use exclamation marks excessively"]
+const structureOptions = ["No fixed structure, let AI decide", "Hook then value then CTA", "Story then lesson then question", "Fact then explanation then opinion", "List format", "Single powerful statement"]
+
+function emptyPromptConfig(): PromptStudioConfig {
+  return {
+    template: "Custom (blank)",
+    audience: "",
+    goal: "Educate my audience",
+    brand_personality: ["Friendly", "Professional"],
+    always_topics: [],
+    never_topics: [],
+    every_post_includes: ["A question at the end"],
+    never_do: ["Make promises"],
+    length: "Medium",
+    vary_length: true,
+    structure: "No fixed structure, let AI decide",
+    examples: "",
+  }
+}
+
+type PersonaTemplateDefault = Omit<Partial<AIPersona>, "prompt_config"> & { prompt_config?: Partial<PromptStudioConfig> }
+
+const templateDefaults: Record<string, PersonaTemplateDefault> = {
+  "E-commerce Product Page": { niche: "products that help customers solve everyday problems", tone_tags: ["Friendly", "Professional"], prompt_config: { goal: "Sell a product or service", every_post_includes: ["A call to action", "A question at the end"], structure: "Hook then value then CTA" } },
+  "Personal Brand / Creator": { niche: "personal stories, lessons, and useful ideas from a creator", tone_tags: ["Friendly", "Casual"], prompt_config: { goal: "Build a community", every_post_includes: ["A personal story angle", "A question at the end"], structure: "Story then lesson then question" } },
+  "Local Restaurant": { niche: "local food, menu highlights, offers, and community moments", tone_tags: ["Friendly", "Energetic"], prompt_config: { goal: "Sell a product or service", every_post_includes: ["Emojis", "A call to action"], structure: "Hook then value then CTA" } },
+  "Real Estate Agent": { niche: "real estate advice, market updates, and property buying guidance", tone_tags: ["Professional", "Authoritative"], prompt_config: { goal: "Educate my audience", structure: "Fact then explanation then opinion" } },
+  "Fitness Coach": { niche: "fitness, nutrition, consistency, and healthy lifestyle coaching", tone_tags: ["Energetic", "Empathetic"], prompt_config: { goal: "Inspire and motivate", every_post_includes: ["A relatable struggle", "A call to action"] } },
+  "Educational Content": { niche: "clear educational posts that make complex topics simple", tone_tags: ["Professional", "Friendly"], prompt_config: { goal: "Educate my audience", every_post_includes: ["A surprising fact", "A question at the end"], structure: "Fact then explanation then opinion" } },
+  "News and Commentary": { niche: "timely news, commentary, and analysis", tone_tags: ["Authoritative", "Professional"], prompt_config: { goal: "Educate my audience", structure: "Fact then explanation then opinion" } },
+  "Motivational Page": { niche: "motivation, mindset, discipline, and personal growth", tone_tags: ["Bold", "Empathetic"], prompt_config: { goal: "Inspire and motivate", structure: "Single powerful statement" } },
+  "Tech and Startup": { niche: "technology, startups, product building, and business lessons", tone_tags: ["Witty", "Professional"], prompt_config: { goal: "Educate my audience", structure: "Hook then value then CTA" } },
+}
 
 function emptyPersona(): AIPersona {
   return {
@@ -432,6 +623,9 @@ function emptyPersona(): AIPersona {
     niche: "",
     tone_tags: ["Professional"],
     custom_instructions: "",
+    prompt_config: emptyPromptConfig(),
+    custom_prompt: "",
+    creativity_level: 7,
     language: "English",
     hashtags_enabled: false,
     hashtag_count: 5,
@@ -445,12 +639,56 @@ function emptyPersona(): AIPersona {
   }
 }
 
+function promptConfig(persona: AIPersona): PromptStudioConfig {
+  return { ...emptyPromptConfig(), ...(persona.prompt_config || {}), brand_personality: persona.tone_tags.length ? persona.tone_tags : persona.prompt_config?.brand_personality || [] }
+}
+
+function buildSimplePrompt(persona: AIPersona) {
+  const config = promptConfig(persona)
+  const parts = [
+    `Write a Facebook post for a page about ${persona.niche || "[what this page is about]"}.`,
+    config.audience ? `The audience is ${config.audience}.` : "",
+    config.goal ? `The main goal is to ${config.goal.toLowerCase()}.` : "",
+    persona.tone_tags.length ? `Use a ${persona.tone_tags.join(", ").toLowerCase()} brand personality.` : "",
+    config.always_topics.length ? `Always write about: ${config.always_topics.join(", ")}.` : "",
+    config.never_topics.length ? `Never write about: ${config.never_topics.join(", ")}.` : "",
+    config.every_post_includes.length ? `Every post should include: ${config.every_post_includes.join(", ")}.` : "",
+    config.never_do.length ? `Posts must never: ${config.never_do.join(", ").toLowerCase()}.` : "",
+    config.vary_length ? `Vary post length, rotating around ${config.length.toLowerCase()} posts.` : `Aim for ${config.length.toLowerCase()} length.`,
+    config.structure !== "No fixed structure, let AI decide" ? `Structure posts as: ${config.structure}.` : "Use the best structure for the idea.",
+    persona.language ? `Write in ${persona.language}.` : "",
+    config.examples ? `Study these style examples and match their feel:\n${config.examples}` : "",
+    persona.custom_instructions ? persona.custom_instructions : "",
+  ].filter(Boolean)
+  return parts.join(" ")
+}
+
+function buildRawPrompt(persona: AIPersona) {
+  return [
+    "SYSTEM: You are a professional Facebook content writer. Return only the finished post text, with no labels or commentary.",
+    `CREATIVITY: ${persona.creativity_level}/10.`,
+    `USER PROMPT: ${buildSimplePrompt(persona)}`,
+  ].join("\n\n")
+}
+
+function applyTemplate(persona: AIPersona, template: string): AIPersona {
+  const baseConfig = promptConfig(persona)
+  const defaults = templateDefaults[template] || {}
+  return {
+    ...persona,
+    ...defaults,
+    prompt_config: { ...baseConfig, ...(defaults.prompt_config || {}), template },
+    tone_tags: defaults.tone_tags || persona.tone_tags,
+  }
+}
+
 function AISettingsView({ pages }: { pages: PageConnection[] }) {
   const [selectedPageId, setSelectedPageId] = React.useState<number | null>(pages[0]?.id ?? null)
   const [personas, setPersonas] = React.useState<AIPersona[]>([])
   const [editing, setEditing] = React.useState<AIPersona | null>(null)
   const [saving, setSaving] = React.useState(false)
   const [sample, setSample] = React.useState("")
+  const [previewTab, setPreviewTab] = React.useState<"simple" | "raw">("simple")
   const [insights, setInsights] = React.useState<PerformanceInsights | null>(null)
   const selectedPage = pages.find((page) => page.id === selectedPageId) || pages[0]
 
@@ -466,13 +704,28 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
   React.useEffect(() => { loadPersonas() }, [loadPersonas])
 
   const draft = editing || emptyPersona()
+  const config = promptConfig(draft)
+  const simplePrompt = buildSimplePrompt(draft)
+  const rawPrompt = draft.custom_prompt?.trim() ? draft.custom_prompt : buildRawPrompt(draft)
   const dayOwners = Object.fromEntries(dayOptions.map((day) => [day, personas.find((persona) => persona.assigned_days.includes(day))]))
 
   function toggleTone(tone: string) {
     setEditing((value) => value ? ({
       ...value,
-      tone_tags: value.tone_tags.includes(tone) ? value.tone_tags.filter((item) => item !== tone) : [...value.tone_tags, tone],
+      tone_tags: value.tone_tags.includes(tone) ? value.tone_tags.filter((item) => item !== tone) : [...value.tone_tags, tone].slice(0, 4),
     }) : value)
+  }
+  function updateConfig(update: Partial<PromptStudioConfig>) {
+    setEditing((value) => value ? ({ ...value, prompt_config: { ...promptConfig(value), ...update } }) : value)
+  }
+  function toggleConfigList(key: "every_post_includes" | "never_do", item: string) {
+    const current = config[key]
+    updateConfig({ [key]: current.includes(item) ? current.filter((value) => value !== item) : [...current, item] } as Partial<PromptStudioConfig>)
+  }
+  function addTag(key: "always_topics" | "never_topics", value: string) {
+    const clean = value.trim()
+    if (!clean || config[key].includes(clean)) return
+    updateConfig({ [key]: [...config[key], clean] } as Partial<PromptStudioConfig>)
   }
   function toggleDay(day: string) {
     const owner = personas.find((persona) => persona.id !== draft.id && persona.assigned_days.includes(day))
@@ -484,10 +737,11 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
     if (!draft.persona_name.trim()) throw new Error("Persona name is required.")
     if (!draft.niche.trim()) throw new Error("What is your page about? is required.")
     if (!draft.tone_tags.length) throw new Error("Select at least one tone.")
+    const payload = { ...draft, prompt_config: config, custom_prompt: rawPrompt }
     setSaving(true)
     try {
-      if (draft.id) await api.put<AIPersona>(`/api/ai/personas/${draft.id}`, draft)
-      else await api.post<AIPersona>(`/api/ai/personas/${selectedPage.id}`, draft)
+      if (draft.id) await api.put<AIPersona>(`/api/ai/personas/${draft.id}`, payload)
+      else await api.post<AIPersona>(`/api/ai/personas/${selectedPage.id}`, payload)
       await loadPersonas()
       if (showToast) toast.success("AI persona saved.")
     } finally {
@@ -517,7 +771,7 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
     await loadPersonas()
   }
 
-  return <><PageTitle title="AI Personas" subtitle="Create up to five page-specific AI personas with their own tone and schedule." />{!pages.length ? <Empty text="Connect a page before setting up AI personas." action="/dashboard/settings" /> : <div className="grid gap-5">
+  return <><PageTitle title="Prompt Studio" subtitle="Build the exact AI prompt used by each scheduled persona." />{!pages.length ? <Empty text="Connect a page before setting up AI personas." action="/dashboard/settings" /> : <div className="grid gap-5">
     {pages.length > 1 ? <Select value={String(selectedPageId ?? pages[0].id)} onChange={(event) => setSelectedPageId(Number(event.target.value))}>{pages.map((page) => <option key={page.id} value={String(page.id)}>{page.page_name}</option>)}</Select> : <PageMini page={pages[0]} />}
     <div className="grid grid-cols-2 gap-2 md:grid-cols-7">{dayOptions.map((day) => {
       const owner = dayOwners[day]
@@ -526,11 +780,47 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
     })}</div>
     <div className="grid gap-4 md:grid-cols-2">{personas.map((persona, index) => <Card key={persona.id}><CardContent className="grid gap-3 p-5"><div className="flex items-start justify-between gap-3"><div><h2 className="font-semibold">{persona.persona_name}</h2><p className="text-sm text-slate-500">{persona.assigned_days.join(", ") || "No days assigned"}</p></div><span className={cn("rounded-full px-2 py-1 text-xs font-medium", persona.is_active ? "bg-green-50 text-green-700" : "bg-slate-100 text-slate-600")}>{persona.is_active ? "Active" : "Paused"}</span></div><div className="flex flex-wrap gap-2">{persona.tone_tags.map((tag) => <span key={tag} className={cn("rounded-full border px-2 py-1 text-xs", personaColors[index % personaColors.length])}>{tag}</span>)}</div><div className="flex items-center justify-between text-sm text-slate-500"><span>{persona.posting_time_slots.join(", ")}</span><span>Score {Number(persona.performance_score || 0.5).toFixed(2)}</span></div><Button variant="outline" onClick={() => setEditing(persona)}>Edit</Button></CardContent></Card>)}{personas.length < 5 ? <Button variant="outline" className="min-h-36 border-dashed" onClick={() => setEditing({ ...emptyPersona(), persona_name: `Persona ${personas.length + 1}` })}><Plus className="size-4" /> Add New Persona</Button> : null}</div>
     <PerformanceInsightsPanel insights={insights} personas={personas} timezone={Intl.DateTimeFormat().resolvedOptions().timeZone} />
-  </div>}{editing ? <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40 p-4"><Card className="mx-auto my-6 max-w-3xl"><CardHeader><CardTitle>{editing.id ? "Edit Persona" : "Add New Persona"}</CardTitle></CardHeader><CardContent className="grid gap-5"><div className="grid gap-2"><Label>Persona Name</Label><Input value={draft.persona_name} onChange={(event) => setEditing({ ...draft, persona_name: event.target.value })} placeholder="Motivational Mondays" /></div><div className="grid gap-2"><Label>What is your page about?</Label><Input value={draft.niche} onChange={(event) => setEditing({ ...draft, niche: event.target.value })} placeholder="e.g. fitness and healthy living, tech news, motivational quotes." /></div><div className="grid gap-2"><Label>Tone and Style</Label><div className="flex flex-wrap gap-2">{toneOptions.map((tone) => <Button key={tone} type="button" variant={draft.tone_tags.includes(tone) ? "default" : "outline"} className={draft.tone_tags.includes(tone) ? "bg-blue-700 hover:bg-blue-800" : ""} onClick={() => toggleTone(tone)}>{tone}</Button>)}</div></div><div className="grid gap-2"><Label>Additional instructions for the AI.</Label><Textarea className="min-h-28" value={draft.custom_instructions || ""} onChange={(event) => setEditing({ ...draft, custom_instructions: event.target.value })} /></div><div className="grid gap-3 md:grid-cols-2"><div className="grid gap-2"><Label>Post Language</Label><Select value={draft.language} onChange={(event) => setEditing({ ...draft, language: event.target.value })}>{languages.map((language) => <option key={language}>{language}</option>)}</Select></div><div className="grid gap-2"><Label>Priority Level</Label><Select value={draft.priority_level} onChange={(event) => setEditing({ ...draft, priority_level: event.target.value as AIPersona["priority_level"] })}><option>High</option><option>Normal</option><option>Low</option></Select></div></div><div className="grid gap-2"><Label>Assigned Days</Label><div className="flex flex-wrap gap-2">{dayOptions.map((day) => <Button key={day} type="button" variant={draft.assigned_days.includes(day) ? "default" : "outline"} className={draft.assigned_days.includes(day) ? "bg-blue-700 hover:bg-blue-800" : ""} onClick={() => toggleDay(day)}>{day}</Button>)}</div></div><div className="grid gap-2"><Label>Posting Times</Label>{draft.posting_time_slots.map((slot, index) => <div key={`${slot}-${index}`} className="flex gap-2"><Input type="time" value={slot} onChange={(event) => setEditing({ ...draft, posting_time_slots: draft.posting_time_slots.map((item, itemIndex) => itemIndex === index ? event.target.value : item) })} />{draft.posting_time_slots.length > 1 ? <Button size="icon" variant="outline" onClick={() => setEditing({ ...draft, posting_time_slots: draft.posting_time_slots.filter((_, itemIndex) => itemIndex !== index) })}><X className="size-4" /></Button> : null}</div>)}{draft.posting_time_slots.length < 4 ? <Button variant="outline" className="w-fit" onClick={() => setEditing({ ...draft, posting_time_slots: [...draft.posting_time_slots, "18:00"] })}><Plus className="size-4" /> Add Time</Button> : null}</div><div className="grid gap-3 rounded-md border p-3"><div className="flex items-center justify-between"><Label>Automatically add hashtags to posts.</Label><Switch checked={draft.hashtags_enabled} onCheckedChange={(checked) => setEditing({ ...draft, hashtags_enabled: checked })} /></div>{draft.hashtags_enabled ? <Input type="number" min={1} max={30} value={draft.hashtag_count} onChange={(event) => setEditing({ ...draft, hashtag_count: Number(event.target.value) })} /> : null}</div><div className="flex items-center justify-between rounded-md border p-3"><Label>Persona Active</Label><Switch checked={draft.is_active} onCheckedChange={(checked) => setEditing({ ...draft, is_active: checked })} /></div><div className="grid gap-3 rounded-md border p-3"><div className="flex items-center justify-between"><Label>Learning Mode</Label><Switch checked={draft.learning_mode_enabled} onCheckedChange={(checked) => setEditing({ ...draft, learning_mode_enabled: checked })} /></div><div className="grid gap-2"><Label>Minimum Engagement Threshold</Label><Input type="number" min={0} value={draft.minimum_engagement_threshold} onChange={(event) => setEditing({ ...draft, minimum_engagement_threshold: Number(event.target.value) })} /></div>{draft.learned_patterns_summary ? <p className="text-sm text-slate-500">{draft.learned_patterns_summary}</p> : null}{draft.id ? <Button type="button" variant="outline" className="w-fit" onClick={resetLearning}><RotateCcw className="size-4" /> Reset Learning</Button> : null}</div><div className="flex flex-col gap-2 sm:flex-row"><Button className="bg-blue-700 hover:bg-blue-800" onClick={saveSettings} disabled={saving}>{saving ? "Saving..." : "Save Persona"}</Button><Button variant="outline" onClick={testSample} disabled={saving}>Test Sample</Button><Button variant="ghost" onClick={() => setEditing(null)}>Cancel</Button></div></CardContent></Card></div> : null}{sample ? <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4"><Card className="max-w-xl"><CardHeader><CardTitle>Sample AI Post</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="whitespace-pre-wrap text-sm text-slate-700">{sample}</p><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={() => setSample("")}>Close</Button></CardContent></Card></div> : null}</>
+  </div>}{editing ? <PromptStudioModal draft={draft} config={config} simplePrompt={simplePrompt} rawPrompt={rawPrompt} previewTab={previewTab} saving={saving} onPreviewTab={setPreviewTab} onChange={setEditing} onConfig={updateConfig} onToggleTone={toggleTone} onToggleDay={toggleDay} onToggleConfigList={toggleConfigList} onAddTag={addTag} onSave={saveSettings} onTest={testSample} onResetLearning={resetLearning} onClose={() => setEditing(null)} /> : null}{sample ? <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4"><Card className="max-w-xl"><CardHeader><CardTitle>Sample AI Post</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="whitespace-pre-wrap text-sm text-slate-700">{sample}</p><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={() => setSample("")}>Close</Button></CardContent></Card></div> : null}</>
 }
 
 function dayName(day: string) {
   return { Mon: "Monday", Tue: "Tuesday", Wed: "Wednesday", Thu: "Thursday", Fri: "Friday", Sat: "Saturday", Sun: "Sunday" }[day] || day
+}
+
+function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab, saving, onPreviewTab, onChange, onConfig, onToggleTone, onToggleDay, onToggleConfigList, onAddTag, onSave, onTest, onResetLearning, onClose }: {
+  draft: AIPersona
+  config: PromptStudioConfig
+  simplePrompt: string
+  rawPrompt: string
+  previewTab: "simple" | "raw"
+  saving: boolean
+  onPreviewTab: (tab: "simple" | "raw") => void
+  onChange: (persona: AIPersona | null) => void
+  onConfig: (update: Partial<PromptStudioConfig>) => void
+  onToggleTone: (tone: string) => void
+  onToggleDay: (day: string) => void
+  onToggleConfigList: (key: "every_post_includes" | "never_do", item: string) => void
+  onAddTag: (key: "always_topics" | "never_topics", value: string) => void
+  onSave: () => void
+  onTest: () => void
+  onResetLearning: () => void
+  onClose: () => void
+}) {
+  return <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40 p-4"><Card className="mx-auto my-6 max-w-6xl"><CardHeader><CardTitle>Prompt Studio</CardTitle></CardHeader><CardContent className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_420px]">
+    <div className="grid gap-5">
+      <div className="grid gap-3 rounded-md border p-4"><Label>Start from a Template</Label><Select value={config.template} onChange={(event) => onChange(applyTemplate(draft, event.target.value))}>{templateNames.map((template) => <option key={template}>{template}</option>)}</Select><div className="grid gap-3 md:grid-cols-2"><div className="grid gap-2"><Label>Persona Name</Label><Input value={draft.persona_name} onChange={(event) => onChange({ ...draft, persona_name: event.target.value })} /></div><div className="grid gap-2"><Label>Priority Level</Label><Select value={draft.priority_level} onChange={(event) => onChange({ ...draft, priority_level: event.target.value as AIPersona["priority_level"] })}><option>High</option><option>Normal</option><option>Low</option></Select></div></div></div>
+      <div className="grid gap-3 rounded-md border p-4"><h2 className="font-semibold">Identity Questions</h2><div className="grid gap-2"><Label>What is this page about?</Label><Input value={draft.niche} onChange={(event) => onChange({ ...draft, niche: event.target.value })} placeholder="personal finance tips for young professionals in Bangladesh" /></div><div className="grid gap-2"><Label>Who is your audience?</Label><Input value={config.audience} onChange={(event) => onConfig({ audience: event.target.value })} /></div><div className="grid gap-2"><Label>What is the main goal of your posts?</Label><Select value={config.goal} onChange={(event) => onConfig({ goal: event.target.value })}>{goalOptions.map((goal) => <option key={goal}>{goal}</option>)}<option>Other</option></Select></div><div className="grid gap-2"><Label>What is your brand personality?</Label><div className="flex flex-wrap gap-2">{toneOptions.map((tone) => <Button key={tone} type="button" variant={draft.tone_tags.includes(tone) ? "default" : "outline"} className={draft.tone_tags.includes(tone) ? "bg-blue-700 hover:bg-blue-800" : ""} onClick={() => onToggleTone(tone)}>{draft.tone_tags.includes(tone) ? <Check className="size-4" /> : null}{tone}</Button>)}</div><p className="text-xs text-slate-500">Select up to 4.</p></div></div>
+      <div className="grid gap-3 rounded-md border p-4"><h2 className="font-semibold">Content Rules</h2><TagInput label="What topics should the AI always write about?" values={config.always_topics} onAdd={(value) => onAddTag("always_topics", value)} onRemove={(value) => onConfig({ always_topics: config.always_topics.filter((item) => item !== value) })} /><TagInput label="What topics should the AI NEVER write about?" values={config.never_topics} onAdd={(value) => onAddTag("never_topics", value)} onRemove={(value) => onConfig({ never_topics: config.never_topics.filter((item) => item !== value) })} /><div className="grid gap-2"><Label>What should every post include?</Label><div className="flex flex-wrap gap-2">{includeOptions.map((item) => <Button key={item} type="button" variant={config.every_post_includes.includes(item) ? "default" : "outline"} onClick={() => onToggleConfigList("every_post_includes", item)}>{item}</Button>)}</div></div><div className="grid gap-2"><Label>What should posts NEVER do?</Label><div className="flex flex-wrap gap-2">{neverOptions.map((item) => <Button key={item} type="button" variant={config.never_do.includes(item) ? "default" : "outline"} onClick={() => onToggleConfigList("never_do", item)}>{item}</Button>)}</div></div><div className="grid gap-2"><Label>How long should posts be?</Label><input type="range" min={0} max={2} value={["Short", "Medium", "Long"].indexOf(config.length)} onChange={(event) => onConfig({ length: (["Short", "Medium", "Long"] as const)[Number(event.target.value)] })} /><div className="flex justify-between text-xs text-slate-500"><span>Short</span><span>Medium</span><span>Long</span></div><div className="flex items-center justify-between rounded-md border p-3"><Label>Vary the length automatically</Label><Switch checked={config.vary_length} onCheckedChange={(checked) => onConfig({ vary_length: checked })} /></div></div></div>
+      <div className="grid gap-3 rounded-md border p-4"><h2 className="font-semibold">Format and Style Rules</h2><div className="grid gap-2"><Label>How should posts be structured?</Label><Select value={config.structure} onChange={(event) => onConfig({ structure: event.target.value })}>{structureOptions.map((item) => <option key={item}>{item}</option>)}</Select></div><div className="grid gap-2"><Label>What writing style examples do you love?</Label><Textarea className="min-h-28" value={config.examples} onChange={(event) => onConfig({ examples: event.target.value })} placeholder="Paste example posts that feel like what you want. The AI will study these." /></div><div className="grid gap-2"><Label>What language should posts be written in?</Label><Select value={draft.language} onChange={(event) => onChange({ ...draft, language: event.target.value })}>{languages.map((language) => <option key={language}>{language}</option>)}</Select></div></div>
+      <div className="grid gap-3 rounded-md border p-4"><h2 className="font-semibold">Advanced Control</h2><div className="grid gap-2"><Label>Write any additional instructions in your own words</Label><Textarea className="min-h-28" value={draft.custom_instructions || ""} onChange={(event) => onChange({ ...draft, custom_instructions: event.target.value })} /></div><div className="grid gap-2"><Label>Rate how creative vs safe you want the AI to be: {draft.creativity_level}/10</Label><input type="range" min={1} max={10} value={draft.creativity_level} onChange={(event) => onChange({ ...draft, creativity_level: Number(event.target.value) })} /><div className="flex justify-between text-xs text-slate-500"><span>Very safe, predictable, consistent.</span><span>Very creative, experimental, surprising.</span></div></div><div className="grid gap-3 md:grid-cols-2"><div className="grid gap-2"><Label>Assigned Days</Label><div className="flex flex-wrap gap-2">{dayOptions.map((day) => <Button key={day} type="button" variant={draft.assigned_days.includes(day) ? "default" : "outline"} onClick={() => onToggleDay(day)}>{day}</Button>)}</div></div><div className="grid gap-2"><Label>Posting Times</Label>{draft.posting_time_slots.map((slot, index) => <Input key={`${slot}-${index}`} type="time" value={slot} onChange={(event) => onChange({ ...draft, posting_time_slots: draft.posting_time_slots.map((item, itemIndex) => itemIndex === index ? event.target.value : item) })} />)}</div></div><div className="flex items-center justify-between rounded-md border p-3"><Label>Learning Mode</Label><Switch checked={draft.learning_mode_enabled} onCheckedChange={(checked) => onChange({ ...draft, learning_mode_enabled: checked })} /></div>{draft.learned_patterns_summary ? <p className="text-sm text-slate-500">{draft.learned_patterns_summary}</p> : null}</div>
+    </div>
+    <aside className="grid h-fit gap-3 rounded-md border bg-slate-50 p-4 lg:sticky lg:top-4"><div className="flex gap-2"><Button type="button" variant={previewTab === "simple" ? "default" : "outline"} onClick={() => onPreviewTab("simple")}>Simple view</Button><Button type="button" variant={previewTab === "raw" ? "default" : "outline"} onClick={() => onPreviewTab("raw")}>Raw view</Button></div>{previewTab === "simple" ? <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap rounded-md bg-white p-3 text-sm text-slate-700">{simplePrompt}</pre> : <Textarea className="min-h-[520px] font-mono text-xs" value={rawPrompt} onChange={(event) => onChange({ ...draft, custom_prompt: event.target.value })} />}<div className="grid gap-2 sm:grid-cols-2"><Button className="bg-blue-700 hover:bg-blue-800" onClick={onTest} disabled={saving}>{saving ? "Testing..." : "Test This Prompt"}</Button><Button className="bg-blue-700 hover:bg-blue-800" onClick={onSave} disabled={saving}>{saving ? "Saving..." : "Save Prompt"}</Button><Button variant="outline" onClick={() => onChange({ ...emptyPersona(), persona_name: draft.persona_name || "Default Persona" })}><RotateCcw className="size-4" /> Reset to Default</Button>{draft.id ? <Button type="button" variant="outline" onClick={onResetLearning}>Reset Learning</Button> : null}<Button variant="ghost" onClick={onClose}>Cancel</Button></div></aside>
+  </CardContent></Card></div>
+}
+
+function TagInput({ label, values, onAdd, onRemove }: { label: string; values: string[]; onAdd: (value: string) => void; onRemove: (value: string) => void }) {
+  const [value, setValue] = React.useState("")
+  return <div className="grid gap-2"><Label>{label}</Label><Input value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); onAdd(value); setValue("") } }} placeholder="Type a topic and press Enter" /><div className="flex flex-wrap gap-2">{values.map((item) => <button key={item} type="button" className="inline-flex items-center gap-1 rounded-full border bg-white px-2 py-1 text-xs" onClick={() => onRemove(item)}>{item}<X className="size-3" /></button>)}</div></div>
 }
 
 function PerformanceInsightsPanel({ insights, personas, timezone }: { insights: PerformanceInsights | null; personas: AIPersona[]; timezone: string }) {

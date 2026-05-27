@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from random import random
 
 import httpx
@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.config import FACEBOOK_GRAPH_API_BASE_URL, MISTRAL_MODEL
 from app.crypto import decrypt_token
-from app.mistral_service import generate_ai_recommendations
+from app.mistral_service import generate_ai_recommendations, suggest_prompt_improvement, synthesize_learned_strategy
 
 
 SNAPSHOT_TYPES = {"1hr": timedelta(hours=1), "6hr": timedelta(hours=6), "24hr": timedelta(hours=24)}
@@ -106,6 +106,23 @@ def save_snapshot(db: Session, post: models.PostLog, page_connection_id: int, sn
     )
     db.add(snapshot)
     db.flush()
+    db.add(models.LearningSignal(
+        user_id=post.user_id,
+        persona_id=post.ai_persona_id,
+        signal_type="post_performance",
+        signal_data={
+            "post_id": post.id,
+            "snapshot_type": snapshot_type,
+            "content": post.content[:1000],
+            "topic": post.topic,
+            "posted_at": post.posted_at,
+            "likes": metrics["likes"],
+            "comments": metrics["comments"],
+            "shares": metrics["shares"],
+            "reach": metrics["reach"],
+        },
+        outcome_score=score,
+    ))
     return snapshot
 
 
@@ -232,6 +249,72 @@ def build_learning_prompt_hint(db: Session, persona: models.AIPersona) -> str | 
     return f"These content patterns have performed best for this audience recently: {persona.learned_patterns_summary}. Lean toward these while maintaining variety."
 
 
+def build_strategy_prompt_hint(db: Session, persona: models.AIPersona) -> str | None:
+    strategy = (
+        db.query(models.LearnedStrategy)
+        .filter(models.LearnedStrategy.persona_id == persona.id)
+        .order_by(models.LearnedStrategy.week_start_date.desc(), models.LearnedStrategy.created_at.desc())
+        .first()
+    )
+    if not strategy or float(strategy.confidence_score or 0) <= 0:
+        return None
+    data = strategy.strategy_data or {}
+    bits = []
+    if data.get("best_post_length"):
+        bits.append(f"best length: {data['best_post_length']}")
+    if data.get("best_posting_times"):
+        bits.append(f"best posting hours: {', '.join(map(str, data['best_posting_times']))}")
+    if data.get("best_content_formats"):
+        bits.append(f"formats: {', '.join(map(str, data['best_content_formats'][:4]))}")
+    if data.get("topics_to_increase"):
+        bits.append(f"increase topics: {', '.join(map(str, data['topics_to_increase'][:5]))}")
+    if data.get("topics_to_decrease"):
+        bits.append(f"decrease topics: {', '.join(map(str, data['topics_to_decrease'][:5]))}")
+    return "Based on recent performance data, prioritize these approaches: " + "; ".join(bits) + "." if bits else None
+
+
+def _week_start(value: datetime) -> date:
+    local_date = value.date()
+    return local_date - timedelta(days=local_date.weekday())
+
+
+def synthesize_weekly_strategy_for_persona(db: Session, persona: models.AIPersona) -> None:
+    since = datetime.now(timezone.utc) - timedelta(days=30)
+    signals = (
+        db.query(models.LearningSignal)
+        .filter(models.LearningSignal.persona_id == persona.id, models.LearningSignal.created_at >= since)
+        .order_by(models.LearningSignal.created_at.desc())
+        .all()
+    )
+    if not signals:
+        return
+    payload = [
+        {
+            "type": signal.signal_type,
+            "data": signal.signal_data,
+            "outcome_score": float(signal.outcome_score or 0),
+            "created_at": signal.created_at,
+        }
+        for signal in signals
+    ]
+    data = synthesize_learned_strategy(payload, MISTRAL_MODEL)
+    current_prompt = persona.custom_prompt or persona.custom_instructions or persona.niche
+    suggested = suggest_prompt_improvement(current_prompt, data, MISTRAL_MODEL)
+    week = _week_start(datetime.now(timezone.utc))
+    strategy = (
+        db.query(models.LearnedStrategy)
+        .filter(models.LearnedStrategy.persona_id == persona.id, models.LearnedStrategy.week_start_date == week)
+        .first()
+    )
+    if strategy is None:
+        strategy = models.LearnedStrategy(persona_id=persona.id, week_start_date=week)
+        db.add(strategy)
+    strategy.strategy_data = data
+    strategy.suggested_prompt = suggested
+    strategy.confidence_score = float(data.get("confidence_score") or 0)
+    strategy.applied_to_prompt = False
+
+
 def get_performance_insights(db: Session, page_connection_id: int, user: models.User) -> dict:
     if not user_has_learning_access(user):
         return {"enabled": False, "reason": "Performance Insights are available on the Pro plan."}
@@ -302,6 +385,7 @@ async def run_weekly_learning_job() -> None:
             for persona in db.query(models.AIPersona).filter(models.AIPersona.page_connection_id == page.id).all():
                 recalculate_persona_performance(db, persona.id, page.id)
                 update_persona_learning_patterns(db, persona.id, page.id)
+                synthesize_weekly_strategy_for_persona(db, persona)
             await regenerate_ai_recommendations(db, page)
             db.commit()
     finally:

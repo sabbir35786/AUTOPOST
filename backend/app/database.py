@@ -126,6 +126,17 @@ def _ensure_product_blueprint_columns() -> None:
             "minimum_engagement_threshold": "numeric(10,4) default 0 not null",
             "learned_patterns_summary": "text",
             "always_include_engagement_hook": "boolean default false not null",
+            "prompt_config": "json",
+            "custom_prompt": "text",
+            "creativity_level": "integer default 7 not null",
+        },
+    )
+    _add_missing_columns(
+        "tracked_pages",
+        {
+            "page_name": "varchar",
+            "is_active": "boolean default true not null",
+            "last_checked_at": "timestamp",
         },
     )
 
@@ -209,6 +220,9 @@ def _migrate_ai_page_settings_to_personas() -> None:
             "learning_mode_enabled": "boolean default true not null",
             "minimum_engagement_threshold": "numeric(10,4) default 0 not null",
             "learned_patterns_summary": "text",
+            "prompt_config": "json",
+            "custom_prompt": "text",
+            "creativity_level": "integer default 7 not null",
             "performance_score": "numeric(8,4) default 0.5 not null",
             "total_posts_published": "integer default 0 not null",
             "total_likes_received": "integer default 0 not null",

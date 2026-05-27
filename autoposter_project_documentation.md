@@ -504,3 +504,9 @@ Facebook pages reach only 2-5% of followers organically regardless of content qu
 ---
 
 *This document covers the full conversation and development history of the AutoPoster project. All architecture decisions, bugs, fixes, environment setup, and remaining tasks are documented here for continuity.*
+
+
+
+
+need to add his feature
+One note: the “summary email after 14 days away” needs an email provider/configured mailer, which this repo does not currently appear to have. The dashboard-side detection/warnings are now in place; email delivery would be the next infrastructure-backed slice.

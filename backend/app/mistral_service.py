@@ -93,6 +93,58 @@ def generate_ai_facebook_post(
     return content.strip()
 
 
+def creativity_to_temperature(creativity_level: int | None) -> float:
+    level = max(1, min(int(creativity_level or 7), 10))
+    return round(0.2 + ((level - 1) / 9) * 0.8, 2)
+
+
+def generate_ai_facebook_post_from_prompt(
+    prompt: str,
+    creativity_level: int | None = 7,
+    recent_topics: list[str] | None = None,
+    topic_hint: str | None = None,
+    learning_hint: str | None = None,
+    model: str = "mistral-small-latest",
+) -> str:
+    if not MISTRAL_API_KEY:
+        raise RuntimeError("AI post generation failed: MISTRAL_API_KEY is not configured")
+
+    instructions = [prompt.strip()]
+    if recent_topics:
+        instructions.append(
+            "Avoid repeating these recently covered topics: "
+            f"{', '.join(recent_topics)}. Pick a fresh angle."
+        )
+    if topic_hint and topic_hint.strip():
+        instructions.append(f"Focus this post on: {topic_hint.strip()}.")
+    if learning_hint and learning_hint.strip():
+        instructions.append(learning_hint.strip())
+
+    try:
+        content = _complete_with_mistral(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You write Facebook posts from the user's saved prompt. "
+                        "Follow the prompt strictly. Return only the post text with no "
+                        "labels, quotation marks, preamble, or commentary."
+                    ),
+                },
+                {"role": "user", "content": "\n\n".join(instructions)},
+            ],
+            temperature=creativity_to_temperature(creativity_level),
+            max_tokens=650,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"AI post generation failed: {exc}") from exc
+
+    if not content or not content.strip():
+        raise RuntimeError("AI post generation failed: Mistral returned empty content")
+    return content.strip()
+
+
 def extract_post_topic(post_content: str, model: str = "mistral-small-latest") -> str | None:
     if not MISTRAL_API_KEY:
         return None
@@ -185,3 +237,115 @@ def generate_ai_recommendations(
         if cleaned:
             recommendations.append(cleaned)
     return recommendations[:5]
+
+
+def analyze_style_with_mistral(posts: list[str], model: str = "mistral-small-latest") -> dict:
+    if not MISTRAL_API_KEY or not posts:
+        return {"topics": [], "summary": "Not enough AI analysis data is available yet."}
+    sample = "\n\n---\n\n".join(posts[:25])
+    try:
+        content = _complete_with_mistral(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Analyze Facebook posts. Return compact JSON only with keys "
+                        "topics (array of {name,count}) and summary (plain English paragraph)."
+                    ),
+                },
+                {"role": "user", "content": sample},
+            ],
+            temperature=0.2,
+            max_tokens=700,
+        )
+        if content:
+            import json
+            import re
+            match = re.search(r"\{.*\}", content, re.S)
+            return json.loads(match.group(0) if match else content)
+    except Exception as exc:
+        print(f"Style analysis failed: {exc}")
+    return {"topics": [], "summary": "AI style summary could not be generated for this sample."}
+
+
+def classify_post_topic(post_content: str, model: str = "mistral-small-latest") -> str | None:
+    return extract_post_topic(post_content, model)
+
+
+def synthesize_learned_strategy(signals: list[dict], model: str = "mistral-small-latest") -> dict:
+    if not MISTRAL_API_KEY or not signals:
+        return {
+            "best_post_length": "medium",
+            "best_posting_times": [],
+            "best_content_formats": [],
+            "topics_to_increase": [],
+            "topics_to_decrease": [],
+            "prompt_improvements": [],
+            "confidence_score": 0,
+        }
+    try:
+        import json
+        import re
+        content = _complete_with_mistral(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an AI content strategist. Analyze the Facebook AI posting "
+                        "system history and return JSON only with fields: best_post_length "
+                        "(short/medium/long), best_posting_times (array of hour numbers), "
+                        "best_content_formats (array), topics_to_increase (array), "
+                        "topics_to_decrease (array), prompt_improvements (array), "
+                        "confidence_score (0 to 1)."
+                    ),
+                },
+                {"role": "user", "content": json.dumps(signals[:120], default=str)},
+            ],
+            temperature=0.2,
+            max_tokens=900,
+        )
+        if content:
+            match = re.search(r"\{.*\}", content, re.S)
+            data = json.loads(match.group(0) if match else content)
+            data["confidence_score"] = max(0, min(float(data.get("confidence_score", 0)), 1))
+            return data
+    except Exception as exc:
+        print(f"Learned strategy synthesis failed: {exc}")
+    return {
+        "best_post_length": "medium",
+        "best_posting_times": [],
+        "best_content_formats": [],
+        "topics_to_increase": [],
+        "topics_to_decrease": [],
+        "prompt_improvements": [],
+        "confidence_score": 0,
+    }
+
+
+def suggest_prompt_improvement(current_prompt: str, strategy: dict, model: str = "mistral-small-latest") -> str | None:
+    if not MISTRAL_API_KEY or not current_prompt.strip():
+        return None
+    try:
+        import json
+        return _complete_with_mistral(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Here is the current prompt used to generate social media posts. "
+                        "Here is what performance data says is working. Suggest specific edits "
+                        "that improve results. Return the improved prompt with changes highlighted "
+                        "in [CHANGED: old text -> new text] format. Do not apply unrelated changes."
+                    ),
+                },
+                {"role": "user", "content": f"Current prompt:\n{current_prompt}\n\nLearned strategy:\n{json.dumps(strategy, default=str)}"},
+            ],
+            temperature=0.25,
+            max_tokens=1200,
+        )
+    except Exception as exc:
+        print(f"Prompt improvement suggestion failed: {exc}")
+    return None
