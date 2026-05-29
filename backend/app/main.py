@@ -2062,6 +2062,14 @@ def disconnect_facebook_page(
     if connection is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Page not found")
 
+    from sqlalchemy import inspect, text
+    inspector = inspect(db.bind)
+    if inspector.has_table("ai_page_settings"):
+        db.execute(
+            text("delete from ai_page_settings where page_connection_id = :id"),
+            {"id": connection.id}
+        )
+
     persona_ids = [p.id for p in db.query(models.AIPersona.id).filter(models.AIPersona.page_connection_id == connection.id).all()]
     if persona_ids:
         db.query(models.PromptTemplate).filter(models.PromptTemplate.persona_id.in_(persona_ids)).delete(synchronize_session=False)
