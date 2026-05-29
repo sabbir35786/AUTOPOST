@@ -1,25 +1,33 @@
 import httpx
 
 from app.config import MISTRAL_API_BASE_URL, MISTRAL_API_KEY
+from app.providers.llm_providers import generate_text
 
 
 def _complete_with_mistral(model: str, messages: list[dict], temperature: float, max_tokens: int) -> str | None:
-    response = httpx.post(
-        f"{MISTRAL_API_BASE_URL.rstrip('/')}/chat/completions",
-        headers={"Authorization": f"Bearer {MISTRAL_API_KEY}"},
-        json={
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        },
-        timeout=45,
-    )
-    if response.status_code >= 400:
-        raise RuntimeError("Mistral post generation request failed")
+    """Route through the unified LLM provider layer.
 
-    data = response.json()
-    return data.get("choices", [{}])[0].get("message", {}).get("content")
+    Extracts system and user content from the messages list and delegates to
+    ``generate_text`` which supports Mistral, OpenAI, Anthropic and Gemini.
+    The default provider is Mistral so existing callers are unaffected.
+    """
+    system_prompt = ""
+    user_prompt = ""
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_prompt = msg.get("content", "")
+        elif msg.get("role") == "user":
+            user_prompt = msg.get("content", "")
+
+    return generate_text(
+        prompt=user_prompt,
+        system_prompt=system_prompt,
+        model_name=model,
+        provider_name="mistral",
+        api_key=MISTRAL_API_KEY,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
 
 
 def generate_ai_facebook_post(

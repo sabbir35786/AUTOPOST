@@ -97,6 +97,7 @@ class PostLog(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String, default="draft", index=True, nullable=False)
     media_urls: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    media_library_id: Mapped[str | None] = mapped_column(ForeignKey("media_library.id", ondelete="SET NULL"), nullable=True)
     link_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     link_preview_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     scheduled_at: Mapped[datetime | None] = mapped_column(
@@ -326,6 +327,11 @@ class AIPersona(Base):
     last_performance_update_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_auto_post_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    include_image: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    image_frequency: Mapped[str] = mapped_column(String, default="every_post", nullable=False)
+    image_prompt_source: Mapped[str] = mapped_column(String, default="persona_prompt", nullable=False)
+    image_fallback_policy: Mapped[str] = mapped_column(String, default="text_only", nullable=False)
+    image_max_wait_seconds: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -337,3 +343,76 @@ class AIPersona(Base):
         onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+
+class ModelSettings(Base):
+    __tablename__ = "model_settings"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    task_category: Mapped[str] = mapped_column(String, nullable=False)
+    provider_name: Mapped[str] = mapped_column(String, nullable=False)
+    model_name: Mapped[str] = mapped_column(String, nullable=False)
+    api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class ImageGenerationJob(Base):
+    __tablename__ = "image_generation_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    persona_id: Mapped[int | None] = mapped_column(ForeignKey("ai_personas.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String, default="pending", index=True, nullable=False)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    model_name: Mapped[str] = mapped_column(String, nullable=False)
+    assembled_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    negative_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    aspect_ratio: Mapped[str] = mapped_column(String, default="1:1", nullable=False)
+    result_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    supabase_storage_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    max_wait_seconds: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    generation_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class MediaLibrary(Base):
+    __tablename__ = "media_library"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    persona_id: Mapped[int | None] = mapped_column(ForeignKey("ai_personas.id", ondelete="SET NULL"), nullable=True)
+    image_url: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    generation_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider: Mapped[str | None] = mapped_column(String, nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_used: Mapped[bool] = mapped_column(Boolean, default=False, index=True, nullable=False)
+    used_in_post_id: Mapped[int | None] = mapped_column(ForeignKey("post_logs.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class ImagePromptSettings(Base):
+    __tablename__ = "image_prompt_settings"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    persona_id: Mapped[int] = mapped_column(ForeignKey("ai_personas.id", ondelete="CASCADE"), unique=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    subject_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    style_tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    mood_tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    color_palette: Mapped[str | None] = mapped_column(String, nullable=True)
+    negative_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    aspect_ratio: Mapped[str] = mapped_column(String, default="1:1", nullable=False)
+    text_overlay_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    text_overlay_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    text_overlay_style: Mapped[str | None] = mapped_column(String, nullable=True)
+    reference_image_descriptors: Mapped[str | None] = mapped_column(Text, nullable=True)
+    assembled_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+

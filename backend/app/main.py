@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
-from sqlalchemy import func
+from sqlalchemy import func, Integer
 from sqlalchemy.orm import Session, object_session
 
 from app import models, schemas
@@ -28,12 +28,18 @@ from app.config import (
     FACEBOOK_OAUTH_SCOPES,
     FACEBOOK_REDIRECT_URI,
     FACEBOOK_TOKEN_ENCRYPTION_KEY,
+    FAL_API_KEY,
     FRONTEND_URL,
+    GEMINI_API_KEY,
     MISTRAL_API_KEY,
     MISTRAL_MODEL,
+    OPENAI_API_KEY,
     SECRET_KEY,
+    STABILITY_API_KEY,
     CRON_SECRET,
     SCHEDULER_INTERVAL_SECONDS,
+    SUPABASE_SERVICE_KEY,
+    SUPABASE_URL,
 )
 from app.crypto import decrypt_token, encrypt_token
 from app.database import create_database_tables, get_db
@@ -101,11 +107,67 @@ def _print_startup_config_status() -> None:
         "MISTRAL_API_KEY": bool(MISTRAL_API_KEY),
         "CRON_SECRET": bool(CRON_SECRET and CRON_SECRET != "your_cron_secret_here"),
     }
+    optional_env = {
+        "FAL_API_KEY": bool(FAL_API_KEY),
+        "STABILITY_API_KEY": bool(STABILITY_API_KEY),
+        "OPENAI_API_KEY": bool(OPENAI_API_KEY),
+        "GEMINI_API_KEY": bool(GEMINI_API_KEY),
+        "SUPABASE_URL": bool(SUPABASE_URL),
+        "SUPABASE_SERVICE_KEY": bool(SUPABASE_SERVICE_KEY),
+    }
     print("Environment configuration:")
     for name, loaded in required_env.items():
         status_icon = "OK" if loaded else "MISSING"
         status_message = "loaded" if loaded else "is missing"
         print(f"  [{status_icon}] {name} {status_message}")
+    print("Optional provider keys:")
+    for name, loaded in optional_env.items():
+        status_icon = "OK" if loaded else "MISSING"
+        print(f"  [{status_icon}] {name}")
+
+
+async def _ensure_supabase_storage_bucket() -> None:
+    """Create the 'generated-images' bucket in Supabase Storage if it doesn't exist.
+
+    Requires SUPABASE_URL and SUPABASE_SERVICE_KEY to be set in the environment.
+    If either is missing the function logs a warning and returns without error.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        print("  [SKIP] Supabase storage setup skipped — SUPABASE_URL or SUPABASE_SERVICE_KEY not set.")
+        return
+
+    bucket_name = "generated-images"
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+    storage_url = SUPABASE_URL.rstrip("/") + "/storage/v1"
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        # Check if bucket already exists
+        list_resp = await client.get(f"{storage_url}/bucket", headers=headers)
+        if list_resp.status_code == 200:
+            existing = [b.get("name") for b in list_resp.json()]
+            if bucket_name in existing:
+                print(f"  [OK] Supabase bucket '{bucket_name}' already exists.")
+                return
+
+        # Create the bucket with public read access
+        create_resp = await client.post(
+            f"{storage_url}/bucket",
+            headers=headers,
+            json={"id": bucket_name, "name": bucket_name, "public": True},
+        )
+        if create_resp.status_code in (200, 201):
+            print(f"  [OK] Supabase bucket '{bucket_name}' created with public read access.")
+        elif create_resp.status_code == 409:
+            print(f"  [OK] Supabase bucket '{bucket_name}' already exists (conflict).")
+        else:
+            print(
+                f"  [WARN] Could not create Supabase bucket '{bucket_name}': "
+                f"{create_resp.status_code} {create_resp.text[:200]}"
+            )
 
 
 @asynccontextmanager
@@ -113,6 +175,7 @@ async def lifespan(app: FastAPI):
     global scheduler_task
     _print_startup_config_status()
     create_database_tables()
+    await _ensure_supabase_storage_bucket()
     scheduler_task = asyncio.create_task(_scheduled_post_worker())
     try:
         yield
@@ -1336,6 +1399,56 @@ def update_ai_persona(
     return _serialize_ai_persona(persona)
 
 
+@app.get("/api/ai/personas/{persona_id}/strategy", response_model=schemas.LearnedStrategyRead | None)
+def get_persona_strategy(
+    persona_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    persona = db.query(models.AIPersona).filter(models.AIPersona.id == persona_id, models.AIPersona.user_id == current_user.id).first()
+    if not persona:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persona not found")
+    strategy = (
+        db.query(models.LearnedStrategy)
+        .filter(models.LearnedStrategy.persona_id == persona_id)
+        .order_by(models.LearnedStrategy.created_at.desc())
+        .first()
+    )
+    return strategy
+
+
+@app.post("/api/ai/personas/{persona_id}/strategy-decision")
+def apply_strategy_decision(
+    persona_id: int,
+    payload: schemas.StrategyDecisionRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    persona = db.query(models.AIPersona).filter(models.AIPersona.id == persona_id, models.AIPersona.user_id == current_user.id).first()
+    if not persona:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persona not found")
+    
+    strategy = (
+        db.query(models.LearnedStrategy)
+        .filter(models.LearnedStrategy.persona_id == persona_id)
+        .order_by(models.LearnedStrategy.created_at.desc())
+        .first()
+    )
+    if not strategy:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No strategy found to apply")
+
+    if payload.action == "accept":
+        persona.custom_prompt = strategy.suggested_prompt
+        persona.custom_instructions = strategy.suggested_prompt
+    elif payload.action == "partial" and payload.prompt is not None:
+        persona.custom_prompt = payload.prompt
+        persona.custom_instructions = payload.prompt
+    
+    strategy.applied_to_prompt = True
+    db.commit()
+    return {"success": True}
+
+
 @app.get("/api/ai/settings/{page_connection_id}", response_model=schemas.AIPageSettingsRead | None)
 def get_ai_page_settings(page_connection_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     personas = list_ai_personas(page_connection_id, current_user, db)
@@ -2184,6 +2297,22 @@ async def publish_post(
             )
 
         success = await publish_post_to_facebook(db, post_log, connection)
+        if success and post_log.ai_generated:
+            # Check if it was edited
+            was_edited = db.query(models.LearningSignal).filter(
+                models.LearningSignal.user_id == current_user.id,
+                models.LearningSignal.signal_type == "user_edit",
+                models.LearningSignal.signal_data.op("->>")("post_id").cast(Integer) == post_log.id
+            ).first() is not None
+            if not was_edited:
+                _record_learning_signal(
+                    db,
+                    current_user.id,
+                    post_log.ai_persona_id,
+                    "user_publish_unedited",
+                    {"post_id": post_log.id, "content": post_log.content[:1000]},
+                    1.0,
+                )
         db.refresh(post_log)
         return {
             "success": success,
@@ -2285,7 +2414,16 @@ def update_post(
     post = db.query(models.PostLog).filter(models.PostLog.id == post_id, models.PostLog.user_id == current_user.id).first()
     if post is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
-    if payload.message is not None:
+    if payload.message is not None and payload.message != post.content:
+        if post.ai_generated:
+            _record_learning_signal(
+                db,
+                current_user.id,
+                post.ai_persona_id,
+                "user_edit",
+                {"post_id": post.id, "original_content": post.content[:1000], "new_content": payload.message[:1000]},
+                -0.5,
+            )
         post.content = payload.message
     if payload.media_urls is not None:
         post.media_urls = payload.media_urls
@@ -2313,6 +2451,15 @@ def delete_post(
     post = db.query(models.PostLog).filter(models.PostLog.id == post_id, models.PostLog.user_id == current_user.id).first()
     if post is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
+    if post.ai_generated:
+        _record_learning_signal(
+            db,
+            current_user.id,
+            post.ai_persona_id,
+            "user_delete",
+            {"post_id": post.id, "content": post.content[:1000], "status": post.status},
+            -1.0,
+        )
     db.delete(post)
     db.commit()
     return {"success": True}

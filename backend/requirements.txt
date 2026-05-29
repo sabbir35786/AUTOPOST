@@ -7,3 +7,9 @@ bcrypt
 httpx
 openai
 psycopg[binary]
+fal-client
+stability-sdk
+google-generativeai
+supabase
+anthropic
+mistralai
