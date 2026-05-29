@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from secrets import token_urlsafe
 from urllib.parse import urlencode, urlparse
 
