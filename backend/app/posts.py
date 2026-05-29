@@ -202,18 +202,21 @@ async def publish_post_to_facebook(
 
 def _facebook_error_code(response: httpx.Response) -> int | None:
     try:
-        return response.json().get("error", {}).get("code")
-    except ValueError:
+        import json
+        return json.loads(response.text).get("error", {}).get("code")
+    except Exception:
         return None
 
 
 def _facebook_publish_error_message(response: httpx.Response) -> str:
     error_text = response.text
     try:
-        error_data = response.json().get("error", {})
+        import json
+        data = json.loads(error_text)
+        error_data = data.get("error", {})
         error_code = error_data.get("code")
         error_message = error_data.get("message") or error_text
-    except ValueError:
+    except Exception:
         error_code = None
         error_message = error_text
 
