@@ -499,13 +499,18 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
 }
 
 function StyleAnalyzerView({ pages }: { pages: PageConnection[] }) {
-  const [page, setPage] = React.useState("")
+  const [trackedPages, setTrackedPages] = React.useState<any[]>([])
+  const [trackedPageId, setTrackedPageId] = React.useState("")
   const [analysis, setAnalysis] = React.useState<StyleAnalysis | null>(null)
   const [loading, setLoading] = React.useState(false)
   const [loadingStep, setLoadingStep] = React.useState("")
   const [personas, setPersonas] = React.useState<AIPersona[]>([])
   const [personaId, setPersonaId] = React.useState("")
   const selectedPage = pages[0]
+  
+  React.useEffect(() => {
+    api.get("/api/tracker").then((response) => setTrackedPages(response.data.tracked_pages)).catch(() => setTrackedPages([]))
+  }, [])
   React.useEffect(() => {
     if (!selectedPage?.id) return
     api.get<AIPersona[]>(`/api/ai/personas/${selectedPage.id}`).then((response) => setPersonas(response.data)).catch(() => setPersonas([]))
@@ -531,9 +536,10 @@ function StyleAnalyzerView({ pages }: { pages: PageConnection[] }) {
     return () => clearInterval(interval)
   }, [loading])
   async function analyze(own = false) {
+    if (!own && !trackedPageId) return toast.error("Select a tracked page.")
     setLoading(true)
     try {
-      const response = await api.post<StyleAnalysis>("/api/style/analyze", own ? { own_page_connection_id: selectedPage?.id } : { page })
+      const response = await api.post<StyleAnalysis>("/api/style/analyze", own ? { own_page_connection_id: selectedPage?.id } : { tracked_page_id: Number(trackedPageId) })
       setAnalysis(response.data)
       toast.success("Style analysis complete.")
     } catch (error: any) {
@@ -548,13 +554,15 @@ function StyleAnalyzerView({ pages }: { pages: PageConnection[] }) {
     toast.success("Style added to persona prompt.")
   }
   const report = analysis?.report
-  return <><PageTitle title="Style Analyzer" subtitle="Study public Facebook Page style and apply the patterns to your own prompts." aiPowered /><Card><CardContent className="grid gap-3 p-5"><Label>Enter a Facebook Page URL or Page ID to analyze.</Label><div className="flex flex-col gap-2 sm:flex-row"><Input value={page} onChange={(event) => setPage(event.target.value)} placeholder="https://facebook.com/page or Page ID" /><Button className="bg-blue-700 hover:bg-blue-800" onClick={() => analyze(false)} disabled={loading}>{loading ? <><Loader2 className="size-4 animate-spin mr-2" /> {loadingStep}</> : <><Search className="size-4 mr-2" /> Analyze</>}</Button><Button variant="outline" onClick={() => analyze(true)} disabled={loading || !selectedPage}>Analyze My Own Page</Button></div></CardContent></Card>{report ? <div className="grid gap-4"><Card><CardHeader><CardTitle>Writing Style Profile</CardTitle></CardHeader><CardContent className="grid gap-3 md:grid-cols-3"><Stat label="Average words" value={Number(report.writing_style?.average_words || 0)} /><Stat label="Question endings %" value={Number(report.writing_style?.question_ending_percent || 0)} /><Stat label="Avg engagement" value={Number(report.posting_behavior?.average_engagement_score || 0)} /><div className="md:col-span-3 flex flex-wrap gap-2">{(report.writing_style?.top_words || []).slice(0, 24).map((word: any) => <span key={word.text} className="rounded-full border bg-white px-3 py-1 text-sm" style={{ fontSize: `${Math.min(22, 11 + word.count)}px` }}>{word.text}</span>)}</div></CardContent></Card><Card><CardHeader><CardTitle>Content Topics</CardTitle></CardHeader><CardContent className="flex flex-wrap gap-2">{(report.topics || []).map((topic: any) => <span key={topic.name || topic} className="rounded-full bg-blue-50 px-3 py-1 text-blue-700" style={{ fontSize: `${Math.min(24, 12 + Number(topic.count || 1) * 2)}px` }}>{topic.name || topic}</span>)}</CardContent></Card><Card><CardHeader><CardTitle>Posting Behavior</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><MiniBars items={(report.posting_behavior?.best_days || []).map((item: any) => ({ label: item.day, value: item.score }))} /><MiniBars items={(report.posting_behavior?.best_hours || []).map((item: any) => ({ label: `${item.hour}:00`, value: item.score }))} /></CardContent></Card><Card><CardHeader><CardTitle>Top 5 Posts</CardTitle></CardHeader><CardContent className="grid gap-3">{(report.top_posts || []).map((post: any) => <div key={post.facebook_post_id || post.content} className="rounded-md border p-3"><p className="whitespace-pre-wrap text-sm">{post.content}</p><p className="mt-2 text-xs text-slate-500">Likes {post.likes_count} · Comments {post.comments_count} · Shares {post.shares_count} · Score {post.engagement_score}</p></div>)}</CardContent></Card><Card><CardHeader><CardTitle>AI Style Summary</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="text-sm text-slate-700">{report.summary}</p><div className="flex flex-col gap-2 sm:flex-row"><Select value={personaId} onChange={(event) => setPersonaId(event.target.value)}><option value="">Choose persona</option>{personas.map((persona) => <option key={persona.id} value={persona.id}>{persona.persona_name}</option>)}</Select><Button className="bg-blue-700 hover:bg-blue-800" onClick={applyStyle}>Apply This Style to My Persona</Button></div></CardContent></Card></div> : null}</>
+  return <><PageTitle title="Style Analyzer" subtitle="Study public Facebook Page style and apply the patterns to your own prompts." aiPowered /><Card><CardContent className="grid gap-3 p-5"><Label>Select a Tracked Page to analyze.</Label><div className="flex flex-col gap-2 sm:flex-row"><Select value={trackedPageId} onChange={(event) => setTrackedPageId(event.target.value)}><option value="">Choose a Tracked Page</option>{trackedPages.map((tp) => <option key={tp.id} value={tp.id}>{tp.nickname}</option>)}</Select><Button className="bg-blue-700 hover:bg-blue-800" onClick={() => analyze(false)} disabled={loading}>{loading ? <><Loader2 className="size-4 animate-spin mr-2" /> {loadingStep}</> : <><Search className="size-4 mr-2" /> Analyze</>}</Button><Button variant="outline" onClick={() => analyze(true)} disabled={loading || !selectedPage}>Analyze My Own Page</Button></div></CardContent></Card>{report ? <div className="grid gap-4"><Card><CardHeader><CardTitle>Writing Style Profile</CardTitle></CardHeader><CardContent className="grid gap-3 md:grid-cols-3"><Stat label="Average words" value={Number(report.writing_style?.average_words || 0)} /><Stat label="Question endings %" value={Number(report.writing_style?.question_ending_percent || 0)} /><Stat label="Avg engagement" value={Number(report.posting_behavior?.average_engagement_score || 0)} /><div className="md:col-span-3 flex flex-wrap gap-2">{(report.writing_style?.top_words || []).slice(0, 24).map((word: any) => <span key={word.text} className="rounded-full border bg-white px-3 py-1 text-sm" style={{ fontSize: `${Math.min(22, 11 + word.count)}px` }}>{word.text}</span>)}</div></CardContent></Card><Card><CardHeader><CardTitle>Content Topics</CardTitle></CardHeader><CardContent className="flex flex-wrap gap-2">{(report.topics || []).map((topic: any) => <span key={topic.name || topic} className="rounded-full bg-blue-50 px-3 py-1 text-blue-700" style={{ fontSize: `${Math.min(24, 12 + Number(topic.count || 1) * 2)}px` }}>{topic.name || topic}</span>)}</CardContent></Card><Card><CardHeader><CardTitle>Posting Behavior</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><MiniBars items={(report.posting_behavior?.best_days || []).map((item: any) => ({ label: item.day, value: item.score }))} /><MiniBars items={(report.posting_behavior?.best_hours || []).map((item: any) => ({ label: `${item.hour}:00`, value: item.score }))} /></CardContent></Card><Card><CardHeader><CardTitle>Top 5 Posts</CardTitle></CardHeader><CardContent className="grid gap-3">{(report.top_posts || []).map((post: any) => <div key={post.facebook_post_id || post.content} className="rounded-md border p-3"><p className="whitespace-pre-wrap text-sm">{post.content}</p><p className="mt-2 text-xs text-slate-500">Likes {post.likes_count} · Comments {post.comments_count} · Shares {post.shares_count} · Score {post.engagement_score}</p></div>)}</CardContent></Card><Card><CardHeader><CardTitle>AI Style Summary</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="text-sm text-slate-700">{report.summary}</p><div className="flex flex-col gap-2 sm:flex-row"><Select value={personaId} onChange={(event) => setPersonaId(event.target.value)}><option value="">Choose persona</option>{personas.map((persona) => <option key={persona.id} value={persona.id}>{persona.persona_name}</option>)}</Select><Button className="bg-blue-700 hover:bg-blue-800" onClick={applyStyle}>Apply This Style to My Persona</Button></div></CardContent></Card></div> : null}</>
 }
 
 function PageTrackerView({ pages }: { pages: PageConnection[] }) {
   const [data, setData] = React.useState<TrackerDashboard | null>(null)
-  const [page, setPage] = React.useState("")
-  const [nickname, setNickname] = React.useState("")
+  const [url, setUrl] = React.useState("")
+  const [name, setName] = React.useState("")
+  const [addingPostsFor, setAddingPostsFor] = React.useState<any | null>(null)
+  const [manualPosts, setManualPosts] = React.useState("")
   const [loading, setLoading] = React.useState(false)
   const [personas, setPersonas] = React.useState<AIPersona[]>([])
   const [personaId, setPersonaId] = React.useState("")
@@ -578,11 +586,12 @@ function PageTrackerView({ pages }: { pages: PageConnection[] }) {
     return () => observer.disconnect()
   }, [])
   async function addPage() {
+    if (!url || !name) return toast.error("Provide URL and Name.")
     setLoading(true)
     try {
-      await api.post("/api/tracker/pages", { page, nickname })
-      setPage("")
-      setNickname("")
+      await api.post("/api/tracker/pages", { url, name })
+      setUrl("")
+      setName("")
       toast.success("Page added to tracker.")
       await load()
     } catch (error: any) {
@@ -591,17 +600,28 @@ function PageTrackerView({ pages }: { pages: PageConnection[] }) {
       setLoading(false)
     }
   }
-  async function refresh() {
+  async function submitManualPosts() {
+    if (!manualPosts.trim()) return
     setLoading(true)
-    await api.post("/api/tracker/refresh").finally(() => setLoading(false))
-    await load()
+    try {
+      const postsArray = manualPosts.split("\n\n").filter((p) => p.trim())
+      await api.post(`/api/tracker/pages/${addingPostsFor.id}/posts`, { posts: postsArray })
+      setManualPosts("")
+      setAddingPostsFor(null)
+      toast.success("Posts added successfully.")
+      await load()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || "Could not add posts.")
+    } finally {
+      setLoading(false)
+    }
   }
   async function useInspiration(content: string) {
     if (!personaId) return toast.error("Choose a persona first.")
     await api.post("/api/style/apply", { persona_id: Number(personaId), inspiration_post: content })
     toast.success("Post added as style inspiration.")
   }
-  return <><PageTitle title="Page Tracker" subtitle="Track public pages, spot winning posts, and borrow style inspiration responsibly." aiPowered /><Card><CardContent className="grid gap-3 p-5"><div className="grid gap-2 md:grid-cols-[1fr_220px_auto_auto]"><Input value={page} onChange={(event) => setPage(event.target.value)} placeholder="Facebook Page URL or ID" /><Input value={nickname} onChange={(event) => setNickname(event.target.value)} placeholder="Nickname" /><Button className="bg-blue-700 hover:bg-blue-800" onClick={addPage} disabled={loading}>Add Page</Button><Button variant="outline" onClick={refresh} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div><Select className="max-w-sm" value={personaId} onChange={(event) => setPersonaId(event.target.value)}><option value="">Persona for style inspiration</option>{personas.map((persona) => <option key={persona.id} value={persona.id}>{persona.persona_name}</option>)}</Select><p className="text-xs text-slate-500">{data?.tracked_pages.length || 0}/10 pages tracked.</p></CardContent></Card>{data?.trends.map((trend) => <div key={trend.id} className="rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><span>{trend.summary}</span><Button asChild variant="outline"><Link href={`/dashboard/create?topic=${encodeURIComponent(trend.topic)}`}>Generate</Link></Button></div></div>)}<Card><CardHeader><CardTitle>Top Tracked Posts This Week</CardTitle></CardHeader><CardContent className="grid gap-3">{data?.posts.slice(0, visibleCount).map((post) => <div key={post.id} className="grid gap-2 rounded-md border p-3"><div className="flex flex-wrap justify-between gap-2 text-sm"><span className="font-medium">{post.page_name}</span><span className="text-slate-500">Score {post.engagement_score.toFixed(1)}</span></div><p className="whitespace-pre-wrap text-sm text-slate-700">{post.content}</p><p className="text-xs text-slate-500">Likes {post.likes_count} · Comments {post.comments_count} · Shares {post.shares_count} · Topic {post.topic || "-"}</p><Button variant="outline" className="w-fit" onClick={() => useInspiration(post.content)}>Use This as Style Inspiration</Button></div>)}{!data?.posts.length ? <p className="text-sm text-slate-500">No tracked posts yet. Add a page to start collecting examples.</p> : null}{data?.posts && data.posts.length > visibleCount ? <div ref={loaderRef} className="py-4 text-center text-slate-500 flex justify-center"><Loader2 className="size-4 animate-spin" /></div> : null}</CardContent></Card><Card><CardHeader><CardTitle>Weekly Comparison</CardTitle></CardHeader><CardContent className="overflow-x-auto"><table className="w-full min-w-[760px] text-sm"><thead><tr className="text-left text-slate-500"><th className="p-2">Page</th><th className="p-2">Posts</th><th className="p-2">Avg Likes</th><th className="p-2">Avg Comments</th><th className="p-2">Avg Shares</th><th className="p-2">Active Day</th><th className="p-2">Topics</th></tr></thead><tbody>{data?.comparison.map((row) => <tr key={row.id} className="border-t"><td className="p-2 font-medium">{row.nickname}</td><td className="p-2">{row.posts}</td><td className="p-2">{row.average_likes}</td><td className="p-2">{row.average_comments}</td><td className="p-2">{row.average_shares}</td><td className="p-2">{row.most_active_day}</td><td className="p-2">{row.most_used_topics}</td></tr>)}</tbody></table></CardContent></Card></>
+  return <><PageTitle title="Page Tracker" subtitle="Track public pages, spot winning posts, and borrow style inspiration responsibly." aiPowered /><Sheet open={!!addingPostsFor} onOpenChange={(open) => !open && setAddingPostsFor(null)}><SheetContent className="overflow-y-auto w-full max-w-md"><div className="grid gap-4 mt-6"><h2 className="text-lg font-semibold">Add Posts to {addingPostsFor?.nickname}</h2><p className="text-sm text-slate-500">Paste recent posts from this page. Separate multiple posts by double newlines.</p><Textarea className="min-h-64" value={manualPosts} onChange={(e) => setManualPosts(e.target.value)} placeholder="Post 1 content...&#10;&#10;Post 2 content..." /><Button onClick={submitManualPosts} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin mr-2" /> : null} Save Posts</Button></div></SheetContent></Sheet><Card><CardContent className="grid gap-3 p-5"><div className="grid gap-2 md:grid-cols-[1fr_220px_auto]"><Input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="Facebook Page URL" /><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Page Name" /><Button className="bg-blue-700 hover:bg-blue-800" onClick={addPage} disabled={loading}>Add Page</Button></div><Select className="max-w-sm" value={personaId} onChange={(event) => setPersonaId(event.target.value)}><option value="">Persona for style inspiration</option>{personas.map((persona) => <option key={persona.id} value={persona.id}>{persona.persona_name}</option>)}</Select><p className="text-xs text-slate-500">{data?.tracked_pages.length || 0}/10 pages tracked.</p></CardContent></Card>{data?.trends.map((trend) => <div key={trend.id} className="rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><span>{trend.summary}</span><Button asChild variant="outline"><Link href={`/dashboard/create?topic=${encodeURIComponent(trend.topic)}`}>Generate</Link></Button></div></div>)}<Card><CardHeader><CardTitle>Top Tracked Posts This Week</CardTitle></CardHeader><CardContent className="grid gap-3">{data?.posts.slice(0, visibleCount).map((post) => <div key={post.id} className="grid gap-2 rounded-md border p-3"><div className="flex flex-wrap justify-between gap-2 text-sm"><span className="font-medium">{post.page_name}</span><span className="text-slate-500">Score {post.engagement_score.toFixed(1)}</span></div><p className="whitespace-pre-wrap text-sm text-slate-700">{post.content}</p><p className="text-xs text-slate-500">Likes {post.likes_count} · Comments {post.comments_count} · Shares {post.shares_count} · Topic {post.topic || "-"}</p><Button variant="outline" className="w-fit" onClick={() => useInspiration(post.content)}>Use This as Style Inspiration</Button></div>)}{!data?.posts.length ? <p className="text-sm text-slate-500">No tracked posts yet. Add a page to start collecting examples.</p> : null}{data?.posts && data.posts.length > visibleCount ? <div ref={loaderRef} className="py-4 text-center text-slate-500 flex justify-center"><Loader2 className="size-4 animate-spin" /></div> : null}</CardContent></Card><Card><CardHeader><CardTitle>Weekly Comparison</CardTitle></CardHeader><CardContent className="overflow-x-auto"><table className="w-full min-w-[760px] text-sm"><thead><tr className="text-left text-slate-500"><th className="p-2">Page</th><th className="p-2">Posts</th><th className="p-2">Avg Likes</th><th className="p-2">Avg Comments</th><th className="p-2">Avg Shares</th><th className="p-2">Active Day</th><th className="p-2">Topics</th><th className="p-2">Actions</th></tr></thead><tbody>{data?.comparison.map((row) => <tr key={row.id} className="border-t"><td className="p-2 font-medium">{row.nickname}</td><td className="p-2">{row.posts}</td><td className="p-2">{row.average_likes}</td><td className="p-2">{row.average_comments}</td><td className="p-2">{row.average_shares}</td><td className="p-2">{row.most_active_day}</td><td className="p-2">{row.most_used_topics}</td><td className="p-2"><Button variant="outline" size="sm" onClick={() => setAddingPostsFor(row)}>Add Posts</Button></td></tr>)}</tbody></table></CardContent></Card></>
 }
 
 function MiniBars({ items }: { items: { label: string; value: number }[] }) {

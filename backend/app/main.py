@@ -912,42 +912,7 @@ def _analysis_token(db: Session, current_user: models.User, own_page_connection_
     return decrypt_token(connection.page_access_token)
 
 
-async def _fetch_page_posts_for_analysis(page_identifier: str, access_token: str, limit: int = 25) -> tuple[str | None, list[dict]]:
-    async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL, timeout=45) as client:
-        page_response = await client.get(page_identifier, params={"fields": "id,name", "access_token": access_token})
-        if page_response.status_code >= 400:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Facebook could not access this page. Public page analysis may require a page token with read permissions.")
-        page_data = page_response.json()
-        posts_response = await client.get(
-            f"{page_data.get('id')}/posts",
-            params={
-                "fields": "id,message,created_time,likes.summary(true),comments.summary(true),shares",
-                "limit": limit,
-                "access_token": access_token,
-            },
-        )
-    if posts_response.status_code >= 400:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Facebook could not fetch posts for this page")
-    posts = []
-    for item in posts_response.json().get("data", []):
-        message = (item.get("message") or "").strip()
-        if not message:
-            continue
-        likes = int(item.get("likes", {}).get("summary", {}).get("total_count") or 0)
-        comments = int(item.get("comments", {}).get("summary", {}).get("total_count") or 0)
-        shares = int(item.get("shares", {}).get("count") or 0)
-        created_time = item.get("created_time")
-        posted_at = datetime.fromisoformat(created_time.replace("Z", "+00:00")) if created_time else None
-        posts.append({
-            "facebook_post_id": item.get("id"),
-            "content": message,
-            "posted_at": posted_at,
-            "likes_count": likes,
-            "comments_count": comments,
-            "shares_count": shares,
-            "engagement_score": likes + comments * 3 + shares * 5,
-        })
-    return page_data.get("name"), posts
+
 
 
 def _emoji_count(text: str) -> int:
@@ -1007,31 +972,22 @@ def _style_report_from_posts(page_name: str | None, posts: list[dict]) -> dict:
     }
 
 
-def _save_tracked_posts(db: Session, tracked: models.TrackedPage, posts: list[dict]) -> None:
-    for post in posts:
-        facebook_post_id = post.get("facebook_post_id")
-        if not facebook_post_id:
+def _save_tracked_posts(db: Session, tracked: models.TrackedPage, posts: list[str]) -> None:
+    import uuid
+    for post_content in posts:
+        post_content = post_content.strip()
+        if not post_content:
             continue
-        exists = (
-            db.query(models.TrackedPagePost)
-            .filter(
-                models.TrackedPagePost.tracked_page_id == tracked.id,
-                models.TrackedPagePost.facebook_post_id == facebook_post_id,
-            )
-            .first()
-        )
-        if exists:
-            continue
-        topic = classify_post_topic(post["content"], MISTRAL_MODEL)
+        topic = classify_post_topic(post_content, MISTRAL_MODEL)
         tracked_post = models.TrackedPagePost(
             tracked_page_id=tracked.id,
-            facebook_post_id=facebook_post_id,
-            content=post["content"],
-            posted_at=post.get("posted_at"),
-            likes_count=post.get("likes_count", 0),
-            comments_count=post.get("comments_count", 0),
-            shares_count=post.get("shares_count", 0),
-            engagement_score=post.get("engagement_score", 0),
+            facebook_post_id=str(uuid.uuid4()),
+            content=post_content,
+            posted_at=datetime.now(timezone.utc),
+            likes_count=0,
+            comments_count=0,
+            shares_count=0,
+            engagement_score=0,
             topic=topic,
         )
         db.add(tracked_post)
@@ -1041,8 +997,8 @@ def _save_tracked_posts(db: Session, tracked: models.TrackedPage, posts: list[di
                 tracked.user_id,
                 None,
                 "competitor_trend",
-                {"tracked_page_id": tracked.id, "topic": topic, "content": post["content"][:500]},
-                float(post.get("engagement_score", 0) or 0),
+                {"tracked_page_id": tracked.id, "topic": topic, "content": post_content[:500]},
+                0.0,
             )
 
 
@@ -1155,48 +1111,7 @@ def _synthesize_persona_strategy(db: Session, persona: models.AIPersona, week_st
     return strategy
 
 
-async def refresh_tracked_pages(db: Session, current_user: models.User) -> None:
-    tracked_pages = db.query(models.TrackedPage).filter(models.TrackedPage.user_id == current_user.id, models.TrackedPage.is_active.is_(True)).all()
-    if not tracked_pages:
-        return
-    token = _analysis_token(db, current_user)
-    now = datetime.now(timezone.utc)
-    for tracked in tracked_pages:
-        if tracked.last_checked_at and now - tracked.last_checked_at < timedelta(hours=20):
-            continue
-        page_name, posts = await _fetch_page_posts_for_analysis(tracked.page_identifier, token, limit=25)
-        tracked.page_name = page_name or tracked.page_name
-        _save_tracked_posts(db, tracked, posts)
-        tracked.last_checked_at = now
-    _detect_tracker_trends(db, current_user.id)
-    db.commit()
 
-
-async def refresh_due_tracked_pages_all() -> None:
-    from app.database import SessionLocal
-
-    db = SessionLocal()
-    try:
-        now = datetime.now(timezone.utc)
-        user_ids = [
-            row[0]
-            for row in db.query(models.TrackedPage.user_id)
-            .filter(
-                models.TrackedPage.is_active.is_(True),
-                (models.TrackedPage.last_checked_at.is_(None)) | (models.TrackedPage.last_checked_at <= now - timedelta(hours=20)),
-            )
-            .distinct()
-            .all()
-        ]
-        for user_id in user_ids:
-            user = db.get(models.User, user_id)
-            if user:
-                try:
-                    await refresh_tracked_pages(db, user)
-                except Exception as exc:
-                    print(f"Tracked page refresh failed for user {user_id}: {exc}")
-    finally:
-        db.close()
 
 
 def _detect_tracker_trends(db: Session, user_id: int) -> None:
@@ -1476,15 +1391,38 @@ async def analyze_facebook_style(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    source_type = "own_page" if payload.own_page_connection_id else "public_page"
+    source_type = "own_page" if payload.own_page_connection_id else "tracked_page"
+    page_name = None
+    posts = []
+    
     if payload.own_page_connection_id:
         connection = _get_owned_page(db, current_user.id, payload.own_page_connection_id)
         identifier = connection.page_id
-        token = decrypt_token(connection.page_access_token)
+        page_name = connection.page_name
+        db_posts = db.query(models.PostLog).filter(models.PostLog.facebook_connection_id == connection.id, models.PostLog.status.in_(["published", "success"])).all()
+        for p in db_posts:
+            snapshot = _latest_snapshot_map(db, [p.id]).get(p.id)
+            posts.append({
+                "content": p.content,
+                "posted_at": p.posted_at,
+                "engagement_score": snapshot.engagement_score if snapshot else 0,
+            })
     else:
-        identifier = _facebook_page_identifier(payload.page or "")
-        token = _analysis_token(db, current_user)
-    page_name, posts = await _fetch_page_posts_for_analysis(identifier, token)
+        if not payload.tracked_page_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Must provide own_page_connection_id or tracked_page_id")
+        tracked = db.query(models.TrackedPage).filter(models.TrackedPage.id == payload.tracked_page_id, models.TrackedPage.user_id == current_user.id).first()
+        if not tracked:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tracked page not found")
+        identifier = tracked.page_identifier
+        page_name = tracked.page_name
+        db_posts = db.query(models.TrackedPagePost).filter(models.TrackedPagePost.tracked_page_id == tracked.id).all()
+        for p in db_posts:
+            posts.append({
+                "content": p.content,
+                "posted_at": p.posted_at,
+                "engagement_score": p.engagement_score,
+            })
+
     if not posts:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No readable posts were found for this page")
     report = _style_report_from_posts(page_name, posts)
@@ -1617,25 +1555,25 @@ async def add_tracked_page(
 ):
     if db.query(models.TrackedPage).filter(models.TrackedPage.user_id == current_user.id).count() >= 10:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You can track up to 10 pages")
-    identifier = _facebook_page_identifier(payload.page)
-    token = _analysis_token(db, current_user)
-    page_name, posts = await _fetch_page_posts_for_analysis(identifier, token, limit=10)
-    tracked = models.TrackedPage(user_id=current_user.id, page_identifier=identifier, page_name=page_name, nickname=payload.nickname.strip() or page_name or identifier)
+    tracked = models.TrackedPage(user_id=current_user.id, page_identifier=payload.url, page_name=payload.name, nickname=payload.name)
     db.add(tracked)
-    db.flush()
-    _save_tracked_posts(db, tracked, posts)
-    tracked.last_checked_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(tracked)
     return tracked
 
-
-@app.post("/api/tracker/refresh")
-async def refresh_tracker_now(
+@app.post("/api/tracker/pages/{tracked_page_id}/posts")
+async def add_manual_tracked_posts(
+    tracked_page_id: int,
+    payload: schemas.TrackedPagePostsCreate,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    await refresh_tracked_pages(db, current_user)
+    tracked = db.query(models.TrackedPage).filter(models.TrackedPage.id == tracked_page_id, models.TrackedPage.user_id == current_user.id).first()
+    if not tracked:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tracked page not found")
+    _save_tracked_posts(db, tracked, payload.posts)
+    tracked.last_checked_at = datetime.now(timezone.utc)
+    db.commit()
     return {"success": True}
 
 
@@ -1848,6 +1786,12 @@ def dashboard_intelligence(
             warnings.append({"level": "amber", "text": f"{persona.persona_name} has failed to generate or publish 3 times in a row.", "href": "/dashboard/ai-settings"})
         if float(persona.performance_score or 0.5) < 0.3:
             warnings.append({"level": "amber", "text": f"{persona.persona_name} performance dropped below 0.3. Review its prompt.", "href": "/dashboard/ai-settings"})
+
+    tracked_pages = db.query(models.TrackedPage).filter(models.TrackedPage.user_id == current_user.id).all()
+    for page in tracked_pages:
+        last_post = db.query(models.TrackedPagePost).filter(models.TrackedPagePost.tracked_page_id == page.id).order_by(models.TrackedPagePost.created_at.desc()).first()
+        if not last_post or (now - last_post.created_at > timedelta(days=7)):
+            warnings.append({"level": "amber", "text": f"You haven't added new posts for {page.nickname} in 7 days. Visit their page and add recent posts to keep your tracking data fresh.", "href": "/dashboard/page-tracker"})
 
     return {
         "now": now,

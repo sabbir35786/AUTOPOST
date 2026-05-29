@@ -265,7 +265,7 @@ class PersonaLearningResetResponse(BaseModel):
 
 
 class StyleAnalyzeRequest(BaseModel):
-    page: str | None = None
+    tracked_page_id: int | None = None
     own_page_connection_id: int | None = None
 
 
@@ -287,8 +287,11 @@ class StyleApplyRequest(BaseModel):
 
 
 class TrackedPageCreate(BaseModel):
-    page: str
-    nickname: str
+    url: str
+    name: str
+
+class TrackedPagePostsCreate(BaseModel):
+    posts: list[str]
 
 
 class TrackedPageRead(BaseModel):
