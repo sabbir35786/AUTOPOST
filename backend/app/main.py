@@ -2249,12 +2249,17 @@ async def publish_composer_post(
             link_url=payload.link_url,
             link_preview_data=payload.link_preview_data,
         )
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=post_log.error_message or "Facebook rejected the post. Please try again.",
+            )
         return {
-            "success": success,
+            "success": True,
             "id": post_log.id,
             "status": post_log.status,
             "post_url": post_url,
-            "error_message": post_log.error_message,
+            "error_message": None,
         }
     finally:
         release_user_posting(current_user.id)
@@ -2278,14 +2283,14 @@ async def publish_post(
             .filter(
                 models.PostLog.id == post_id,
                 models.PostLog.user_id == current_user.id,
-                models.PostLog.status == "draft",
+                models.PostLog.status.in_(["draft", "scheduled"]),
             )
             .first()
         )
         if post_log is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Draft post not found",
+                detail="Post not found or already published",
             )
 
         connection = (
