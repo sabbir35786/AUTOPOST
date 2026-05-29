@@ -862,7 +862,7 @@ function dayName(day: string) {
   return { Mon: "Monday", Tue: "Tuesday", Wed: "Wednesday", Thu: "Thursday", Fri: "Friday", Sat: "Saturday", Sun: "Sunday" }[day] || day
 }
 
-function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab, saving, onPreviewTab, onChange, onConfig, onToggleTone, onToggleDay, onToggleConfigList, onAddTag, onSave, onTest, onResetLearning, onClose }: {
+function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab, saving, onPreviewTab, onChange, onConfig, onToggleTone, onToggleDay, onToggleConfigList, onAddTag, onSave, onTest, onResetLearning, onClose, strategy, onStrategyDecision }: {
   draft: AIPersona
   config: PromptStudioConfig
   simplePrompt: string
