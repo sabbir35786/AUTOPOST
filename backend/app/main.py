@@ -2283,7 +2283,7 @@ async def publish_post(
             .filter(
                 models.PostLog.id == post_id,
                 models.PostLog.user_id == current_user.id,
-                models.PostLog.status.in_(["draft", "scheduled"]),
+                models.PostLog.status.in_(["draft", "scheduled", "failed"]),
             )
             .first()
         )
@@ -2307,24 +2307,39 @@ async def publish_post(
                 detail="Facebook connection not found",
             )
 
+        if connection.connection_status != "connected":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Your Facebook connection has expired. Please reconnect your page.",
+            )
+
         success = await publish_post_to_facebook(db, post_log, connection)
         if success and post_log.ai_generated:
-            # Check if it was edited
-            was_edited = db.query(models.LearningSignal).filter(
-                models.LearningSignal.user_id == current_user.id,
-                models.LearningSignal.signal_type == "user_edit",
-                models.LearningSignal.signal_data.op("->>")("post_id").cast(Integer) == post_log.id
-            ).first() is not None
-            if not was_edited:
-                _record_learning_signal(
-                    db,
-                    current_user.id,
-                    post_log.ai_persona_id,
-                    "user_publish_unedited",
-                    {"post_id": post_log.id, "content": post_log.content[:1000]},
-                    1.0,
-                )
+            try:
+                was_edited = db.query(models.LearningSignal).filter(
+                    models.LearningSignal.user_id == current_user.id,
+                    models.LearningSignal.signal_type == "user_edit",
+                    models.LearningSignal.signal_data.op("->>")("post_id").cast(Integer) == post_log.id
+                ).first() is not None
+                if not was_edited:
+                    _record_learning_signal(
+                        db,
+                        current_user.id,
+                        post_log.ai_persona_id,
+                        "user_publish_unedited",
+                        {"post_id": post_log.id, "content": post_log.content[:1000]},
+                        1.0,
+                    )
+            except Exception:
+                pass
         db.refresh(post_log)
+
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=post_log.error_message or "Facebook rejected the post. Please try again.",
+            )
+
         return {
             "success": success,
             "id": post_log.id,
