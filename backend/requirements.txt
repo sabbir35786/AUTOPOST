@@ -13,3 +13,4 @@ google-generativeai
 supabase
 anthropic
 mistralai
+python-multipart

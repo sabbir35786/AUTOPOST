@@ -49,7 +49,11 @@ export default function LoginPage() {
       router.push("/dashboard")
     } catch (error) {
       const detail = axios.isAxiosError(error) ? error.response?.data?.detail : null
-      toast.error(detail || "Could not sign in. Check your email and password.")
+      if (axios.isAxiosError(error) && !error.response) {
+        toast.error("Network Error: Could not connect to the backend. Make sure your local server is running on port 8000.")
+      } else {
+        toast.error(detail || "Could not sign in. Check your email and password.")
+      }
     } finally {
       setIsSubmitting(false)
     }

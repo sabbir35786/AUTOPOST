@@ -58,8 +58,8 @@ from app.mistral_service import (
     analyze_style_with_mistral,
     classify_post_topic,
     generate_ai_facebook_post,
-    generate_persona_post,
-    generate_recommendations_with_mistral,
+    generate_ai_facebook_post_from_prompt,
+    generate_ai_recommendations,
 )
 from app.routers import images, models as models_router
 from app.mistral_service import (
@@ -178,8 +178,8 @@ async def lifespan(app: FastAPI):
     global scheduler_task
     _print_startup_config_status()
     create_database_tables()
-    await _ensure_supabase_storage_bucket()
     scheduler_task = asyncio.create_task(_scheduled_post_worker())
+    asyncio.create_task(_ensure_supabase_storage_bucket())
     try:
         yield
     finally:
