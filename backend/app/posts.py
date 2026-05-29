@@ -147,17 +147,34 @@ async def publish_post_to_facebook(
     post_date: date | None = None,
 ) -> bool:
     params = {
-        "message": post_log.content,
         "access_token": decrypt_token(connection.page_access_token),
     }
-    if post_log.link_url:
-        params["link"] = post_log.link_url
-    elif post_log.media_urls and post_log.media_urls[0]:
-        params["link"] = post_log.media_urls[0]
+    endpoint = f"{connection.page_id}/feed"
+    
+    # Check if there is an image from the media library
+    image_url = None
+    if post_log.media_library_id:
+        media = db.query(models.MediaLibrary).filter(models.MediaLibrary.id == post_log.media_library_id).first()
+        if media and media.image_url:
+            image_url = media.image_url
+            # Mark image as used
+            media.is_used = True
+            db.commit()
+
+    if image_url:
+        params["message"] = post_log.content
+        params["url"] = image_url
+        endpoint = f"{connection.page_id}/photos"
+    else:
+        params["message"] = post_log.content
+        if post_log.link_url:
+            params["link"] = post_log.link_url
+        elif post_log.media_urls and post_log.media_urls[0]:
+            params["link"] = post_log.media_urls[0]
 
     async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL) as client:
         response = await client.post(
-            f"{connection.page_id}/feed",
+            endpoint,
             params=params,
         )
 
@@ -524,6 +541,137 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
             )
             db.add(post_log)
             db.flush()
+
+            # Optional: Image Generation Layer
+            if settings.include_image:
+                import time
+                from app.routers.images import async_upload_to_supabase
+                from app.providers.image_providers import get_image_provider_for_user
+                
+                # Check frequency
+                total_posts = settings.total_posts_published
+                should_generate = False
+                freq = settings.image_frequency
+                if freq == "every_post":
+                    should_generate = True
+                elif freq == "every_other" and total_posts % 2 == 1:
+                    should_generate = True
+                elif freq == "1_in_3" and total_posts % 3 == 2:
+                    should_generate = True
+                elif freq == "1_in_5" and total_posts % 5 == 4:
+                    should_generate = True
+                elif freq == "weekends_only" and local_now.weekday() >= 5:
+                    should_generate = True
+
+                if should_generate:
+                    image_prompt = None
+                    if settings.image_prompt_source == "persona_prompt":
+                        psettings = db.query(models.ImagePromptSettings).filter(models.ImagePromptSettings.persona_id == settings.id).first()
+                        if psettings and psettings.assembled_prompt:
+                            image_prompt = psettings.assembled_prompt
+                    elif settings.image_prompt_source == "generate_from_post":
+                        from app.providers.llm_providers import generate_text_for_user
+                        sys_p = "You are an expert at writing prompts for AI image generation. Given a social media post text, write a detailed image generation prompt that would create the perfect visual to accompany that post. The image should enhance the post's message without containing any text. Return only the image generation prompt, nothing else, maximum 150 words."
+                        image_prompt = generate_text_for_user(
+                            user_id=settings.user_id,
+                            task_category="image_prompt_generation",
+                            prompt=content,
+                            system_prompt=sys_p,
+                            db=db,
+                            temperature=0.7,
+                            max_tokens=200,
+                        )
+                        if image_prompt:
+                            image_prompt = image_prompt.strip()
+                    elif settings.image_prompt_source == "library_image":
+                        oldest_unused = db.query(models.MediaLibrary).filter(
+                            models.MediaLibrary.persona_id == settings.id,
+                            models.MediaLibrary.is_used == False
+                        ).order_by(models.MediaLibrary.created_at.asc()).first()
+                        if oldest_unused:
+                            post_log.media_library_id = str(oldest_unused.id)
+                        else:
+                            # Fallback to generate_from_post
+                            from app.providers.llm_providers import generate_text_for_user
+                            sys_p = "You are an expert at writing prompts for AI image generation. Given a social media post text, write a detailed image generation prompt that would create the perfect visual to accompany that post. The image should enhance the post's message without containing any text. Return only the image generation prompt, nothing else, maximum 150 words."
+                            image_prompt = generate_text_for_user(
+                                user_id=settings.user_id,
+                                task_category="image_prompt_generation",
+                                prompt=content,
+                                system_prompt=sys_p,
+                                db=db,
+                                temperature=0.7,
+                                max_tokens=200,
+                            )
+                            if image_prompt:
+                                image_prompt = image_prompt.strip()
+
+                    if image_prompt and not post_log.media_library_id:
+                        provider_inst, model_name, api_key = get_image_provider_for_user(settings.user_id, db)
+                        provider_name = provider_inst.__class__.__name__.replace('Provider', '').lower()
+                        start_img_t = time.time()
+                        try:
+                            import asyncio
+                            import uuid
+                            async def _gen():
+                                return await asyncio.to_thread(
+                                    provider_inst.generate,
+                                    prompt=image_prompt,
+                                    negative_prompt="",
+                                    aspect_ratio="1:1",
+                                    model_name=model_name,
+                                    api_key=api_key,
+                                )
+                            img_bytes = await asyncio.wait_for(_gen(), timeout=settings.image_max_wait_seconds)
+                            job_id_str = str(uuid.uuid4())
+                            filename = f"{settings.user_id}/{job_id_str}.png"
+                            pub_url = await async_upload_to_supabase(filename, img_bytes)
+                            
+                            media = models.MediaLibrary(
+                                user_id=settings.user_id,
+                                persona_id=settings.id,
+                                image_url=pub_url,
+                                storage_path=filename,
+                                generation_prompt=image_prompt,
+                                provider=provider_name,
+                                model_name=model_name,
+                            )
+                            db.add(media)
+                            db.flush()
+                            post_log.media_library_id = str(media.id)
+                            elapsed = int(time.time() - start_img_t)
+                            print(f"Auto image generation for persona {settings.name}: provider={provider_name} status=success seconds={elapsed}")
+                        except asyncio.TimeoutError:
+                            elapsed = int(time.time() - start_img_t)
+                            print(f"Auto image generation for persona {settings.name}: provider={provider_name} status=timeout seconds={elapsed}")
+                            if settings.image_fallback_policy == "skip_post":
+                                post_log.status = "missed"
+                                post_log.error_message = "image_generation_failed (timeout)"
+                                db.commit()
+                                continue
+                            elif settings.image_fallback_policy == "use_library":
+                                any_unused = db.query(models.MediaLibrary).filter(
+                                    models.MediaLibrary.user_id == settings.user_id,
+                                    models.MediaLibrary.is_used == False
+                                ).order_by(models.MediaLibrary.created_at.asc()).first()
+                                if any_unused:
+                                    post_log.media_library_id = str(any_unused.id)
+                        except Exception as e:
+                            elapsed = int(time.time() - start_img_t)
+                            print(f"Auto image generation for persona {settings.name}: provider={provider_name} status=failed seconds={elapsed}")
+                            if settings.image_fallback_policy == "skip_post":
+                                post_log.status = "missed"
+                                post_log.error_message = "image_generation_failed (error)"
+                                db.commit()
+                                continue
+                            elif settings.image_fallback_policy == "use_library":
+                                any_unused = db.query(models.MediaLibrary).filter(
+                                    models.MediaLibrary.user_id == settings.user_id,
+                                    models.MediaLibrary.is_used == False
+                                ).order_by(models.MediaLibrary.created_at.asc()).first()
+                                if any_unused:
+                                    post_log.media_library_id = str(any_unused.id)
+
             success = await publish_post_to_facebook(db, post_log, connection, local_now.date())
             settings.last_auto_post_at = now_utc
             settings.consecutive_failures = 0 if success else settings.consecutive_failures + 1

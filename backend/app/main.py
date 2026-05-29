@@ -58,8 +58,11 @@ from app.mistral_service import (
     analyze_style_with_mistral,
     classify_post_topic,
     generate_ai_facebook_post,
-    generate_ai_facebook_post_from_prompt,
-    generate_ai_recommendations,
+    generate_persona_post,
+    generate_recommendations_with_mistral,
+)
+from app.routers import images, models as models_router
+from app.mistral_service import (
     suggest_prompt_improvement,
     synthesize_learned_strategy,
 )
@@ -190,6 +193,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Auto Poster API", lifespan=lifespan)
+app.include_router(images.router)
+app.include_router(models_router.router)
 
 _allowed_origins = [
     FRONTEND_URL,
