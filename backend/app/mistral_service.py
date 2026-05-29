@@ -4,7 +4,7 @@ from app.config import MISTRAL_API_BASE_URL, MISTRAL_API_KEY
 from app.providers.llm_providers import generate_text
 
 
-def _complete_with_mistral(model: str, messages: list[dict], temperature: float, max_tokens: int) -> str | None:
+def _complete_with_mistral(model: str, messages: list[dict], temperature: float, max_tokens: int, response_format: dict | None = None) -> str | None:
     """Route through the unified LLM provider layer.
 
     Extracts system and user content from the messages list and delegates to
@@ -27,6 +27,7 @@ def _complete_with_mistral(model: str, messages: list[dict], temperature: float,
         api_key=MISTRAL_API_KEY,
         temperature=temperature,
         max_tokens=max_tokens,
+        response_format=response_format,
     )
 
 
@@ -323,15 +324,14 @@ def generate_persona_from_posts(posts: list[str], model: str = "mistral-small-la
             ],
             temperature=0.2,
             max_tokens=1600,
+            response_format={"type": "json_object"},
         )
         if not content:
             return {}
 
         import json
-        import re
 
-        match = re.search(r"\{.*\}", content, re.S)
-        data = json.loads(match.group(0) if match else content)
+        data = json.loads(content)
 
         # Validate and sanitize tone_tags
         valid_tones = {

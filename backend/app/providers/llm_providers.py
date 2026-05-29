@@ -37,13 +37,14 @@ def generate_text(
     temperature: float = 0.7,
     max_tokens: int = 1024,
     images: list[str] | None = None,
+    response_format: dict | None = None,
 ) -> str | None:
     """Route to the correct provider and return the generated text."""
     provider = provider_name.strip().lower()
     if provider in ("mistral", "mistralai"):
-        return _generate_mistral(prompt, system_prompt, model_name, api_key, temperature, max_tokens, images)
+        return _generate_mistral(prompt, system_prompt, model_name, api_key, temperature, max_tokens, images, response_format)
     if provider in ("openai", "open_ai"):
-        return _generate_openai(prompt, system_prompt, model_name, api_key, temperature, max_tokens, images)
+        return _generate_openai(prompt, system_prompt, model_name, api_key, temperature, max_tokens, images, response_format)
     if provider in ("anthropic", "claude"):
         return _generate_anthropic(prompt, system_prompt, model_name, api_key, temperature, max_tokens, images)
     if provider in ("gemini", "google", "google_gemini"):
@@ -64,6 +65,7 @@ def _generate_mistral(
     temperature: float,
     max_tokens: int,
     images: list[str] | None = None,
+    response_format: dict | None = None,
 ) -> str | None:
     effective_key = api_key or MISTRAL_API_KEY
     if not effective_key:
@@ -82,15 +84,19 @@ def _generate_mistral(
     else:
         messages.append({"role": "user", "content": prompt})
 
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format:
+        payload["response_format"] = response_format
+
     response = httpx.post(
         f"{MISTRAL_API_BASE_URL.rstrip('/')}/chat/completions",
         headers={"Authorization": f"Bearer {effective_key}"},
-        json={
-            "model": model_name,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        },
+        json=payload,
         timeout=45,
     )
     if response.status_code >= 400:
@@ -134,12 +140,16 @@ def _generate_openai(
     else:
         messages.append({"role": "user", "content": prompt})
 
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=messages,  # type: ignore[arg-type]
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    kwargs = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format:
+        kwargs["response_format"] = response_format
+
+    response = client.chat.completions.create(**kwargs)
     choice = response.choices[0] if response.choices else None
     return choice.message.content if choice else None
 
