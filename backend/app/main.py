@@ -2062,10 +2062,26 @@ def disconnect_facebook_page(
     if connection is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Page not found")
 
-    db.query(models.PostLog).filter(
-        models.PostLog.facebook_connection_id == connection.id,
-        models.PostLog.status == "scheduled",
-    ).update({"status": "draft"})
+    persona_ids = [p.id for p in db.query(models.AIPersona.id).filter(models.AIPersona.page_connection_id == connection.id).all()]
+    if persona_ids:
+        db.query(models.PromptTemplate).filter(models.PromptTemplate.persona_id.in_(persona_ids)).delete(synchronize_session=False)
+        db.query(models.LearnedStrategy).filter(models.LearnedStrategy.persona_id.in_(persona_ids)).delete(synchronize_session=False)
+        db.query(models.LearningSignal).filter(models.LearningSignal.persona_id.in_(persona_ids)).delete(synchronize_session=False)
+        db.query(models.ImagePromptSettings).filter(models.ImagePromptSettings.persona_id.in_(persona_ids)).delete(synchronize_session=False)
+        db.query(models.ImageGenerationJob).filter(models.ImageGenerationJob.persona_id.in_(persona_ids)).update({"persona_id": None}, synchronize_session=False)
+        db.query(models.MediaLibrary).filter(models.MediaLibrary.persona_id.in_(persona_ids)).update({"persona_id": None}, synchronize_session=False)
+
+    post_ids = [p.id for p in db.query(models.PostLog.id).filter(models.PostLog.facebook_connection_id == connection.id).all()]
+    if post_ids:
+        db.query(models.AnalyticsSnapshot).filter(models.AnalyticsSnapshot.post_id.in_(post_ids)).delete(synchronize_session=False)
+        db.query(models.PostEngagementSnapshot).filter(models.PostEngagementSnapshot.post_id.in_(post_ids)).delete(synchronize_session=False)
+        db.query(models.MediaLibrary).filter(models.MediaLibrary.used_in_post_id.in_(post_ids)).update({"used_in_post_id": None}, synchronize_session=False)
+
+    db.query(models.PersonaLearningPattern).filter(models.PersonaLearningPattern.page_connection_id == connection.id).delete(synchronize_session=False)
+    db.query(models.AIRecommendation).filter(models.AIRecommendation.page_connection_id == connection.id).delete(synchronize_session=False)
+    db.query(models.AIPersona).filter(models.AIPersona.page_connection_id == connection.id).delete(synchronize_session=False)
+    db.query(models.PostLog).filter(models.PostLog.facebook_connection_id == connection.id).delete(synchronize_session=False)
+
     db.delete(connection)
     db.commit()
     return {"success": True}
