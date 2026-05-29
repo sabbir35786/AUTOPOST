@@ -873,7 +873,6 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
     if (!selectedPage?.id) return
     api.get<AIPersona[]>(`/api/ai/personas/${selectedPage.id}`).then((response) => {
       setPersonas(response.data)
-      setEditing(null)
     })
     api.get<PerformanceInsights>(`/api/ai/performance/${selectedPage.id}`).then((response) => setInsights(response.data)).catch(() => setInsights(null))
   }, [selectedPage?.id])
@@ -960,6 +959,8 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
   async function saveSettings() {
     try {
       await savePersona(true)
+      setEditing(null)
+      setPrefilled(false)
     } catch (error: any) {
       toast.error(error?.response?.data?.detail || error.message || "Could not save AI persona.")
     }
