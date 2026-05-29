@@ -175,7 +175,7 @@ async def publish_post_to_facebook(
     async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL) as client:
         response = await client.post(
             endpoint,
-            params=params,
+            data=params,
         )
 
     if response.status_code < 400:
@@ -258,7 +258,7 @@ async def publish_message_to_facebook(
     db.flush()
 
     async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL) as client:
-        response = await client.post(f"{connection.page_id}/feed", params=params)
+        response = await client.post(f"{connection.page_id}/feed", data=params)
 
     if response.status_code < 400:
         data = response.json()
@@ -293,7 +293,7 @@ def already_posted_today(db: Session, user_id: int, today: date) -> bool:
         db.query(models.PostLog)
         .filter(
             models.PostLog.user_id == user_id,
-            models.PostLog.status == "success",
+            models.PostLog.status.in_(["published", "success"]),
             models.PostLog.post_date == today,
         )
         .first()
