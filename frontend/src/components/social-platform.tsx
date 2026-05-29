@@ -499,62 +499,176 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
 }
 
 function StyleAnalyzerView({ pages }: { pages: PageConnection[] }) {
-  const [trackedPages, setTrackedPages] = React.useState<any[]>([])
-  const [trackedPageId, setTrackedPageId] = React.useState("")
-  const [analysis, setAnalysis] = React.useState<StyleAnalysis | null>(null)
-  const [loading, setLoading] = React.useState(false)
+  const router = useRouter()
+  const [step, setStep] = React.useState<"input" | "more_posts" | "analyzing">("input")
+  const [primaryPost, setPrimaryPost] = React.useState("")
+  const [extraPosts, setExtraPost] = React.useState("")
   const [loadingStep, setLoadingStep] = React.useState("")
-  const [personas, setPersonas] = React.useState<AIPersona[]>([])
-  const [personaId, setPersonaId] = React.useState("")
-  const selectedPage = pages[0]
-  
-  React.useEffect(() => {
-    api.get("/api/tracker").then((response) => setTrackedPages(response.data.tracked_pages)).catch(() => setTrackedPages([]))
-  }, [])
-  React.useEffect(() => {
-    if (!selectedPage?.id) return
-    api.get<AIPersona[]>(`/api/ai/personas/${selectedPage.id}`).then((response) => setPersonas(response.data)).catch(() => setPersonas([]))
-  }, [selectedPage?.id])
+  const [error, setError] = React.useState<string | null>(null)
 
   React.useEffect(() => {
-    if (!loading) {
-      setLoadingStep("")
-      return
-    }
+    if (step !== "analyzing") { setLoadingStep(""); return }
     const steps = [
-      "Fetching recent posts...",
-      "Analyzing writing patterns...",
-      "Identifying topics...",
-      "Generating style summary..."
+      "Reading your writing style...",
+      "Detecting tone and patterns...",
+      "Identifying your content topics...",
+      "Mapping your audience signals...",
+      "Building your persona profile...",
     ]
-    let current = 0
-    setLoadingStep(steps[current])
+    let i = 0
+    setLoadingStep(steps[0])
     const interval = setInterval(() => {
-      current = Math.min(current + 1, steps.length - 1)
-      setLoadingStep(steps[current])
-    }, 2500)
+      i = Math.min(i + 1, steps.length - 1)
+      setLoadingStep(steps[i])
+    }, 2200)
     return () => clearInterval(interval)
-  }, [loading])
-  async function analyze(own = false) {
-    if (!own && !trackedPageId) return toast.error("Select a tracked page.")
-    setLoading(true)
+  }, [step])
+
+  async function startAnalysis() {
+    if (!primaryPost.trim()) return toast.error("Please paste at least one post first.")
+    setStep("more_posts")
+  }
+
+  async function runAnalysis(skipExtra = false) {
+    setStep("analyzing")
+    setError(null)
     try {
-      const response = await api.post<StyleAnalysis>("/api/style/analyze", own ? { own_page_connection_id: selectedPage?.id } : { tracked_page_id: Number(trackedPageId) })
-      setAnalysis(response.data)
-      toast.success("Style analysis complete.")
-    } catch (error: any) {
-      toast.error(error?.response?.data?.detail || "Could not analyze this page.")
-    } finally {
-      setLoading(false)
+      const allPosts = [primaryPost.trim()]
+      if (!skipExtra && extraPosts.trim()) {
+        const extras = extraPosts.split(/\n\n+/).filter((p) => p.trim())
+        allPosts.push(...extras)
+      }
+      const response = await api.post("/api/ai/generate-persona-from-posts", { posts: allPosts })
+      localStorage.setItem("ai_persona_prefill", JSON.stringify(response.data))
+      toast.success("Persona generated! Opening Prompt Studio...")
+      setTimeout(() => router.push("/dashboard/ai-settings"), 1200)
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Could not generate persona. Check your AI API key and try again.")
+      setStep("input")
     }
   }
-  async function applyStyle() {
-    if (!personaId || !analysis) return toast.error("Choose a persona first.")
-    await api.post("/api/style/apply", { persona_id: Number(personaId), analysis_id: analysis.id })
-    toast.success("Style added to persona prompt.")
+
+  if (step === "analyzing") {
+    return (
+      <>
+        <PageTitle title="Style Analyzer" subtitle="Analyzing your posts and building your AI persona…" aiPowered />
+        <Card>
+          <CardContent className="flex flex-col items-center gap-8 py-16">
+            <div className="size-20 rounded-full bg-purple-100 flex items-center justify-center">
+              <Sparkles className="size-9 text-purple-600 animate-pulse" />
+            </div>
+            <div className="text-center grid gap-2">
+              <p className="text-lg font-semibold text-slate-800">{loadingStep}</p>
+              <p className="text-sm text-slate-500">This usually takes 10–20 seconds…</p>
+            </div>
+            <div className="w-full max-w-xs h-2 bg-slate-100 rounded-full overflow-hidden">
+              <div className="h-2 bg-purple-600 rounded-full animate-pulse" style={{ width: "65%" }} />
+            </div>
+          </CardContent>
+        </Card>
+      </>
+    )
   }
-  const report = analysis?.report
-  return <><PageTitle title="Style Analyzer" subtitle="Study public Facebook Page style and apply the patterns to your own prompts." aiPowered /><Card><CardContent className="grid gap-3 p-5"><Label>Select a Tracked Page to analyze.</Label><div className="flex flex-col gap-2 sm:flex-row"><Select value={trackedPageId} onChange={(event) => setTrackedPageId(event.target.value)}><option value="">Choose a Tracked Page</option>{trackedPages.map((tp) => <option key={tp.id} value={tp.id}>{tp.nickname}</option>)}</Select><Button className="bg-blue-700 hover:bg-blue-800" onClick={() => analyze(false)} disabled={loading}>{loading ? <><Loader2 className="size-4 animate-spin mr-2" /> {loadingStep}</> : <><Search className="size-4 mr-2" /> Analyze</>}</Button><Button variant="outline" onClick={() => analyze(true)} disabled={loading || !selectedPage}>Analyze My Own Page</Button></div></CardContent></Card>{report ? <div className="grid gap-4"><Card><CardHeader><CardTitle>Writing Style Profile</CardTitle></CardHeader><CardContent className="grid gap-3 md:grid-cols-3"><Stat label="Average words" value={Number(report.writing_style?.average_words || 0)} /><Stat label="Question endings %" value={Number(report.writing_style?.question_ending_percent || 0)} /><Stat label="Avg engagement" value={Number(report.posting_behavior?.average_engagement_score || 0)} /><div className="md:col-span-3 flex flex-wrap gap-2">{(report.writing_style?.top_words || []).slice(0, 24).map((word: any) => <span key={word.text} className="rounded-full border bg-white px-3 py-1 text-sm" style={{ fontSize: `${Math.min(22, 11 + word.count)}px` }}>{word.text}</span>)}</div></CardContent></Card><Card><CardHeader><CardTitle>Content Topics</CardTitle></CardHeader><CardContent className="flex flex-wrap gap-2">{(report.topics || []).map((topic: any) => <span key={topic.name || topic} className="rounded-full bg-blue-50 px-3 py-1 text-blue-700" style={{ fontSize: `${Math.min(24, 12 + Number(topic.count || 1) * 2)}px` }}>{topic.name || topic}</span>)}</CardContent></Card><Card><CardHeader><CardTitle>Posting Behavior</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><MiniBars items={(report.posting_behavior?.best_days || []).map((item: any) => ({ label: item.day, value: item.score }))} /><MiniBars items={(report.posting_behavior?.best_hours || []).map((item: any) => ({ label: `${item.hour}:00`, value: item.score }))} /></CardContent></Card><Card><CardHeader><CardTitle>Top 5 Posts</CardTitle></CardHeader><CardContent className="grid gap-3">{(report.top_posts || []).map((post: any) => <div key={post.facebook_post_id || post.content} className="rounded-md border p-3"><p className="whitespace-pre-wrap text-sm">{post.content}</p><p className="mt-2 text-xs text-slate-500">Likes {post.likes_count} · Comments {post.comments_count} · Shares {post.shares_count} · Score {post.engagement_score}</p></div>)}</CardContent></Card><Card><CardHeader><CardTitle>AI Style Summary</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="text-sm text-slate-700">{report.summary}</p><div className="flex flex-col gap-2 sm:flex-row"><Select value={personaId} onChange={(event) => setPersonaId(event.target.value)}><option value="">Choose persona</option>{personas.map((persona) => <option key={persona.id} value={persona.id}>{persona.persona_name}</option>)}</Select><Button className="bg-blue-700 hover:bg-blue-800" onClick={applyStyle}>Apply This Style to My Persona</Button></div></CardContent></Card></div> : null}</>
+
+  return (
+    <>
+      <PageTitle title="Style Analyzer" subtitle="Paste your posts and let the AI build a persona that perfectly matches your writing style." aiPowered />
+
+      {step === "more_posts" ? (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <Card className="w-full max-w-2xl">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Sparkles className="size-5 text-purple-600" />
+                Want a more accurate persona?
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-4">
+              <p className="text-sm text-slate-600">
+                Your first post is ready. Add more sample posts below (optional) — the more examples you provide, the sharper and more tailored your generated persona will be.
+              </p>
+              <p className="text-xs text-slate-400">Tip: Separate each post with a blank line.</p>
+              <Textarea
+                className="min-h-44"
+                placeholder={"Post 2 content...\n\nPost 3 content...\n\nPost 4 content..."}
+                value={extraPosts}
+                onChange={(e) => setExtraPost(e.target.value)}
+              />
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Button id="run-analysis-btn" className="flex-1 bg-purple-700 hover:bg-purple-800" onClick={() => runAnalysis(false)}>
+                  <Sparkles className="size-4 mr-2" />
+                  {extraPosts.trim() ? "Add More & Analyze" : "Analyze Now"}
+                </Button>
+                <Button variant="outline" className="flex-1" onClick={() => runAnalysis(true)}>
+                  Skip, Analyze with 1 Post
+                </Button>
+                <Button variant="ghost" onClick={() => setStep("input")}>Back</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Paste Your Post(s)</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          <p className="text-sm text-slate-500">
+            Paste one or more of your real social-media posts. The AI will analyze tone, topics, audience, structure, and writing patterns — then automatically build a complete AI persona in Prompt Studio.
+          </p>
+          {error ? (
+            <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
+          ) : null}
+          <Textarea
+            id="style-analyzer-input"
+            className="min-h-52"
+            placeholder={"Paste your post here…\n\nYou can also paste multiple posts — just leave a blank line between each one."}
+            value={primaryPost}
+            onChange={(e) => setPrimaryPost(e.target.value)}
+          />
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-slate-400">
+              {primaryPost.trim()
+                ? `${primaryPost.trim().split(/\s+/).length} words · ${primaryPost.split(/\n\n+/).filter((p) => p.trim()).length} post(s) detected`
+                : "Paste your content above to get started"}
+            </p>
+            <Button
+              id="analyze-style-btn"
+              className="bg-purple-700 hover:bg-purple-800"
+              onClick={startAnalysis}
+              disabled={!primaryPost.trim()}
+            >
+              <Sparkles className="size-4 mr-2" />
+              Analyze &amp; Build Persona
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>How it works</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ol className="grid gap-4 text-sm text-slate-600">
+            <li className="flex items-start gap-3">
+              <span className="flex-shrink-0 size-6 rounded-full bg-purple-100 text-purple-700 font-semibold text-xs flex items-center justify-center mt-0.5">1</span>
+              <span>Paste one or more of your real posts. The AI reads the tone, rhythm, topics, and patterns across everything you share.</span>
+            </li>
+            <li className="flex items-start gap-3">
+              <span className="flex-shrink-0 size-6 rounded-full bg-purple-100 text-purple-700 font-semibold text-xs flex items-center justify-center mt-0.5">2</span>
+              <span>Optionally add more posts for a richer sample — more examples = sharper persona with better audience targeting.</span>
+            </li>
+            <li className="flex items-start gap-3">
+              <span className="flex-shrink-0 size-6 rounded-full bg-purple-100 text-purple-700 font-semibold text-xs flex items-center justify-center mt-0.5">3</span>
+              <span>A complete AI persona is generated and auto-filled in Prompt Studio. You only need to assign which days it posts on.</span>
+            </li>
+          </ol>
+        </CardContent>
+      </Card>
+    </>
+  )
 }
 
 function PageTrackerView({ pages }: { pages: PageConnection[] }) {
@@ -744,6 +858,7 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
   const [previewTab, setPreviewTab] = React.useState<"simple" | "raw">("simple")
   const [insights, setInsights] = React.useState<PerformanceInsights | null>(null)
   const [strategy, setStrategy] = React.useState<any>(null)
+  const [prefilled, setPrefilled] = React.useState(false)
   const selectedPage = pages.find((page) => page.id === selectedPageId) || pages[0]
 
   React.useEffect(() => {
@@ -764,6 +879,38 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
   }, [selectedPage?.id])
 
   React.useEffect(() => { loadPersonas() }, [loadPersonas])
+
+  // Pre-fill persona from Style Analyzer redirect
+  React.useEffect(() => {
+    try {
+      const stored = localStorage.getItem("ai_persona_prefill")
+      if (!stored) return
+      localStorage.removeItem("ai_persona_prefill")
+      const data = JSON.parse(stored)
+      const merged: AIPersona = {
+        ...emptyPersona(),
+        persona_name: data.persona_name || "AI-Generated Persona",
+        niche: data.niche || "",
+        tone_tags: Array.isArray(data.tone_tags) && data.tone_tags.length ? data.tone_tags : ["Professional"],
+        custom_instructions: data.custom_instructions || null,
+        hashtags_enabled: typeof data.hashtags_enabled === "boolean" ? data.hashtags_enabled : false,
+        hashtag_count: typeof data.hashtag_count === "number" ? data.hashtag_count : 3,
+        always_include_engagement_hook: typeof data.always_include_engagement_hook === "boolean" ? data.always_include_engagement_hook : false,
+        creativity_level: typeof data.creativity_level === "number" ? data.creativity_level : 7,
+        language: data.language || "English",
+        prompt_config: data.prompt_config ? {
+          ...emptyPromptConfig(),
+          ...data.prompt_config,
+          template: "Custom (blank)",
+          brand_personality: Array.isArray(data.tone_tags) && data.tone_tags.length ? data.tone_tags : ["Professional"],
+        } : emptyPromptConfig(),
+      }
+      setEditing(merged)
+      setPrefilled(true)
+    } catch {
+      // ignore parse errors
+    }
+  }, [])
 
   const draft = editing || emptyPersona()
   const config = promptConfig(draft)
@@ -855,20 +1002,21 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
     })}</div>
     <div className="grid gap-4 md:grid-cols-2">{personas.map((persona, index) => <Card key={persona.id}><CardContent className="grid gap-3 p-5"><div className="flex items-start justify-between gap-3"><div><h2 className="font-semibold">{persona.persona_name}</h2><p className="text-sm text-slate-500">{persona.assigned_days.join(", ") || "No days assigned"}</p></div><span className={cn("rounded-full px-2 py-1 text-xs font-medium", persona.is_active ? "bg-green-50 text-green-700" : "bg-slate-100 text-slate-600")}>{persona.is_active ? "Active" : "Paused"}</span></div><div className="flex flex-wrap gap-2">{persona.tone_tags.map((tag) => <span key={tag} className={cn("rounded-full border px-2 py-1 text-xs", personaColors[index % personaColors.length])}>{tag}</span>)}</div><div className="flex items-center justify-between text-sm text-slate-500"><span>{persona.posting_time_slots.join(", ")}</span><span>Score {Number(persona.performance_score || 0.5).toFixed(2)}</span></div><Button variant="outline" onClick={() => setEditing(persona)}>Edit</Button></CardContent></Card>)}{personas.length < 5 ? <Button variant="outline" className="min-h-36 border-dashed" onClick={() => setEditing({ ...emptyPersona(), persona_name: `Persona ${personas.length + 1}` })}><Plus className="size-4" /> Add New Persona</Button> : null}</div>
     <PerformanceInsightsPanel insights={insights} personas={personas} timezone={Intl.DateTimeFormat().resolvedOptions().timeZone} />
-  </div>}{editing ? <PromptStudioModal draft={draft} config={config} simplePrompt={simplePrompt} rawPrompt={rawPrompt} previewTab={previewTab} saving={saving} strategy={strategy} onStrategyDecision={handleStrategyDecision} onPreviewTab={setPreviewTab} onChange={setEditing} onConfig={updateConfig} onToggleTone={toggleTone} onToggleDay={toggleDay} onToggleConfigList={toggleConfigList} onAddTag={addTag} onSave={saveSettings} onTest={testSample} onResetLearning={resetLearning} onClose={() => setEditing(null)} /> : null}{sample ? <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4"><Card className="max-w-xl"><CardHeader><CardTitle>Sample AI Post</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="whitespace-pre-wrap text-sm text-slate-700">{sample}</p><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={() => setSample("")}>Close</Button></CardContent></Card></div> : null}</>
+  </div>}{editing ? <PromptStudioModal draft={draft} config={config} simplePrompt={simplePrompt} rawPrompt={rawPrompt} previewTab={previewTab} saving={saving} strategy={strategy} fromStyleAnalyzer={prefilled} onStrategyDecision={handleStrategyDecision} onPreviewTab={setPreviewTab} onChange={setEditing} onConfig={updateConfig} onToggleTone={toggleTone} onToggleDay={toggleDay} onToggleConfigList={toggleConfigList} onAddTag={addTag} onSave={saveSettings} onTest={testSample} onResetLearning={resetLearning} onClose={() => { setEditing(null); setPrefilled(false) }} /> : null}{sample ? <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4"><Card className="max-w-xl"><CardHeader><CardTitle>Sample AI Post</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="whitespace-pre-wrap text-sm text-slate-700">{sample}</p><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={() => setSample("")}>Close</Button></CardContent></Card></div> : null}</>
 }
 
 function dayName(day: string) {
   return { Mon: "Monday", Tue: "Tuesday", Wed: "Wednesday", Thu: "Thursday", Fri: "Friday", Sat: "Saturday", Sun: "Sunday" }[day] || day
 }
 
-function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab, saving, onPreviewTab, onChange, onConfig, onToggleTone, onToggleDay, onToggleConfigList, onAddTag, onSave, onTest, onResetLearning, onClose, strategy, onStrategyDecision }: {
+function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab, saving, onPreviewTab, onChange, onConfig, onToggleTone, onToggleDay, onToggleConfigList, onAddTag, onSave, onTest, onResetLearning, onClose, strategy, onStrategyDecision, fromStyleAnalyzer }: {
   draft: AIPersona
   config: PromptStudioConfig
   simplePrompt: string
   rawPrompt: string
   previewTab: "simple" | "raw"
   saving: boolean
+  fromStyleAnalyzer?: boolean
   onPreviewTab: (tab: "simple" | "raw") => void
   onChange: (persona: AIPersona | null) => void
   onConfig: (update: Partial<PromptStudioConfig>) => void
@@ -900,6 +1048,7 @@ function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab,
   }, [simplePrompt, rawPrompt, previewTab])
   return <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40 p-4"><Card className="mx-auto my-6 max-w-6xl"><CardHeader><CardTitle className="flex items-center gap-2">Prompt Studio <Sparkles className="size-4 text-purple-600" /></CardTitle></CardHeader><CardContent className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_420px]">
     <div className="grid gap-5">
+      {fromStyleAnalyzer ? <div className="rounded-md border-2 border-purple-400 bg-purple-50 p-4 animate-in fade-in zoom-in duration-300"><div className="flex items-center gap-2 font-semibold text-purple-900 mb-1"><Sparkles className="size-4" /> Persona auto-generated from your posts!</div><p className="text-sm text-purple-800">All fields have been filled in by the AI based on your writing style. Review them, then scroll down to <strong>assign posting days</strong> and hit <strong>Save Prompt</strong>.</p></div> : null}
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '0ms' }}><Label>Start from a Template</Label><Select value={config.template} onChange={(event) => onChange(applyTemplate(draft, event.target.value))}>{templateNames.map((template) => <option key={template}>{template}</option>)}</Select><div className="grid gap-3 md:grid-cols-2"><div className="grid gap-2"><Label>Persona Name</Label><Input value={draft.persona_name} onChange={(event) => onChange({ ...draft, persona_name: event.target.value })} /></div><div className="grid gap-2"><Label>Priority Level</Label><Select value={draft.priority_level} onChange={(event) => onChange({ ...draft, priority_level: event.target.value as AIPersona["priority_level"] })}><option>High</option><option>Normal</option><option>Low</option></Select></div></div></div>
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '150ms' }}><h2 className="font-semibold">Identity Questions</h2><div className="grid gap-2"><Label>What is this page about?</Label><Input value={draft.niche} onChange={(event) => onChange({ ...draft, niche: event.target.value })} placeholder="personal finance tips for young professionals in Bangladesh" /></div><div className="grid gap-2"><Label>Who is your audience?</Label><Input value={config.audience} onChange={(event) => onConfig({ audience: event.target.value })} /></div><div className="grid gap-2"><Label>What is the main goal of your posts?</Label><Select value={config.goal} onChange={(event) => onConfig({ goal: event.target.value })}>{goalOptions.map((goal) => <option key={goal}>{goal}</option>)}<option>Other</option></Select></div><div className="grid gap-2"><Label>What is your brand personality?</Label><div className="flex flex-wrap gap-2">{toneOptions.map((tone) => <Button key={tone} type="button" variant={draft.tone_tags.includes(tone) ? "default" : "outline"} className={draft.tone_tags.includes(tone) ? "bg-blue-700 hover:bg-blue-800" : ""} onClick={() => onToggleTone(tone)}>{draft.tone_tags.includes(tone) ? <Check className="size-4" /> : null}{tone}</Button>)}</div><p className="text-xs text-slate-500">Select up to 4.</p></div></div>
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '300ms' }}><h2 className="font-semibold">Content Rules</h2><TagInput label="What topics should the AI always write about?" values={config.always_topics} onAdd={(value) => onAddTag("always_topics", value)} onRemove={(value) => onConfig({ always_topics: config.always_topics.filter((item) => item !== value) })} /><TagInput label="What topics should the AI NEVER write about?" values={config.never_topics} onAdd={(value) => onAddTag("never_topics", value)} onRemove={(value) => onConfig({ never_topics: config.never_topics.filter((item) => item !== value) })} /><div className="grid gap-2"><Label>What should every post include?</Label><div className="flex flex-wrap gap-2">{includeOptions.map((item) => <Button key={item} type="button" variant={config.every_post_includes.includes(item) ? "default" : "outline"} onClick={() => onToggleConfigList("every_post_includes", item)}>{item}</Button>)}</div></div><div className="grid gap-2"><Label>What should posts NEVER do?</Label><div className="flex flex-wrap gap-2">{neverOptions.map((item) => <Button key={item} type="button" variant={config.never_do.includes(item) ? "default" : "outline"} onClick={() => onToggleConfigList("never_do", item)}>{item}</Button>)}</div></div><div className="grid gap-2"><Label>How long should posts be?</Label><input type="range" min={0} max={2} value={["Short", "Medium", "Long"].indexOf(config.length)} onChange={(event) => onConfig({ length: (["Short", "Medium", "Long"] as const)[Number(event.target.value)] })} /><div className="flex justify-between text-xs text-slate-500"><span>Short</span><span>Medium</span><span>Long</span></div><div className="flex items-center justify-between rounded-md border p-3"><Label>Vary the length automatically</Label><Switch checked={config.vary_length} onCheckedChange={(checked) => onConfig({ vary_length: checked })} /></div></div></div>

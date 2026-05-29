@@ -267,6 +267,24 @@ class PersonaLearningResetResponse(BaseModel):
 class StyleAnalyzeRequest(BaseModel):
     tracked_page_id: int | None = None
     own_page_connection_id: int | None = None
+    pasted_text: str | None = None
+
+
+class StyleAnalyzeFromTextRequest(BaseModel):
+    posts: list[str]
+
+
+class PersonaFromPostsResponse(BaseModel):
+    persona_name: str
+    niche: str
+    tone_tags: list[str]
+    language: str
+    custom_instructions: str | None = None
+    prompt_config: dict
+    hashtags_enabled: bool = False
+    hashtag_count: int = 3
+    always_include_engagement_hook: bool = False
+    creativity_level: int = 7
 
 
 class StyleAnalysisRead(BaseModel):

@@ -277,6 +277,101 @@ def analyze_style_with_mistral(posts: list[str], model: str = "mistral-small-lat
     return {"topics": [], "summary": "AI style summary could not be generated for this sample."}
 
 
+def generate_persona_from_posts(posts: list[str], model: str = "mistral-small-latest") -> dict:
+    """Analyze sample social-media posts with an LLM and return a fully-populated
+    AI persona configuration dict ready to be saved as an AIPersona record."""
+    if not MISTRAL_API_KEY or not posts:
+        return {}
+
+    sample = "\n\n---\n\n".join(posts[:20])
+
+    system_prompt = (
+        "You are an expert social-media strategist. "
+        "Analyze the provided posts and return ONLY a single valid JSON object "
+        "(no markdown fences, no extra text) with exactly these fields:\n"
+        "{\n"
+        '  "persona_name": "<A short descriptive name for this writing persona, e.g. Motivational Life Coach>",\n'
+        '  "niche": "<1-2 sentences about what this page is clearly about>",\n'
+        '  "tone_tags": ["<up to 4 items strictly from: Friendly Professional Bold Witty Empathetic Authoritative Casual Luxury Rebellious Minimalist Energetic Calm>"],\n'
+        '  "language": "<language the posts are written in, e.g. English Bengali Hindi Arabic Spanish French Indonesian Portuguese>",\n'
+        '  "custom_instructions": "<specific stylistic notes - sentence rhythm, formatting habits, favourite phrases, punctuation style>",\n'
+        '  "hashtags_enabled": <true or false>,\n'
+        '  "hashtag_count": <integer 0-5>,\n'
+        '  "always_include_engagement_hook": <true if posts usually end with a question or CTA, else false>,\n'
+        '  "creativity_level": <integer 1-10, how experimental vs predictable the writing is>,\n'
+        '  "prompt_config": {\n'
+        '    "audience": "<who these posts clearly target>",\n'
+        '    "goal": "<one of: Educate my audience | Sell a product or service | Build a community | Entertain | Inspire and motivate | Drive traffic to my website>",\n'
+        '    "always_topics": ["<2-5 core topics always covered>"],\n'
+        '    "never_topics": [],\n'
+        '    "every_post_includes": ["<items from: A question at the end | A call to action | Emojis | A personal story angle | A surprising fact | A numbered list | A relatable struggle>"],\n'
+        '    "never_do": ["<items from: Use formal language | Use slang | Make promises | Use more than 5 hashtags | Start with the word I | Use exclamation marks excessively>"],\n'
+        '    "length": "<Short or Medium or Long based on typical post length>",\n'
+        '    "vary_length": <true or false>,\n'
+        '    "structure": "<one of: No fixed structure let AI decide | Hook then value then CTA | Story then lesson then question | Fact then explanation then opinion | List format | Single powerful statement>",\n'
+        '    "examples": "<paste the single best representative example post from the provided posts here>"\n'
+        "  }\n"
+        "}"
+    )
+
+    try:
+        content = _complete_with_mistral(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Analyze these posts and return the persona JSON:\n\n{sample}"},
+            ],
+            temperature=0.2,
+            max_tokens=1600,
+        )
+        if not content:
+            return {}
+
+        import json
+        import re
+
+        match = re.search(r"\{.*\}", content, re.S)
+        data = json.loads(match.group(0) if match else content)
+
+        # Validate and sanitize tone_tags
+        valid_tones = {
+            "Friendly", "Professional", "Bold", "Witty", "Empathetic",
+            "Authoritative", "Casual", "Luxury", "Rebellious", "Minimalist",
+            "Energetic", "Calm",
+        }
+        data["tone_tags"] = [t for t in data.get("tone_tags", []) if t in valid_tones][:4]
+        if not data["tone_tags"]:
+            data["tone_tags"] = ["Professional"]
+
+        # Validate goal options
+        valid_goals = {
+            "Educate my audience", "Sell a product or service", "Build a community",
+            "Entertain", "Inspire and motivate", "Drive traffic to my website",
+        }
+        pc = data.get("prompt_config", {})
+        if pc.get("goal") not in valid_goals:
+            pc["goal"] = "Educate my audience"
+
+        # Validate length
+        if pc.get("length") not in {"Short", "Medium", "Long"}:
+            pc["length"] = "Medium"
+
+        # Safe defaults for required fields
+        data.setdefault("hashtags_enabled", False)
+        data.setdefault("hashtag_count", 3)
+        data.setdefault("always_include_engagement_hook", False)
+        data.setdefault("creativity_level", 7)
+        data.setdefault("language", "English")
+        data["prompt_config"] = pc
+
+        return data
+    except Exception as exc:
+        print(f"Persona generation from posts failed: {exc}")
+    return {}
+
+
+
+
 def classify_post_topic(post_content: str, model: str = "mistral-small-latest") -> str | None:
     return extract_post_topic(post_content, model)
 

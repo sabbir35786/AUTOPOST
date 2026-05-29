@@ -1391,6 +1391,38 @@ async def analyze_facebook_style(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # NEW: Handle pasted_text directly
+    if payload.pasted_text and payload.pasted_text.strip():
+        from app.mistral_service import analyze_style_with_mistral
+        posts_list = [payload.pasted_text.strip()]
+        ai_summary = analyze_style_with_mistral(posts_list)
+        report = {
+            "writing_style": {
+                "average_words": len(payload.pasted_text.split()),
+                "question_ending_percent": 100 if payload.pasted_text.strip().endswith("?") else 0,
+                "top_words": [],
+            },
+            "posting_behavior": {
+                "average_engagement_score": 0,
+                "best_days": [],
+                "best_hours": [],
+            },
+            "topics": ai_summary.get("topics", []),
+            "top_posts": [{"content": payload.pasted_text.strip(), "likes_count": 0, "comments_count": 0, "shares_count": 0, "engagement_score": 0}],
+            "summary": ai_summary.get("summary", ""),
+        }
+        analysis = models.StyleAnalysis(
+            user_id=current_user.id,
+            source_type="pasted_text",
+            source_identifier="pasted",
+            page_name=None,
+            report=report,
+        )
+        db.add(analysis)
+        db.commit()
+        db.refresh(analysis)
+        return analysis
+
     source_type = "own_page" if payload.own_page_connection_id else "tracked_page"
     page_name = None
     posts = []
@@ -1437,6 +1469,7 @@ async def analyze_facebook_style(
     db.commit()
     db.refresh(analysis)
     return analysis
+
 
 
 @app.get("/api/style/analyses", response_model=list[schemas.StyleAnalysisRead])
@@ -1492,6 +1525,30 @@ def apply_style_to_persona(
     persona.updated_at = datetime.now(timezone.utc)
     db.commit()
     return {"success": True}
+
+
+@app.post("/api/ai/generate-persona-from-posts")
+async def generate_persona_from_posts_endpoint(
+    payload: schemas.StyleAnalyzeFromTextRequest,
+    current_user: models.User = Depends(get_current_user),
+):
+    """Analyze a list of pasted posts with an LLM and return a fully-populated
+    AI persona configuration that the frontend can use to pre-fill the Prompt Studio form."""
+    if not payload.posts or all(not p.strip() for p in payload.posts):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No posts provided. Please paste at least one post.",
+        )
+    clean_posts = [p.strip() for p in payload.posts if p.strip()]
+    from app.mistral_service import generate_persona_from_posts as _gen_persona
+    result = _gen_persona(clean_posts)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not generate persona from posts. Make sure your AI API key is configured.",
+        )
+    return result
+
 
 
 @app.get("/api/tracker", response_model=schemas.TrackerDashboardResponse)
