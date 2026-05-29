@@ -1002,7 +1002,7 @@ function SettingsView({ pages, timezone, onChanged }: { pages: PageConnection[];
 }
 
 function PageTitle({ title, subtitle, aiPowered }: { title: string; subtitle: string; aiPowered?: boolean }) {
-  return <div><h1 className="text-2xl font-semibold flex items-center gap-2">{title} {aiPowered ? <Sparkles className="size-5 text-purple-600" title="AI Powered" /> : null}</h1><p className="text-sm text-slate-500">{subtitle}</p></div>
+  return <div><h1 className="text-2xl font-semibold flex items-center gap-2">{title} {aiPowered ? <Sparkles className="size-5 text-purple-600" /> : null}</h1><p className="text-sm text-slate-500">{subtitle}</p></div>
 }
 
 function PageMini({ page }: { page: PageConnection }) {
