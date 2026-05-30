@@ -61,6 +61,32 @@ def create_database_tables() -> None:
         raise
 
 
+def _ensure_oauth_states_table() -> None:
+    """Ensure oauth_states table exists for database-backed OAuth state storage."""
+    inspector = inspect(engine)
+    if not inspector.has_table("oauth_states"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE oauth_states (
+                        id VARCHAR PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        state VARCHAR NOT NULL,
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text("CREATE INDEX idx_oauth_states_expires_at ON oauth_states(expires_at)")
+            )
+            connection.execute(
+                text("CREATE INDEX idx_oauth_states_user_id ON oauth_states(user_id)")
+            )
+
+
 def _ensure_facebook_credential_columns() -> None:
     inspector = inspect(engine)
     if not inspector.has_table("facebook_connections"):

@@ -15,4 +15,3 @@ anthropic
 mistralai
 python-multipart
 itsdangerous
-starlette-session

@@ -36,6 +36,47 @@ FACEBOOK_DIALOG_OAUTH_BASE = f"https://www.facebook.com/{FACEBOOK_OAUTH_GRAPH_VE
 pending_json_oauth_pages: dict[int, dict] = {}
 
 
+def _create_oauth_state(db: Session, user_id: int) -> str:
+    """Create and store OAuth state in database."""
+    state = secrets.token_hex(16)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    oauth_state = models.OAuthState(
+        id=state,
+        user_id=user_id,
+        state=state,
+        expires_at=expires_at,
+    )
+    db.add(oauth_state)
+    db.commit()
+    return state
+
+
+def _verify_oauth_state(db: Session, state: str) -> int | None:
+    """Verify OAuth state and return user_id if valid."""
+    oauth_state = (
+        db.query(models.OAuthState)
+        .filter(
+            models.OAuthState.state == state,
+            models.OAuthState.expires_at > datetime.now(timezone.utc),
+        )
+        .first()
+    )
+    if oauth_state:
+        user_id = oauth_state.user_id
+        db.delete(oauth_state)
+        db.commit()
+        return user_id
+    return None
+
+
+def _cleanup_expired_oauth_states(db: Session) -> None:
+    """Clean up expired OAuth states."""
+    db.query(models.OAuthState).filter(
+        models.OAuthState.expires_at <= datetime.now(timezone.utc)
+    ).delete()
+    db.commit()
+
+
 def _facebook_error(message: str, status_code: int = status.HTTP_400_BAD_REQUEST):
     raise HTTPException(status_code=status_code, detail=message)
 
@@ -327,11 +368,11 @@ async def complete_page_selection(
     return connection
 
 
-def start_facebook_oauth(request: Request, user: models.User) -> RedirectResponse:
+def start_facebook_oauth(request: Request, user: models.User, db: Session) -> RedirectResponse:
     if not FACEBOOK_APP_ID or not FACEBOOK_APP_SECRET:
         _facebook_error("Facebook app credentials are not configured", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    state = secrets.token_hex(16)
+    state = _create_oauth_state(db, user.id)
     request.session["oauth_state"] = state
     request.session["oauth_user_id"] = user.id
     logger.info("OAuth flow started for user %s", user.id)
@@ -358,10 +399,10 @@ async def handle_facebook_callback(
     if error:
         return _popup_error_html(f"Facebook returned an error: {error}")
 
-    session_state = request.session.get("oauth_state")
-    user_id = request.session.get("oauth_user_id")
-    if not code or not state or not session_state or state != session_state or not user_id:
-        logger.warning("OAuth state mismatch for user %s", user_id)
+    # Verify OAuth state from database instead of session
+    user_id = _verify_oauth_state(db, state) if state else None
+    if not code or not state or not user_id:
+        logger.warning("OAuth state mismatch for state %s", state)
         return _popup_error_html("Security check failed. Please try again.")
 
     request.session.pop("oauth_state", None)

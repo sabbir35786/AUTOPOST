@@ -8,10 +8,9 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from starlette_session import SessionMiddleware
-from starlette_session.backends import SQLAlchemyBackend
+from starlette.middleware.sessions import SessionMiddleware
 from jose import JWTError, jwt
-from sqlalchemy import func, Integer, create_engine
+from sqlalchemy import func, Integer
 from sqlalchemy.orm import Session, object_session
 
 from app import models, schemas
@@ -45,7 +44,7 @@ from app.config import (
     SUPABASE_URL,
 )
 from app.crypto import decrypt_token, encrypt_token
-from app.database import create_database_tables, engine, get_db
+from app.database import create_database_tables, get_db
 from app.posts import (
     create_draft_post,
     generate_caption_with_claude,
@@ -216,20 +215,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Database-backed session middleware to fix OAuth state mismatch in distributed environments
-session_backend = SQLAlchemyBackend(
-    engine=engine,
-    table=models.Session,
-    expire_on_write=True,
-)
-app.add_middleware(
-    SessionMiddleware,
-    backend=session_backend,
-    secret_key=SECRET_KEY,
-    same_site="lax",
-    https_only=False,
-)
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax", https_only=False)
 
 
 @app.get("/")
@@ -392,7 +378,7 @@ def start_facebook_oauth_route(
     db: Session = Depends(get_db),
 ):
     user = facebook_oauth.current_user_from_popup_token(token, db)
-    return facebook_oauth.start_facebook_oauth(request, user)
+    return facebook_oauth.start_facebook_oauth(request, user, db)
 
 
 @app.get("/auth/facebook/callback", response_class=HTMLResponse)
