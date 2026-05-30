@@ -46,6 +46,7 @@ from app.config import (
 from app.crypto import decrypt_token, encrypt_token
 from app.database import create_database_tables, get_db
 from app.posts import (
+    clear_all_user_posting_locks,
     create_draft_post,
     generate_caption_with_claude,
     generate_post_content,
@@ -178,6 +179,7 @@ async def lifespan(app: FastAPI):
     global scheduler_task
     _print_startup_config_status()
     create_database_tables()
+    clear_all_user_posting_locks()
     scheduler_task = asyncio.create_task(_scheduled_post_worker())
     asyncio.create_task(_ensure_supabase_storage_bucket())
     try:
@@ -551,6 +553,15 @@ def disconnect_api_page(
     db: Session = Depends(get_db),
 ):
     return facebook_oauth.disconnect_page_connection(db, current_user.id, connection_id)
+
+
+@app.post("/api/admin/clear-posting-lock")
+def clear_posting_lock(
+    current_user: models.User = Depends(get_current_user),
+):
+    """Clear the posting lock for the current user. Use this if publishing is stuck."""
+    release_user_posting(current_user.id)
+    return {"success": True, "message": "Posting lock cleared"}
 
 
 VALID_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]

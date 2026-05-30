@@ -339,6 +339,12 @@ def release_user_posting(user_id: int) -> None:
         user_posting_locks.discard(user_id)
 
 
+def clear_all_user_posting_locks() -> None:
+    """Clear all user posting locks. Call this on server startup to recover from crashes."""
+    with posting_lock:
+        user_posting_locks.clear()
+
+
 def _as_utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
