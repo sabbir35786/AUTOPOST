@@ -35,7 +35,7 @@ import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { useAuth } from "@/contexts/auth-context"
-import { API_BASE_URL, BACKEND_ORIGIN, api } from "@/lib/api"
+import { API_BASE_URL, BACKEND_ORIGIN, api, getApiErrorMessage } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 type PageConnection = {
@@ -449,7 +449,8 @@ function FacebookConnectButton({ onConnected, className, urgent }: { onConnected
 
 function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timezone: string; onSaved: () => void }) {
   const router = useRouter()
-  const [selectedPageId, setSelectedPageId] = React.useState<number | null>(pages[0]?.id ?? null)
+  const publishablePages = pages.filter((page) => page.connection_status === "connected")
+  const [selectedPageId, setSelectedPageId] = React.useState<number | null>(publishablePages[0]?.id ?? null)
   const [content, setContent] = React.useState("")
   const [media, setMedia] = React.useState("")
   const [scheduleLater, setScheduleLater] = React.useState(false)
@@ -460,7 +461,7 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
   const [generating, setGenerating] = React.useState(false)
   const [hasAiDraft, setHasAiDraft] = React.useState(false)
   const remaining = 63206 - content.length
-  const selectedPage = pages.find((page) => page.id === selectedPageId) || pages[0]
+  const selectedPage = publishablePages.find((page) => page.id === selectedPageId) || publishablePages[0]
   const url = content.match(/https?:\/\/\S+/)?.[0] || ""
   React.useEffect(() => {
     if (!selectedPage?.id) return setAiSettingsReady(false)
@@ -510,7 +511,7 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
       onSaved()
       router.push(scheduleLater ? "/dashboard/scheduled" : "/dashboard")
     } catch (error: any) {
-      toast.error(error?.response?.data?.detail || "Publishing failed. Please try again.")
+      toast.error(getApiErrorMessage(error, "Publishing failed. Please try again."))
     } finally {
       setSaving(false)
     }
@@ -519,7 +520,7 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
     <>
       <PageTitle title="Create Post" subtitle="Compose, preview, publish now, or schedule for later." />
       <Card><CardContent className="grid gap-5 p-6">
-        {pages.length > 1 ? <Select value={String(selectedPageId ?? pages[0].id)} onChange={(event) => setSelectedPageId(Number(event.target.value))}>{pages.map((page) => <option key={page.id} value={String(page.id)}>{page.page_name}</option>)}</Select> : pages[0] ? <PageMini page={pages[0]} /> : <Empty text="Connect a page before publishing." action="/dashboard/settings" />}
+        {publishablePages.length > 1 ? <Select value={String(selectedPageId ?? publishablePages[0].id)} onChange={(event) => setSelectedPageId(Number(event.target.value))}>{publishablePages.map((page) => <option key={page.id} value={String(page.id)}>{page.page_name}</option>)}</Select> : publishablePages[0] ? <PageMini page={publishablePages[0]} /> : <Empty text="Connect a page before publishing." action="/dashboard/settings" />}
         {selectedPage ? <div className="grid gap-3 rounded-md border border-purple-200 bg-purple-50/60 p-3">
           <div className="flex flex-col gap-2 lg:flex-row">
             {aiSettingsReady ? <>
@@ -538,7 +539,7 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
         {url ? <div className="flex items-start justify-between rounded-md border bg-slate-50 p-3 text-sm"><div><p className="font-medium">Link Preview</p><p className="text-slate-500">{url}</p></div><Button size="icon" variant="ghost" onClick={() => setContent(content.replace(url, ""))}><X className="size-4" /></Button></div> : null}
         <div className="flex items-center justify-between rounded-md border p-3"><div><p className="font-medium">Schedule for Later</p><p className="text-sm text-slate-500">{timezone}</p></div><Switch checked={scheduleLater} onCheckedChange={setScheduleLater} /></div>
         {scheduleLater ? <Input type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} /> : null}
-        <div className="flex flex-col gap-2 sm:flex-row"><Button variant="outline" onClick={() => submit(true)} disabled={saving}>Save as Draft</Button><Button title={remaining < 0 ? "Post too long" : undefined} className="bg-blue-700 hover:bg-blue-800" onClick={() => submit(false)} disabled={saving || remaining < 0 || !content.trim() || !pages.length}>{saving ? "Publishing..." : scheduleLater ? "Schedule" : "Publish to Facebook"}</Button><Button variant="ghost" onClick={() => router.push("/dashboard")}>Cancel</Button></div>
+        <div className="flex flex-col gap-2 sm:flex-row"><Button variant="outline" onClick={() => submit(true)} disabled={saving}>Save as Draft</Button><Button title={remaining < 0 ? "Post too long" : undefined} className="bg-blue-700 hover:bg-blue-800" onClick={() => submit(false)} disabled={saving || remaining < 0 || !content.trim() || !publishablePages.length}>{saving ? "Publishing..." : scheduleLater ? "Schedule" : "Publish to Facebook"}</Button><Button variant="ghost" onClick={() => router.push("/dashboard")}>Cancel</Button></div>
       </CardContent></Card>
     </>
   )
@@ -1167,7 +1168,7 @@ function PostList({ title, posts, emptyText, emptyAction, timezone, published, o
       toast.success("Post published to Facebook successfully!")
       onChanged()
     } catch (error: any) {
-      toast.error(error?.response?.data?.detail || "Publishing failed. Please try again.")
+      toast.error(getApiErrorMessage(error, "Publishing failed. Please try again."))
     } finally {
       setPublishing(null)
     }

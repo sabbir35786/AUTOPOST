@@ -3,6 +3,7 @@ from threading import Lock
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
+from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app import models
@@ -140,37 +141,119 @@ def create_draft_post(
     return post_log
 
 
+def _resolve_page_access_token(connection: models.FacebookConnection) -> str | None:
+    if not connection.page_access_token:
+        return None
+    token = decrypt_token(connection.page_access_token)
+    return token or None
+
+
+def _mark_connection_needs_reconnection(
+    db: Session,
+    connection: models.FacebookConnection,
+    error_code: int | None,
+) -> None:
+    if error_code in (190, 102, 200, 463, 467):
+        connection.connection_status = "needs-reconnection"
+        db.commit()
+
+
+def _build_facebook_post_request(
+    connection: models.FacebookConnection,
+    token: str,
+    message: str,
+    media_urls: list[str] | None = None,
+    link_url: str | None = None,
+    image_url: str | None = None,
+) -> tuple[str, dict[str, str]]:
+    photo_url = image_url
+    if not photo_url and media_urls and media_urls[0] and not link_url:
+        photo_url = media_urls[0]
+
+    if photo_url:
+        return f"{connection.page_id}/photos", {
+            "message": message,
+            "url": photo_url,
+            "access_token": token,
+        }
+
+    params: dict[str, str] = {
+        "message": message,
+        "access_token": token,
+    }
+    if link_url:
+        params["link"] = link_url
+    elif media_urls and media_urls[0]:
+        params["link"] = media_urls[0]
+    return f"{connection.page_id}/feed", params
+
+
+async def verify_page_connection_for_publish(
+    db: Session,
+    connection: models.FacebookConnection,
+) -> str:
+    if connection.connection_status != "connected":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Your Facebook connection has expired. Please reconnect your page in Settings.",
+        )
+
+    token = _resolve_page_access_token(connection)
+    if not token:
+        connection.connection_status = "needs-reconnection"
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Your Facebook page access token is missing. Please reconnect in Settings.",
+        )
+
+    async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL, timeout=20) as client:
+        response = await client.get(
+            str(connection.page_id),
+            params={"fields": "id", "access_token": token},
+        )
+
+    if response.status_code >= 400:
+        error_code = _facebook_error_code(response)
+        _mark_connection_needs_reconnection(db, connection, error_code)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_facebook_publish_error_message(response),
+        )
+
+    return token
+
+
 async def publish_post_to_facebook(
     db: Session,
     post_log: models.PostLog,
     connection: models.FacebookConnection,
     post_date: date | None = None,
 ) -> bool:
-    params = {
-        "access_token": decrypt_token(connection.page_access_token),
-    }
-    endpoint = f"{connection.page_id}/feed"
-    
-    # Check if there is an image from the media library
+    token = _resolve_page_access_token(connection)
+    if not token:
+        post_log.status = "failed"
+        post_log.error_message = "Facebook page access token is missing. Please reconnect in Settings."
+        post_log.retry_count += 1
+        db.commit()
+        return False
+
     image_url = None
     if post_log.media_library_id:
         media = db.query(models.MediaLibrary).filter(models.MediaLibrary.id == post_log.media_library_id).first()
         if media and media.image_url:
             image_url = media.image_url
-            # Mark image as used
             media.is_used = True
             db.commit()
 
-    if image_url:
-        params["message"] = post_log.content
-        params["url"] = image_url
-        endpoint = f"{connection.page_id}/photos"
-    else:
-        params["message"] = post_log.content
-        if post_log.link_url:
-            params["link"] = post_log.link_url
-        elif post_log.media_urls and post_log.media_urls[0]:
-            params["link"] = post_log.media_urls[0]
+    endpoint, params = _build_facebook_post_request(
+        connection,
+        token,
+        post_log.content,
+        media_urls=post_log.media_urls,
+        link_url=post_log.link_url,
+        image_url=image_url,
+    )
 
     async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL) as client:
         response = await client.post(
@@ -189,9 +272,9 @@ async def publish_post_to_facebook(
         db.commit()
         return True
 
+    error_code = _facebook_error_code(response)
     error_message = _facebook_publish_error_message(response)
-    if _facebook_error_code(response) == 190:
-        connection.connection_status = "needs-reconnection"
+    _mark_connection_needs_reconnection(db, connection, error_code)
 
     post_log.status = "failed"
     post_log.error_message = error_message
@@ -239,15 +322,7 @@ async def publish_message_to_facebook(
     link_url: str | None = None,
     link_preview_data: dict | None = None,
 ) -> tuple[bool, models.PostLog, str | None]:
-    params = {
-        "message": message,
-        "access_token": decrypt_token(connection.page_access_token),
-    }
-    if link_url:
-        params["link"] = link_url
-    elif media_urls and media_urls[0]:
-        params["link"] = media_urls[0]
-
+    token = _resolve_page_access_token(connection)
     post_log = models.PostLog(
         user_id=user_id,
         facebook_connection_id=connection.id,
@@ -260,8 +335,24 @@ async def publish_message_to_facebook(
     db.add(post_log)
     db.flush()
 
+    if not token:
+        post_log.status = "failed"
+        post_log.error_message = "Facebook page access token is missing. Please reconnect in Settings."
+        post_log.retry_count += 1
+        db.commit()
+        db.refresh(post_log)
+        return False, post_log, None
+
+    endpoint, params = _build_facebook_post_request(
+        connection,
+        token,
+        message,
+        media_urls=media_urls,
+        link_url=link_url,
+    )
+
     async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL) as client:
-        response = await client.post(f"{connection.page_id}/feed", data=params)
+        response = await client.post(endpoint, data=params)
 
     if response.status_code < 400:
         data = response.json()
@@ -279,9 +370,7 @@ async def publish_message_to_facebook(
 
     error_code = _facebook_error_code(response)
     error_message = _facebook_publish_error_message(response)
-
-    if error_code == 190:
-        connection.connection_status = "needs-reconnection"
+    _mark_connection_needs_reconnection(db, connection, error_code)
 
     post_log.status = "failed"
     post_log.error_message = error_message

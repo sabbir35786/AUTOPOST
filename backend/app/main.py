@@ -56,6 +56,7 @@ from app.posts import (
     release_user_posting,
     run_scheduled_posts,
     try_claim_user_posting,
+    verify_page_connection_for_publish,
 )
 from app.mistral_service import (
     analyze_style_with_mistral,
@@ -2064,6 +2065,8 @@ async def publish_composer_post(
         db.refresh(post_log)
         return {"success": True, "id": post_log.id, "status": post_log.status}
 
+    await verify_page_connection_for_publish(db, connection)
+
     if not try_claim_user_posting(current_user.id):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -2143,6 +2146,8 @@ async def publish_post(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Your Facebook connection has expired. Please reconnect your page.",
             )
+
+        await verify_page_connection_for_publish(db, connection)
 
         success = await publish_post_to_facebook(db, post_log, connection)
         if success and post_log.ai_generated:

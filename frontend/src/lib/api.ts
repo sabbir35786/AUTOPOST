@@ -44,6 +44,34 @@ export function getBackendOrigin() {
 
 export const BACKEND_ORIGIN = typeof window !== "undefined" ? getBackendOrigin() : DEFAULT_REMOTE_BACKEND
 
+export function getApiErrorMessage(error: unknown, fallback: string): string {
+  if (!axios.isAxiosError(error)) {
+    return fallback
+  }
+  const detail = error.response?.data?.detail
+  if (typeof detail === "string" && detail.trim()) {
+    return detail
+  }
+  if (Array.isArray(detail)) {
+    const message = detail
+      .map((item) => {
+        if (typeof item === "string") return item
+        if (item && typeof item === "object" && "msg" in item) {
+          return String(item.msg)
+        }
+        return ""
+      })
+      .filter(Boolean)
+      .join(", ")
+    if (message) return message
+  }
+  const errorMessage = error.response?.data?.error_message
+  if (typeof errorMessage === "string" && errorMessage.trim()) {
+    return errorMessage
+  }
+  return fallback
+}
+
 export const api = axios.create({
   baseURL: API_BASE_URL,
   timeout: 90_000, // Render free-tier cold starts can take 30-60s
