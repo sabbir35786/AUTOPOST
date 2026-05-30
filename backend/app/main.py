@@ -1,18 +1,20 @@
 from contextlib import asynccontextmanager
 import asyncio
+import secrets
 from datetime import date, datetime, timedelta, timezone
-from secrets import token_urlsafe
 from urllib.parse import urlencode, urlparse
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 from jose import JWTError, jwt
 from sqlalchemy import func, Integer
 from sqlalchemy.orm import Session, object_session
 
 from app import models, schemas
+from app import facebook_oauth
 from app.auth import (
     create_access_token,
     get_current_user,
@@ -76,9 +78,7 @@ from app.learning.service import (
     user_has_learning_access,
 )
 
-pending_facebook_pages: dict[int, dict] = {}
 pending_facebook_credentials: dict[int, dict] = {}
-pending_facebook_states: dict[str, int] = {}
 scheduler_task: asyncio.Task | None = None
 last_scheduler_run_at: datetime | None = None
 
@@ -215,6 +215,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax", https_only=False)
 
 
 @app.get("/")
@@ -370,243 +371,33 @@ def _get_pending_or_global_facebook_credentials(user_id: int) -> tuple[str, str]
     return FACEBOOK_APP_ID, FACEBOOK_APP_SECRET
 
 
-def _current_user_from_popup_token(token: str, db: Session) -> models.User:
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload.get("sub")
-        if user_id is None:
-            raise ValueError
-    except (JWTError, ValueError) as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
-    user = db.get(models.User, int(user_id))
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    return user
-
-
 @app.get("/auth/facebook/start")
-def start_facebook_oauth(
+def start_facebook_oauth_route(
+    request: Request,
     token: str = Query(...),
     db: Session = Depends(get_db),
 ):
-    user = _current_user_from_popup_token(token, db)
-    if not FACEBOOK_APP_ID or not FACEBOOK_APP_SECRET:
-        _facebook_error("Facebook app credentials are not configured", status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    state = token_urlsafe(32)
-    pending_facebook_states[state] = user.id
-    pending_facebook_credentials[user.id] = {
-        "app_id": FACEBOOK_APP_ID,
-        "app_secret": FACEBOOK_APP_SECRET,
-        "redirect_uri": FACEBOOK_REDIRECT_URI,
-        "state": state,
-    }
-    params = urlencode(
-        {
-            "client_id": FACEBOOK_APP_ID,
-            "redirect_uri": FACEBOOK_REDIRECT_URI,
-            "response_type": "code",
-            "scope": FACEBOOK_OAUTH_SCOPES,
-            "state": state,
-        }
-    )
-    return RedirectResponse(f"https://www.facebook.com/v19.0/dialog/oauth?{params}")
+    user = facebook_oauth.current_user_from_popup_token(token, db)
+    return facebook_oauth.start_facebook_oauth(request, user)
 
 
 @app.get("/auth/facebook/callback", response_class=HTMLResponse)
-async def facebook_oauth_callback(
+async def facebook_oauth_callback_route(
     request: Request,
     code: str | None = Query(default=None),
     state: str | None = Query(default=None),
     error: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    if error:
-        return _popup_html(False, f"Facebook returned an error: {error}")
-    if not code or not state or state not in pending_facebook_states:
-        print("Invalid Facebook OAuth callback state")
-        response = _popup_html(False, "Facebook authorization state did not match")
-        response.status_code = 400
-        return response
-
-    user_id = pending_facebook_states.pop(state)
-    credentials = pending_facebook_credentials.get(user_id)
-    if not credentials or credentials.get("state") != state:
-        print("Invalid Facebook OAuth callback state")
-        response = _popup_html(False, "Facebook authorization state did not match")
-        response.status_code = 400
-        return response
-
-    pages, token_data, long_lived_token = await _fetch_facebook_pages(
-        code,
-        credentials["redirect_uri"],
-        credentials["app_id"],
-        credentials["app_secret"],
-    )
-    if not pages:
-        return _popup_html(False, "No Facebook Pages were returned for this account.")
-
-    expires_in = token_data.get("expires_in")
-    token_expires_at = None
-    if expires_in is not None:
-        token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
-    pending_facebook_pages[user_id] = {
-        "app_id": credentials["app_id"],
-        "app_secret": credentials["app_secret"],
-        "long_lived_user_token": long_lived_token,
-        "token_expires_at": token_expires_at,
-        "pages": pages,
-        "state": state,
-    }
-
-    if len(pages) == 1:
-        connection = await _store_selected_facebook_page(db, user_id, pages[0]["page_id"])
-        pending_facebook_pages.pop(user_id, None)
-        pending_facebook_credentials.pop(user_id, None)
-        return _popup_html(True, f"Connected {connection.page_name}.")
-
-    return _page_picker_html(pages, state)
+    return await facebook_oauth.handle_facebook_callback(request, db, code, state, error)
 
 
-@app.get("/auth/facebook/select-page", response_class=HTMLResponse)
-async def select_facebook_page_from_popup(
-    page_id: str = Query(...),
-    state: str = Query(...),
+@app.post("/auth/facebook/select-page", response_class=HTMLResponse)
+async def select_facebook_page_from_popup_route(
+    request: Request,
     db: Session = Depends(get_db),
 ):
-    credentials = next(
-        ((user_id, value) for user_id, value in pending_facebook_credentials.items() if value.get("state") == state),
-        None,
-    )
-    if credentials is None:
-        response = _popup_html(False, "Facebook authorization state did not match")
-        response.status_code = 400
-        return response
-    user_id, _ = credentials
-    connection = await _store_selected_facebook_page(db, user_id, page_id)
-    pending_facebook_pages.pop(user_id, None)
-    pending_facebook_credentials.pop(user_id, None)
-    return _popup_html(True, f"Connected {connection.page_name}.")
-
-
-async def _fetch_facebook_pages(code: str, redirect_uri: str, app_id: str, app_secret: str):
-    async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL) as client:
-        token_response = await client.get(
-            "oauth/access_token",
-            params={
-                "client_id": app_id,
-                "client_secret": app_secret,
-                "redirect_uri": redirect_uri,
-                "code": code,
-            },
-        )
-        if token_response.status_code >= 400:
-            _facebook_error("Could not exchange Facebook token")
-        short_lived_token = token_response.json().get("access_token")
-        long_lived_response = await client.get(
-            "oauth/access_token",
-            params={
-                "grant_type": "fb_exchange_token",
-                "client_id": app_id,
-                "client_secret": app_secret,
-                "fb_exchange_token": short_lived_token,
-            },
-        )
-        if long_lived_response.status_code >= 400:
-            _facebook_error("Could not exchange Facebook token")
-        token_data = long_lived_response.json()
-        long_lived_token = token_data.get("access_token")
-        if not long_lived_token:
-            _facebook_error("Facebook token exchange did not return an access token")
-        pages_response = await client.get("me/accounts", params={"access_token": long_lived_token})
-        if pages_response.status_code >= 400:
-            _facebook_error("Could not fetch Facebook pages")
-
-    pages = [
-        {
-            "page_id": page.get("id"),
-            "page_name": page.get("name"),
-            "page_access_token": page.get("access_token"),
-        }
-        for page in pages_response.json().get("data", [])
-        if page.get("id") and page.get("name") and page.get("access_token")
-    ]
-    return pages, token_data, long_lived_token
-
-
-async def _store_selected_facebook_page(db: Session, user_id: int, page_id: str) -> models.FacebookConnection:
-    pending_connection = pending_facebook_pages.get(user_id)
-    if not pending_connection:
-        _facebook_error("Connect Facebook before selecting a page")
-    selected_page = next((page for page in pending_connection["pages"] if page["page_id"] == page_id), None)
-    if selected_page is None:
-        _facebook_error("Selected page was not found")
-
-    existing_connection = (
-        db.query(models.FacebookConnection)
-        .filter(
-            models.FacebookConnection.user_id == user_id,
-            models.FacebookConnection.page_id == page_id
-        )
-        .first()
-    )
-    if not existing_connection:
-        existing_connection = (
-            db.query(models.FacebookConnection)
-            .filter(models.FacebookConnection.user_id == user_id)
-            .first()
-        )
-
-    if existing_connection:
-        connection = existing_connection
-        connection.reconnect_count = (connection.reconnect_count or 0) + 1
-    else:
-        connection = models.FacebookConnection(user_id=user_id)
-        connection.reconnect_count = 0
-        db.add(connection)
-    connection.disconnected_at = None
-    connection.page_id = selected_page["page_id"]
-    connection.page_name = selected_page["page_name"]
-    connection.page_picture_url = f"https://graph.facebook.com/{selected_page['page_id']}/picture?type=large"
-    connection.page_access_token = encrypt_token(selected_page["page_access_token"])
-    connection.app_id = None
-    connection.app_secret = None
-    connection.long_lived_user_token = ""
-    connection.token_expires_at = pending_connection["token_expires_at"]
-    connection.connection_status = "connected"
-    connection.updated_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(connection)
-    return connection
-
-
-def _popup_html(success: bool, message: str) -> HTMLResponse:
-    message_js = message.replace("\\", "\\\\").replace("'", "\\'")
-    type_name = "facebook-connected" if success else "facebook-connection-failed"
-    return HTMLResponse(
-        f"""<!doctype html><html><body><p>{message}</p><script>
-        if (window.opener) {{
-          window.opener.postMessage({{ type: '{type_name}', message: '{message_js}' }}, '{FRONTEND_URL}');
-          window.close();
-        }}
-        </script></body></html>"""
-    )
-
-
-def _page_picker_html(pages: list[dict], state: str) -> HTMLResponse:
-    options = "".join(
-        f"<label><input type='radio' name='page_id' value='{page['page_id']}' required> {page['page_name']}</label><br>"
-        for page in pages
-    )
-    return HTMLResponse(
-        f"""<!doctype html><html><body style="font-family: system-ui; padding: 24px;">
-        <h1>Select Facebook Page</h1>
-        <form method="get" action="/auth/facebook/select-page">
-          <input type="hidden" name="state" value="{state}">
-          {options}
-          <button type="submit" style="margin-top: 16px;">Confirm</button>
-        </form></body></html>"""
-    )
+    return await facebook_oauth.handle_select_page_from_popup(request, db)
 
 
 @app.post("/facebook/oauth-url", response_model=schemas.FacebookOAuthUrlResponse)
@@ -624,7 +415,7 @@ def create_facebook_oauth_url(
     if not app_id or not app_secret or not redirect_uri:
         _facebook_error("Facebook app id, app secret, and redirect_uri are required")
 
-    state = token_urlsafe(24)
+    state = secrets.token_hex(16)
     pending_facebook_credentials[current_user.id] = {
         "app_id": app_id,
         "app_secret": app_secret,
@@ -642,9 +433,7 @@ def create_facebook_oauth_url(
         }
     )
     return {
-        "authorization_url": (
-            f"https://www.facebook.com/v19.0/dialog/oauth?{params}"
-        )
+        "authorization_url": f"https://www.facebook.com/v18.0/dialog/oauth?{params}"
     }
 
 
@@ -653,105 +442,42 @@ async def connect_facebook(
     payload: schemas.FacebookConnectRequest,
     current_user: models.User = Depends(get_current_user),
 ):
-    app_id, app_secret = _get_pending_or_global_facebook_credentials(current_user.id)
     pending_credentials = pending_facebook_credentials.get(current_user.id)
     if payload.code and pending_credentials:
         if payload.state != pending_credentials["state"]:
             _facebook_error("Facebook authorization state did not match")
 
-    if not (app_id and app_secret):
+    if not FACEBOOK_APP_ID or not FACEBOOK_APP_SECRET:
         _facebook_error(
             "Facebook app credentials are not configured",
             status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL) as client:
-        if payload.code:
-            if not payload.redirect_uri:
-                _facebook_error("redirect_uri is required with authorization code")
-            token_response = await client.get(
-                "oauth/access_token",
-                params={
-                    "client_id": app_id,
-                    "client_secret": app_secret,
-                    "redirect_uri": payload.redirect_uri,
-                    "code": payload.code,
-                },
-            )
-        elif payload.short_lived_token:
-            token_response = await client.get(
-                "oauth/access_token",
-                params={
-                    "grant_type": "fb_exchange_token",
-                    "client_id": app_id,
-                    "client_secret": app_secret,
-                    "fb_exchange_token": payload.short_lived_token,
-                },
-            )
-        else:
-            _facebook_error("Provide a Facebook authorization code or token")
+    redirect_uri = payload.redirect_uri or FACEBOOK_REDIRECT_URI
+    if payload.code:
+        access_token, token_data = await facebook_oauth._exchange_code_for_token(payload.code)
+    elif payload.short_lived_token:
+        access_token = payload.short_lived_token
+        token_data = None
+    else:
+        _facebook_error("Provide a Facebook authorization code or token")
 
-        if token_response.status_code >= 400:
-            _facebook_error("Could not exchange Facebook token")
+    if not access_token:
+        _facebook_error("Could not exchange Facebook token")
 
-        token_data = token_response.json()
-        long_lived_token = token_data.get("access_token")
-        if not long_lived_token:
-            _facebook_error("Facebook token exchange did not return an access token")
+    pages = await facebook_oauth._fetch_managed_pages(access_token)
+    if not pages:
+        _facebook_error("Could not fetch Facebook pages")
 
-        if payload.code:
-            long_lived_response = await client.get(
-                "oauth/access_token",
-                params={
-                    "grant_type": "fb_exchange_token",
-                    "client_id": app_id,
-                    "client_secret": app_secret,
-                    "fb_exchange_token": long_lived_token,
-                },
-            )
-            if long_lived_response.status_code >= 400:
-                _facebook_error("Could not exchange Facebook token")
-            token_data = long_lived_response.json()
-            long_lived_token = token_data.get("access_token")
-            if not long_lived_token:
-                _facebook_error("Facebook token exchange did not return an access token")
-
-        pages_response = await client.get(
-            "me/accounts",
-            params={"access_token": long_lived_token},
-        )
-        if pages_response.status_code >= 400:
-            _facebook_error("Could not fetch Facebook pages")
-
-    pages_data = pages_response.json().get("data", [])
-    pages = [
-        {
-            "page_id": page.get("id"),
-            "page_name": page.get("name"),
-            "page_access_token": page.get("access_token"),
-        }
-        for page in pages_data
-        if page.get("id") and page.get("name") and page.get("access_token")
-    ]
-
-    expires_in = token_data.get("expires_in")
     token_expires_at = None
-    if expires_in is not None:
-        token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+    if token_data and token_data.get("expires_in") is not None:
+        token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(token_data["expires_in"]))
 
-    pending_facebook_pages[current_user.id] = {
-        "app_id": app_id,
-        "app_secret": app_secret,
-        "long_lived_user_token": long_lived_token,
-        "token_expires_at": token_expires_at,
-        "pages": pages,
-    }
+    await facebook_oauth.store_pending_pages_for_user(current_user.id, pages, token_expires_at)
+    pending_facebook_credentials.pop(current_user.id, None)
 
     return {
-        "pages": [
-            {"page_id": page["page_id"], "page_name": page["page_name"]}
-            for page in pages
-        ]
+        "pages": [{"page_id": page["page_id"], "page_name": page["page_name"]} for page in pages]
     }
 
 
@@ -761,46 +487,12 @@ async def select_facebook_page(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    pending_connection = pending_facebook_pages.get(current_user.id)
-    if not pending_connection:
-        _facebook_error("Connect Facebook before selecting a page")
-
-    selected_page = next(
-        (
-            page
-            for page in pending_connection["pages"]
-            if page["page_id"] == payload.page_id
-        ),
-        None,
-    )
-    if selected_page is None:
-        _facebook_error("Selected page was not found")
-
-    existing_connection = (
-        db.query(models.FacebookConnection)
-        .filter(models.FacebookConnection.user_id == current_user.id)
-        .first()
-    )
-    if existing_connection:
-        db.delete(existing_connection)
-        db.flush()
-
-    connection = models.FacebookConnection(
-        user_id=current_user.id,
-        page_id=selected_page["page_id"],
-        page_name=selected_page["page_name"],
-        page_picture_url=f"https://graph.facebook.com/{selected_page['page_id']}/picture?type=large",
-        page_access_token=encrypt_token(selected_page["page_access_token"]),
-        app_id=None,
-        app_secret=None,
-        long_lived_user_token="",
-        token_expires_at=pending_connection["token_expires_at"],
-    )
-    db.add(connection)
-    db.commit()
-    pending_facebook_pages.pop(current_user.id, None)
-    pending_facebook_credentials.pop(current_user.id, None)
-
+    try:
+        connection = facebook_oauth.select_page_for_user(db, current_user.id, payload.page_id)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_409_CONFLICT:
+            _facebook_error(str(exc.detail), exc.status_code)
+        raise
     return {"success": True, "page_name": connection.page_name}
 
 
@@ -815,7 +507,11 @@ def facebook_status(
 ):
     connection = (
         db.query(models.FacebookConnection)
-        .filter(models.FacebookConnection.user_id == current_user.id)
+        .filter(
+            models.FacebookConnection.user_id == current_user.id,
+            models.FacebookConnection.connection_status == "connected",
+        )
+        .order_by(models.FacebookConnection.connected_at.desc())
         .first()
     )
     if connection is None:
@@ -837,12 +533,24 @@ def list_facebook_pages(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return (
-        db.query(models.FacebookConnection)
-        .filter(models.FacebookConnection.user_id == current_user.id)
-        .order_by(models.FacebookConnection.connected_at.desc())
-        .all()
-    )
+    return facebook_oauth.list_user_page_connections(db, current_user.id)
+
+
+@app.get("/api/pages", response_model=list[schemas.PageConnectionRead])
+def list_api_pages(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return facebook_oauth.list_user_page_connections(db, current_user.id)
+
+
+@app.delete("/api/pages/{connection_id}/disconnect", response_model=schemas.PageDisconnectResponse)
+def disconnect_api_page(
+    connection_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return facebook_oauth.disconnect_page_connection(db, current_user.id, connection_id)
 
 
 VALID_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -2063,22 +1771,7 @@ def disconnect_facebook_page(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    connection = (
-        db.query(models.FacebookConnection)
-        .filter(
-            models.FacebookConnection.id == connection_id,
-            models.FacebookConnection.user_id == current_user.id,
-        )
-        .first()
-    )
-    if connection is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Page not found")
-
-    connection.connection_status = "disconnected"
-    connection.page_access_token = None
-    connection.disconnected_at = datetime.now(timezone.utc)
-    db.commit()
-    return {"success": True}
+    return facebook_oauth.disconnect_page_connection(db, current_user.id, connection_id)
 
 
 @app.post("/facebook/pages/recover-history/{connection_id}")

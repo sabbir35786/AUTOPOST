@@ -88,13 +88,26 @@ class UserUpdate(BaseModel):
 
 class PageConnectionRead(BaseModel):
     id: int
+    facebook_page_id: str | None = None
     page_id: str
     page_name: str
+    profile_picture_url: str | None = None
     page_picture_url: str | None = None
     connection_status: str
     connected_at: datetime
+    disconnected_at: datetime | None = None
+    reconnect_count: int = 0
+    post_count: int = 0
+    scheduled_post_count: int = 0
+    paused_post_count: int = 0
 
     model_config = {"from_attributes": True}
+
+
+class PageDisconnectResponse(BaseModel):
+    success: bool
+    message: str
+    paused_posts: int
 
 
 class ScheduleUpsert(BaseModel):

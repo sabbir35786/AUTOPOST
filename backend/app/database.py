@@ -45,6 +45,7 @@ def create_database_tables() -> None:
     try:
         Base.metadata.create_all(bind=engine)
         _ensure_facebook_credential_columns()
+        _ensure_facebook_connection_flow()
         _ensure_product_blueprint_columns()
         _migrate_ai_page_settings_to_personas()
     except OperationalError as exc:
@@ -100,6 +101,74 @@ def _add_missing_columns(table_name: str, columns: dict[str, str]) -> None:
     with engine.begin() as connection:
         for statement in statements:
             connection.execute(text(statement))
+
+
+def _ensure_facebook_connection_flow() -> None:
+    inspector = inspect(engine)
+    if not inspector.has_table("facebook_connections"):
+        return
+
+    _add_missing_columns(
+        "facebook_connections",
+        {
+            "connection_status": "varchar default 'connected' not null",
+            "disconnected_at": "timestamptz",
+            "reconnect_count": "integer default 0 not null",
+            "last_token_refresh": "timestamptz",
+        },
+    )
+
+    is_postgres = SQLALCHEMY_DATABASE_URL.startswith("postgresql")
+    with engine.begin() as connection:
+        if is_postgres:
+            connection.execute(
+                text("ALTER TABLE facebook_connections ALTER COLUMN page_access_token DROP NOT NULL")
+            )
+            connection.execute(
+                text("ALTER TABLE facebook_connections DROP CONSTRAINT IF EXISTS facebook_connections_user_id_key")
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_connections_user_page "
+                    "ON facebook_connections(user_id, page_id)"
+                )
+            )
+            connection.execute(
+                text("ALTER TABLE post_logs DROP CONSTRAINT IF EXISTS post_logs_facebook_connection_id_fkey")
+            )
+            connection.execute(
+                text(
+                    """
+                    ALTER TABLE post_logs
+                    ADD CONSTRAINT post_logs_facebook_connection_id_fkey
+                    FOREIGN KEY (facebook_connection_id)
+                    REFERENCES facebook_connections(id)
+                    ON DELETE SET NULL
+                    """
+                )
+            )
+            connection.execute(
+                text("ALTER TABLE ai_personas DROP CONSTRAINT IF EXISTS ai_personas_page_connection_id_fkey")
+            )
+            connection.execute(
+                text(
+                    """
+                    ALTER TABLE ai_personas
+                    ADD CONSTRAINT ai_personas_page_connection_id_fkey
+                    FOREIGN KEY (page_connection_id)
+                    REFERENCES facebook_connections(id)
+                    ON DELETE SET NULL
+                    """
+                )
+            )
+        elif SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+            # SQLite cannot drop NOT NULL or recreate FK constraints easily at runtime.
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_connections_user_page "
+                    "ON facebook_connections(user_id, page_id)"
+                )
+            )
 
 
 def _ensure_product_blueprint_columns() -> None:

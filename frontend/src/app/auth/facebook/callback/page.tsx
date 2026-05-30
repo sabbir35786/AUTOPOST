@@ -78,7 +78,7 @@ function FacebookCallbackContent() {
       await api.post("/facebook/select-page", { page_id: page.page_id })
       toast.success(`Connected ${page.page_name}.`)
       if (window.opener) {
-        window.opener.postMessage({ type: "facebook-connected" }, window.location.origin)
+        window.opener.postMessage({ type: "FACEBOOK_CONNECT_SUCCESS" }, window.location.origin)
         window.close()
         return
       }

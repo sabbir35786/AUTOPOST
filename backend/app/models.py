@@ -29,7 +29,6 @@ class FacebookConnection(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id"),
-        unique=True,
         index=True,
         nullable=False,
     )
@@ -54,6 +53,10 @@ class FacebookConnection(Base):
         nullable=True,
     )
     reconnect_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_token_refresh: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     connected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -93,10 +96,10 @@ class PostLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True, nullable=False)
-    facebook_connection_id: Mapped[int] = mapped_column(
-        ForeignKey("facebook_connections.id"),
+    facebook_connection_id: Mapped[int | None] = mapped_column(
+        ForeignKey("facebook_connections.id", ondelete="SET NULL"),
         index=True,
-        nullable=False,
+        nullable=True,
     )
     ai_persona_id: Mapped[int | None] = mapped_column(ForeignKey("ai_personas.id"), index=True, nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)

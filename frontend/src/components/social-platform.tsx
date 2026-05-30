@@ -35,16 +35,23 @@ import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { useAuth } from "@/contexts/auth-context"
-import { API_BASE_URL, api } from "@/lib/api"
+import { API_BASE_URL, BACKEND_ORIGIN, api } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 type PageConnection = {
   id: number
+  facebook_page_id?: string
   page_id: string
   page_name: string
+  profile_picture_url?: string | null
   page_picture_url?: string | null
   connection_status: string
   connected_at: string
+  disconnected_at?: string | null
+  reconnect_count?: number
+  post_count?: number
+  scheduled_post_count?: number
+  paused_post_count?: number
 }
 
 type Post = {
@@ -189,7 +196,7 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
   const [mobileOpen, setMobileOpen] = React.useState(false)
 
   const timezone = user?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-  const connectedPage = pages[0]
+  const connectedPage = pages.find((page) => page.connection_status === "connected") || pages[0]
 
   React.useEffect(() => {
     if (!isLoading && !isAuthenticated) router.replace("/login")
@@ -204,7 +211,7 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
       // Load pages – if none are connected, show empty state without error
       let pageResponse
       try {
-        pageResponse = await api.get<PageConnection[]>("/facebook/pages")
+        pageResponse = await api.get<PageConnection[]>("/api/pages")
         setPages(pageResponse.data)
       } catch (err) {
         const status = axios.isAxiosError(err) ? err.response?.status : undefined
@@ -318,7 +325,7 @@ function HomeView({ pages, posts, onConnected, timezone }: { pages: PageConnecti
     <>
       <PageTitle title="Smart Dashboard" subtitle="Live status, learned patterns, and the next best action." />
       {intel?.warnings.map((warning) => <div key={warning.text} className={cn("rounded-md border p-4 text-sm", warning.level === "red" ? "border-red-200 bg-red-50 text-red-700" : "border-amber-200 bg-amber-50 text-amber-700")}><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><span>{warning.text}</span><Button asChild variant="outline"><Link href={warning.href}>Fix Now</Link></Button></div></div>)}
-      {!pages.length ? <ConnectEmpty onConnected={onConnected} /> : <ConnectedBanner page={pages[0]} onConnected={onConnected} />}
+      {!pages.length ? <ConnectEmpty onConnected={onConnected} /> : <ConnectedPagesSection pages={pages} onConnected={onConnected} />}
       <section className="grid gap-4 md:grid-cols-3">
         <Stat label="Posts Published This Month" value={published} tone="green" />
         <Stat label="Posts Scheduled" value={scheduled} tone="amber" />
@@ -348,57 +355,96 @@ function ConnectEmpty({ onConnected }: { onConnected: () => void }) {
   return <Card><CardContent className="grid gap-4 p-6 text-center"><Plug className="mx-auto size-10 text-blue-700" /><div><h2 className="text-lg font-semibold">You have no connected pages yet.</h2><p className="text-sm text-slate-500">Connect your first Facebook Page.</p></div><FacebookConnectButton className="mx-auto" onConnected={onConnected} /></CardContent></Card>
 }
 
-function FacebookConnectButton({ onConnected, className }: { onConnected: () => void; className?: string }) {
+function FacebookConnectButton({ onConnected, className, urgent }: { onConnected: () => void; className?: string; urgent?: boolean }) {
   const [busy, setBusy] = React.useState(false)
-  const completedRef = React.useRef(false)
-  React.useEffect(() => {
-    function handleMessage(event: MessageEvent) {
-      if (event.origin !== API_BASE_URL && event.origin !== window.location.origin) return
-      if (event.data?.type === "facebook-connected") {
-        completedRef.current = true
-        setBusy(false)
-        onConnected()
-        toast.success("Facebook Page connected.")
-      } else if (event.data?.type === "facebook-connection-failed") {
-        completedRef.current = true
-        setBusy(false)
-        toast.error(event.data.message || "Connection was not completed.")
-      }
-    }
-    window.addEventListener("message", handleMessage)
-    return () => window.removeEventListener("message", handleMessage)
-  }, [onConnected])
+  const connectionSucceededRef = React.useRef(false)
+  const popupCheckerRef = React.useRef<number | null>(null)
+
+  function isAllowedOrigin(origin: string) {
+    return origin === BACKEND_ORIGIN || origin === window.location.origin
+  }
+
   function connect() {
     setBusy(true)
-    completedRef.current = false
+    connectionSucceededRef.current = false
+
+    const handleMessage = (event: MessageEvent) => {
+      if (!isAllowedOrigin(event.origin)) return
+      if (event.data?.type === "FACEBOOK_CONNECT_SUCCESS") {
+        connectionSucceededRef.current = true
+        window.removeEventListener("message", handleMessage)
+        if (popupCheckerRef.current !== null) {
+          window.clearInterval(popupCheckerRef.current)
+          popupCheckerRef.current = null
+        }
+        setBusy(false)
+        onConnected()
+        toast.success("Facebook Page connected successfully")
+      } else if (event.data?.type === "FACEBOOK_CONNECT_ERROR") {
+        connectionSucceededRef.current = true
+        window.removeEventListener("message", handleMessage)
+        if (popupCheckerRef.current !== null) {
+          window.clearInterval(popupCheckerRef.current)
+          popupCheckerRef.current = null
+        }
+        setBusy(false)
+        toast.error(event.data.message || "Connection failed.")
+      }
+    }
+
+    window.addEventListener("message", handleMessage)
+
     try {
       const token = window.localStorage.getItem("auth_token")
       if (!token) throw new Error("Missing auth token")
       const width = 600
       const height = 700
-      const left = Math.max(0, window.screenX + (window.outerWidth - width) / 2)
-      const top = Math.max(0, window.screenY + (window.outerHeight - height) / 2)
+      const left = window.screenX + (window.outerWidth - width) / 2
+      const top = window.screenY + (window.outerHeight - height) / 2
       const popup = window.open(
         `${API_BASE_URL}/auth/facebook/start?token=${encodeURIComponent(token)}`,
-        "facebook-oauth",
-        `toolbar=no,menubar=no,scrollbars=yes,resizable=yes,width=${width},height=${height},left=${left},top=${top}`
+        "facebook_oauth",
+        `width=${width},height=${height},left=${left},top=${top},toolbar=no,menubar=no,scrollbars=yes`
       )
       if (!popup) throw new Error("Popup blocked")
-      const timer = window.setInterval(() => {
-        if (popup?.closed) {
-          window.clearInterval(timer)
+
+      popupCheckerRef.current = window.setInterval(() => {
+        if (popup.closed) {
+          if (popupCheckerRef.current !== null) {
+            window.clearInterval(popupCheckerRef.current)
+            popupCheckerRef.current = null
+          }
+          window.removeEventListener("message", handleMessage)
           setBusy(false)
-          if (!completedRef.current) {
-            toast.info("Connection was not completed. You can try again anytime.")
+          if (!connectionSucceededRef.current) {
+            toast.info("Connection cancelled")
           }
         }
       }, 500)
     } catch {
+      window.removeEventListener("message", handleMessage)
+      if (popupCheckerRef.current !== null) {
+        window.clearInterval(popupCheckerRef.current)
+        popupCheckerRef.current = null
+      }
       toast.error("Could not open the Facebook connection window.")
       setBusy(false)
     }
   }
-  return <Button className={cn("bg-[#1877F2] text-white hover:bg-[#0f66d0]", className)} onClick={connect} disabled={busy}>{busy ? <Loader2 className="size-4 animate-spin" /> : <span className="grid size-4 place-items-center rounded-full bg-white text-xs font-bold text-[#1877F2]">f</span>} {busy ? "Connecting..." : "Connect Facebook Page"}</Button>
+
+  return (
+    <Button
+      className={cn(
+        urgent ? "bg-amber-600 text-white hover:bg-amber-700" : "bg-[#1877F2] text-white hover:bg-[#0f66d0]",
+        className
+      )}
+      onClick={connect}
+      disabled={busy}
+    >
+      {busy ? <Loader2 className="size-4 animate-spin" /> : <span className="grid size-4 place-items-center rounded-full bg-white text-xs font-bold text-[#1877F2]">f</span>}
+      {busy ? "Connecting..." : urgent ? "Reconnect Now" : "Connect Facebook Page"}
+    </Button>
+  )
 }
 
 function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timezone: string; onSaved: () => void }) {
@@ -1158,14 +1204,16 @@ function SettingsView({ pages, timezone, onChanged }: { pages: PageConnection[];
     onChanged()
   }
   async function disconnect(id: number) {
-    if (!window.confirm("Disconnect this page and pause its scheduled posts?")) return
+    if (!window.confirm("Are you sure? Your post history will be saved.")) return
     try {
-      await api.delete(`/facebook/pages/${id}`)
-      toast.success("Page disconnected.")
-      window.location.href = "/dashboard"
+      const response = await api.delete<{ success: boolean; message: string; paused_posts: number }>(
+        `/api/pages/${id}/disconnect`
+      )
+      toast.success(response.data.message)
+      onChanged()
     } catch (e: any) {
       console.error(e)
-      toast.error(e?.response?.data?.detail || "Could not disconnect page. Backend error.")
+      toast.error(e?.response?.data?.detail || "Could not disconnect page.")
     }
   }
   async function syncHistory(id: number) {
@@ -1183,10 +1231,16 @@ function SettingsView({ pages, timezone, onChanged }: { pages: PageConnection[];
     }
   }
 
-  return <><PageTitle title="Settings" subtitle="Account, page connections, and timezone." /><Card><CardHeader><CardTitle>Account</CardTitle></CardHeader><CardContent className="grid gap-3"><Label>Email</Label><Input value={email} onChange={(event) => setEmail(event.target.value)} /><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={saveAccount}>Save Account</Button></CardContent></Card><Card><CardHeader><CardTitle>Connected Pages</CardTitle></CardHeader><CardContent className="grid gap-3">{pages.map((page) => {
-    const isSyncing = syncingPageId === page.id
-    return <div key={page.id} className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3"><PageMini page={page} />{page.connection_status === "disconnected" && <span className="rounded bg-slate-100 text-slate-700 text-xs px-2 py-0.5 font-medium border border-slate-200">Disconnected</span>}{page.connection_status === "connected" && <span className="rounded bg-green-50 text-green-700 text-xs px-2 py-0.5 font-medium border border-green-200">Connected</span>}{page.connection_status === "needs-reconnection" && <span className="rounded bg-amber-50 text-amber-700 text-xs px-2 py-0.5 font-medium border border-amber-200">Needs Reconnect</span>}</div><div className="flex gap-2">{page.connection_status === "connected" && <Button variant="outline" disabled={isSyncing} onClick={() => syncHistory(page.id)}>{isSyncing ? "Syncing..." : "Sync History"}</Button>}{page.connection_status !== "disconnected" && <><Button variant="outline" disabled={isSyncing} onClick={async () => { await api.post(`/facebook/pages/${page.id}/refresh-token`); toast.success("Token refreshed."); onChanged() }}>Refresh Token</Button><Button variant="destructive" disabled={isSyncing} onClick={() => disconnect(page.id)}>Disconnect</Button></>}</div></div>
-  })}<div className="grid gap-2 rounded-md border p-3"><p className="font-medium">Manual connection</p><Input placeholder="Facebook Page ID" value={manualPageId} onChange={(event) => setManualPageId(event.target.value)} /><Textarea placeholder="Long-lived Page Access Token" value={manualToken} onChange={(event) => setManualToken(event.target.value)} /><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={manualConnect}>Validate Page</Button></div></CardContent></Card><Card><CardHeader><CardTitle>Timezone</CardTitle></CardHeader><CardContent className="grid gap-3"><Input value={tz} onChange={(event) => setTz(event.target.value)} /><p className="text-sm text-slate-500">Default was detected from your browser. All stored schedule times are converted to UTC.</p></CardContent></Card></>
+  return <><PageTitle title="Settings" subtitle="Account, page connections, and timezone." /><Card><CardHeader><CardTitle>Account</CardTitle></CardHeader><CardContent className="grid gap-3"><Label>Email</Label><Input value={email} onChange={(event) => setEmail(event.target.value)} /><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={saveAccount}>Save Account</Button></CardContent></Card><Card><CardHeader><CardTitle>Connected Pages</CardTitle></CardHeader><CardContent className="grid gap-3">{pages.map((page) => (
+    <PageConnectionCard
+      key={page.id}
+      page={page}
+      isSyncing={syncingPageId === page.id}
+      onSyncHistory={() => syncHistory(page.id)}
+      onDisconnect={() => disconnect(page.id)}
+      onChanged={onChanged}
+    />
+  ))}<div className="grid gap-2 rounded-md border p-3"><p className="font-medium">Manual connection</p><Input placeholder="Facebook Page ID" value={manualPageId} onChange={(event) => setManualPageId(event.target.value)} /><Textarea placeholder="Long-lived Page Access Token" value={manualToken} onChange={(event) => setManualToken(event.target.value)} /><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={manualConnect}>Validate Page</Button></div></CardContent></Card><Card><CardHeader><CardTitle>Timezone</CardTitle></CardHeader><CardContent className="grid gap-3"><Input value={tz} onChange={(event) => setTz(event.target.value)} /><p className="text-sm text-slate-500">Default was detected from your browser. All stored schedule times are converted to UTC.</p></CardContent></Card></>
 }
 
 function PageTitle({ title, subtitle, aiPowered }: { title: string; subtitle: string; aiPowered?: boolean }) {
@@ -1194,12 +1248,150 @@ function PageTitle({ title, subtitle, aiPowered }: { title: string; subtitle: st
 }
 
 function PageMini({ page }: { page: PageConnection }) {
-  return <div className="flex items-center gap-3"><img alt="" className="size-9 rounded-full bg-slate-100" src={page.page_picture_url || `${API_BASE_URL}/favicon.ico`} /><div><p className="text-sm font-medium">{page.page_name}</p><p className="text-xs text-slate-500">Manage Connection</p></div></div>
+  const picture = page.profile_picture_url || page.page_picture_url
+  return <div className="flex items-center gap-3"><img alt="" className="size-9 rounded-full bg-slate-100" src={picture || `${API_BASE_URL}/favicon.ico`} /><div><p className="text-sm font-medium">{page.page_name}</p><p className="text-xs text-slate-500">Manage Connection</p></div></div>
+}
+
+function PageStatusBadge({ status }: { status: string }) {
+  if (status === "connected") {
+    return <span className="rounded-full bg-green-50 px-2 py-1 text-xs font-medium text-green-700">Connected</span>
+  }
+  if (status === "needs-reconnection") {
+    return <span className="rounded-full bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700">Token Expired</span>
+  }
+  if (status === "disconnected") {
+    return <span className="rounded-full bg-red-50 px-2 py-1 text-xs font-medium text-red-700">Disconnected</span>
+  }
+  return <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">{status}</span>
+}
+
+function ConnectedPagesSection({ pages, onConnected }: { pages: PageConnection[]; onConnected: () => void }) {
+  async function disconnect(id: number) {
+    if (!window.confirm("Are you sure? Your post history will be saved.")) return
+    try {
+      const response = await api.delete<{ success: boolean; message: string; paused_posts: number }>(
+        `/api/pages/${id}/disconnect`
+      )
+      toast.success(response.data.message)
+      onConnected()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || "Could not disconnect page.")
+    }
+  }
+
+  return (
+    <section className="grid gap-4">
+      <PageTitle title="Your Pages" subtitle="All connected and disconnected pages with preserved history." />
+      {pages.map((page) => (
+        <PageConnectionCard
+          key={page.id}
+          page={page}
+          onChanged={onConnected}
+          onDisconnect={() => disconnect(page.id)}
+          showDashboardActions
+        />
+      ))}
+      <div className="flex justify-end">
+        <FacebookConnectButton onConnected={onConnected} />
+      </div>
+    </section>
+  )
+}
+
+function PageConnectionCard({
+  page,
+  onChanged,
+  onSyncHistory,
+  onDisconnect,
+  isSyncing,
+  showDashboardActions,
+}: {
+  page: PageConnection
+  onChanged: () => void
+  onSyncHistory?: () => void
+  onDisconnect?: () => void
+  isSyncing?: boolean
+  showDashboardActions?: boolean
+}) {
+  const status = page.connection_status
+  const postCount = page.post_count ?? 0
+  const pausedCount = page.paused_post_count ?? 0
+
+  return (
+    <Card>
+      <CardContent className="grid gap-4 p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex items-start gap-3">
+            <PageMini page={page} />
+            <PageStatusBadge status={status} />
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {status === "connected" && showDashboardActions ? (
+              <>
+                <Button asChild variant="outline"><Link href="/dashboard/create">Create Post</Link></Button>
+                <Button asChild variant="outline"><Link href="/dashboard/published">View Posts</Link></Button>
+                {onDisconnect ? <Button variant="destructive" onClick={onDisconnect}>Disconnect</Button> : null}
+              </>
+            ) : null}
+            {status === "connected" && !showDashboardActions ? (
+              <>
+                {onSyncHistory ? (
+                  <Button variant="outline" disabled={isSyncing} onClick={onSyncHistory}>
+                    {isSyncing ? "Syncing..." : "Sync History"}
+                  </Button>
+                ) : null}
+                <Button
+                  variant="outline"
+                  disabled={isSyncing}
+                  onClick={async () => {
+                    await api.post(`/facebook/pages/${page.id}/refresh-token`)
+                    toast.success("Token refreshed.")
+                    onChanged()
+                  }}
+                >
+                  Refresh Token
+                </Button>
+                {onDisconnect ? (
+                  <Button variant="destructive" disabled={isSyncing} onClick={onDisconnect}>
+                    Disconnect
+                  </Button>
+                ) : null}
+              </>
+            ) : null}
+            {(status === "disconnected" || status === "needs-reconnection") ? (
+              <FacebookConnectButton onConnected={onChanged} urgent={status === "needs-reconnection"} />
+            ) : null}
+          </div>
+        </div>
+
+        {status === "connected" ? (
+          <p className="text-sm text-slate-600">
+            {postCount} posts in history
+            {(page.scheduled_post_count ?? 0) > 0 ? ` · ${page.scheduled_post_count} scheduled` : ""}
+          </p>
+        ) : null}
+
+        {status === "disconnected" ? (
+          <div className="grid gap-1 text-sm text-slate-600">
+            <p>{postCount} posts saved · Your post history is preserved</p>
+            {pausedCount > 0 ? (
+              <p className="text-amber-700">
+                {pausedCount} scheduled posts are paused. They will resume when you reconnect.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {status === "needs-reconnection" ? (
+          <p className="text-sm text-amber-700">Please reconnect to resume posting.</p>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
 }
 
 function ConnectedBanner({ page, onConnected }: { page: PageConnection; onConnected: () => void }) {
-  const needsReconnect = page.connection_status === "needs-reconnection"
-  return <div className="flex flex-col gap-3 rounded-md border bg-white p-4 sm:flex-row sm:items-center sm:justify-between"><PageMini page={page} /><div className="flex items-center gap-2"><span className={cn("rounded-full px-2 py-1 text-xs font-medium", needsReconnect ? "bg-amber-50 text-amber-700" : "bg-green-50 text-green-700")}>{needsReconnect ? "Reconnection Needed" : "Connected"}</span>{needsReconnect ? <FacebookConnectButton onConnected={onConnected} /> : null}</div></div>
+  return <PageConnectionCard page={page} onChanged={onConnected} showDashboardActions />
 }
 
 function Stat({ label, value, tone = "blue" }: { label: string; value: number; tone?: "blue" | "green" | "amber" | "red" }) {
