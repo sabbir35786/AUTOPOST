@@ -1144,6 +1144,8 @@ function SettingsView({ pages, timezone, onChanged }: { pages: PageConnection[];
   const [tz, setTz] = React.useState(timezone)
   const [manualPageId, setManualPageId] = React.useState("")
   const [manualToken, setManualToken] = React.useState("")
+  const [syncingPageId, setSyncingPageId] = React.useState<number | null>(null)
+
   async function saveAccount() {
     await api.patch("/users/me", { email, timezone: tz })
     toast.success("Settings saved.")
@@ -1166,7 +1168,25 @@ function SettingsView({ pages, timezone, onChanged }: { pages: PageConnection[];
       toast.error(e?.response?.data?.detail || "Could not disconnect page. Backend error.")
     }
   }
-  return <><PageTitle title="Settings" subtitle="Account, page connections, and timezone." /><Card><CardHeader><CardTitle>Account</CardTitle></CardHeader><CardContent className="grid gap-3"><Label>Email</Label><Input value={email} onChange={(event) => setEmail(event.target.value)} /><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={saveAccount}>Save Account</Button></CardContent></Card><Card><CardHeader><CardTitle>Connected Pages</CardTitle></CardHeader><CardContent className="grid gap-3">{pages.map((page) => <div key={page.id} className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between"><PageMini page={page} /><div className="flex gap-2"><Button variant="outline" onClick={async () => { await api.post(`/facebook/pages/${page.id}/refresh-token`); toast.success("Token refreshed."); onChanged() }}>Refresh Token</Button><Button variant="destructive" onClick={() => disconnect(page.id)}>Disconnect</Button></div></div>)}<div className="grid gap-2 rounded-md border p-3"><p className="font-medium">Manual connection</p><Input placeholder="Facebook Page ID" value={manualPageId} onChange={(event) => setManualPageId(event.target.value)} /><Textarea placeholder="Long-lived Page Access Token" value={manualToken} onChange={(event) => setManualToken(event.target.value)} /><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={manualConnect}>Validate Page</Button></div></CardContent></Card><Card><CardHeader><CardTitle>Timezone</CardTitle></CardHeader><CardContent className="grid gap-3"><Input value={tz} onChange={(event) => setTz(event.target.value)} /><p className="text-sm text-slate-500">Default was detected from your browser. All stored schedule times are converted to UTC.</p></CardContent></Card></>
+  async function syncHistory(id: number) {
+    setSyncingPageId(id)
+    const toastId = toast.loading("Syncing your post history from Facebook...")
+    try {
+      const response = await api.post<{ success: boolean; synced_posts_count: number }>(`/facebook/pages/recover-history/${id}`)
+      toast.success(`Synced ${response.data.synced_posts_count} historical posts to your dashboard.`, { id: toastId })
+      onChanged()
+    } catch (e: any) {
+      console.error(e)
+      toast.error(e?.response?.data?.detail || "Could not sync history. Backend error.", { id: toastId })
+    } finally {
+      setSyncingPageId(null)
+    }
+  }
+
+  return <><PageTitle title="Settings" subtitle="Account, page connections, and timezone." /><Card><CardHeader><CardTitle>Account</CardTitle></CardHeader><CardContent className="grid gap-3"><Label>Email</Label><Input value={email} onChange={(event) => setEmail(event.target.value)} /><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={saveAccount}>Save Account</Button></CardContent></Card><Card><CardHeader><CardTitle>Connected Pages</CardTitle></CardHeader><CardContent className="grid gap-3">{pages.map((page) => {
+    const isSyncing = syncingPageId === page.id
+    return <div key={page.id} className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3"><PageMini page={page} />{page.connection_status === "disconnected" && <span className="rounded bg-slate-100 text-slate-700 text-xs px-2 py-0.5 font-medium border border-slate-200">Disconnected</span>}{page.connection_status === "connected" && <span className="rounded bg-green-50 text-green-700 text-xs px-2 py-0.5 font-medium border border-green-200">Connected</span>}{page.connection_status === "needs-reconnection" && <span className="rounded bg-amber-50 text-amber-700 text-xs px-2 py-0.5 font-medium border border-amber-200">Needs Reconnect</span>}</div><div className="flex gap-2">{page.connection_status === "connected" && <Button variant="outline" disabled={isSyncing} onClick={() => syncHistory(page.id)}>{isSyncing ? "Syncing..." : "Sync History"}</Button>}{page.connection_status !== "disconnected" && <><Button variant="outline" disabled={isSyncing} onClick={async () => { await api.post(`/facebook/pages/${page.id}/refresh-token`); toast.success("Token refreshed."); onChanged() }}>Refresh Token</Button><Button variant="destructive" disabled={isSyncing} onClick={() => disconnect(page.id)}>Disconnect</Button></>}</div></div>
+  })}<div className="grid gap-2 rounded-md border p-3"><p className="font-medium">Manual connection</p><Input placeholder="Facebook Page ID" value={manualPageId} onChange={(event) => setManualPageId(event.target.value)} /><Textarea placeholder="Long-lived Page Access Token" value={manualToken} onChange={(event) => setManualToken(event.target.value)} /><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={manualConnect}>Validate Page</Button></div></CardContent></Card><Card><CardHeader><CardTitle>Timezone</CardTitle></CardHeader><CardContent className="grid gap-3"><Input value={tz} onChange={(event) => setTz(event.target.value)} /><p className="text-sm text-slate-500">Default was detected from your browser. All stored schedule times are converted to UTC.</p></CardContent></Card></>
 }
 
 function PageTitle({ title, subtitle, aiPowered }: { title: string; subtitle: string; aiPowered?: boolean }) {

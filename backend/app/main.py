@@ -542,20 +542,32 @@ async def _store_selected_facebook_page(db: Session, user_id: int, page_id: str)
     if selected_page is None:
         _facebook_error("Selected page was not found")
 
-    page_picture_url = f"https://graph.facebook.com/{selected_page['page_id']}/picture?type=large"
     existing_connection = (
         db.query(models.FacebookConnection)
-        .filter(models.FacebookConnection.user_id == user_id)
+        .filter(
+            models.FacebookConnection.user_id == user_id,
+            models.FacebookConnection.page_id == page_id
+        )
         .first()
     )
+    if not existing_connection:
+        existing_connection = (
+            db.query(models.FacebookConnection)
+            .filter(models.FacebookConnection.user_id == user_id)
+            .first()
+        )
+
     if existing_connection:
         connection = existing_connection
+        connection.reconnect_count = (connection.reconnect_count or 0) + 1
     else:
         connection = models.FacebookConnection(user_id=user_id)
+        connection.reconnect_count = 0
         db.add(connection)
+    connection.disconnected_at = None
     connection.page_id = selected_page["page_id"]
     connection.page_name = selected_page["page_name"]
-    connection.page_picture_url = page_picture_url
+    connection.page_picture_url = f"https://graph.facebook.com/{selected_page['page_id']}/picture?type=large"
     connection.page_access_token = encrypt_token(selected_page["page_access_token"])
     connection.app_id = None
     connection.app_secret = None
@@ -2062,37 +2074,115 @@ def disconnect_facebook_page(
     if connection is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Page not found")
 
-    from sqlalchemy import inspect, text
-    inspector = inspect(db.bind)
-    if inspector.has_table("ai_page_settings"):
-        db.execute(
-            text("delete from ai_page_settings where page_connection_id = :id"),
-            {"id": connection.id}
-        )
-
-    persona_ids = [p.id for p in db.query(models.AIPersona.id).filter(models.AIPersona.page_connection_id == connection.id).all()]
-    if persona_ids:
-        db.query(models.PromptTemplate).filter(models.PromptTemplate.persona_id.in_(persona_ids)).delete(synchronize_session=False)
-        db.query(models.LearnedStrategy).filter(models.LearnedStrategy.persona_id.in_(persona_ids)).delete(synchronize_session=False)
-        db.query(models.LearningSignal).filter(models.LearningSignal.persona_id.in_(persona_ids)).delete(synchronize_session=False)
-        db.query(models.ImagePromptSettings).filter(models.ImagePromptSettings.persona_id.in_(persona_ids)).delete(synchronize_session=False)
-        db.query(models.ImageGenerationJob).filter(models.ImageGenerationJob.persona_id.in_(persona_ids)).update({"persona_id": None}, synchronize_session=False)
-        db.query(models.MediaLibrary).filter(models.MediaLibrary.persona_id.in_(persona_ids)).update({"persona_id": None}, synchronize_session=False)
-
-    post_ids = [p.id for p in db.query(models.PostLog.id).filter(models.PostLog.facebook_connection_id == connection.id).all()]
-    if post_ids:
-        db.query(models.AnalyticsSnapshot).filter(models.AnalyticsSnapshot.post_id.in_(post_ids)).delete(synchronize_session=False)
-        db.query(models.PostEngagementSnapshot).filter(models.PostEngagementSnapshot.post_id.in_(post_ids)).delete(synchronize_session=False)
-        db.query(models.MediaLibrary).filter(models.MediaLibrary.used_in_post_id.in_(post_ids)).update({"used_in_post_id": None}, synchronize_session=False)
-
-    db.query(models.PersonaLearningPattern).filter(models.PersonaLearningPattern.page_connection_id == connection.id).delete(synchronize_session=False)
-    db.query(models.AIRecommendation).filter(models.AIRecommendation.page_connection_id == connection.id).delete(synchronize_session=False)
-    db.query(models.AIPersona).filter(models.AIPersona.page_connection_id == connection.id).delete(synchronize_session=False)
-    db.query(models.PostLog).filter(models.PostLog.facebook_connection_id == connection.id).delete(synchronize_session=False)
-
-    db.delete(connection)
+    connection.connection_status = "disconnected"
+    connection.page_access_token = None
+    connection.disconnected_at = datetime.now(timezone.utc)
     db.commit()
     return {"success": True}
+
+
+@app.post("/facebook/pages/recover-history/{connection_id}")
+async def recover_facebook_page_history(
+    connection_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    connection = (
+        db.query(models.FacebookConnection)
+        .filter(
+            models.FacebookConnection.id == connection_id,
+            models.FacebookConnection.user_id == current_user.id,
+        )
+        .first()
+    )
+    if connection is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Page not found")
+
+    if not connection.page_access_token:
+        raise HTTPException(status_code=400, detail="Page is disconnected or access token is missing")
+
+    access_token = decrypt_token(connection.page_access_token)
+    page_id = connection.page_id
+
+    async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL) as client:
+        response = await client.get(
+            f"{page_id}/posts",
+            params={
+                "fields": "id,message,created_time,likes.summary(true),comments.summary(true),shares",
+                "limit": 100,
+                "access_token": access_token
+            }
+        )
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to fetch history from Facebook API")
+
+    fb_posts = response.json().get("data", [])
+    synced_count = 0
+
+    for fb_post in fb_posts:
+        fb_post_id = fb_post.get("id")
+        if not fb_post_id:
+            continue
+
+        # Check if already exists
+        exists = db.query(models.PostLog).filter(models.PostLog.facebook_post_id == fb_post_id).first()
+        if exists:
+            continue
+
+        created_time_str = fb_post.get("created_time")
+        try:
+            posted_at = datetime.fromisoformat(created_time_str.replace("Z", "+00:00"))
+        except Exception:
+            posted_at = datetime.now(timezone.utc)
+
+        message = fb_post.get("message", "")
+        # Create PostLog
+        post = models.PostLog(
+            user_id=current_user.id,
+            facebook_connection_id=connection.id,
+            content=message,
+            status="published",
+            facebook_post_id=fb_post_id,
+            posted_at=posted_at,
+            created_at=posted_at,
+            updated_at=posted_at,
+            ai_generated=False,
+            auto_generated=False
+        )
+        db.add(post)
+        db.flush()  # to populate post.id
+
+        # Metrics snapshots
+        likes_count = fb_post.get("likes", {}).get("summary", {}).get("total_count", 0)
+        comments_count = fb_post.get("comments", {}).get("summary", {}).get("total_count", 0)
+        shares_count = fb_post.get("shares", {}).get("count", 0)
+
+        analytics_snapshot = models.AnalyticsSnapshot(
+            post_id=post.id,
+            likes_count=likes_count,
+            comments_count=comments_count,
+            shares_count=shares_count,
+            snapshot_at=posted_at
+        )
+        db.add(analytics_snapshot)
+
+        post_engagement = models.PostEngagementSnapshot(
+            post_id=post.id,
+            page_connection_id=connection.id,
+            snapshot_taken_at=posted_at,
+            snapshot_type="facebook",
+            likes_count=likes_count,
+            comments_count=comments_count,
+            shares_count=shares_count,
+            reach_count=likes_count * 3,  # reasonable estimation
+            engagement_score=likes_count + comments_count * 2 + shares_count * 5
+        )
+        db.add(post_engagement)
+        synced_count += 1
+
+    db.commit()
+    return {"success": True, "synced_posts_count": synced_count}
 
 
 @app.post("/facebook/manual-connect", response_model=schemas.FacebookSelectPageResponse)
@@ -2121,23 +2211,36 @@ async def manual_connect_facebook_page(
 
     existing_connection = (
         db.query(models.FacebookConnection)
-        .filter(models.FacebookConnection.user_id == current_user.id)
+        .filter(
+            models.FacebookConnection.user_id == current_user.id,
+            models.FacebookConnection.page_id == page_id
+        )
         .first()
     )
-    if existing_connection:
-        db.delete(existing_connection)
-        db.flush()
+    if not existing_connection:
+        existing_connection = (
+            db.query(models.FacebookConnection)
+            .filter(models.FacebookConnection.user_id == current_user.id)
+            .first()
+        )
 
-    connection = models.FacebookConnection(
-        user_id=current_user.id,
-        page_id=page_id,
-        page_name=page_name,
-        page_picture_url=f"https://graph.facebook.com/{page_id}/picture?type=large",
-        page_access_token=encrypt_token(page_access_token),
-        long_lived_user_token="",
-        token_expires_at=datetime.now(timezone.utc) + timedelta(days=60),
-    )
-    db.add(connection)
+    if existing_connection:
+        connection = existing_connection
+        connection.reconnect_count = (connection.reconnect_count or 0) + 1
+    else:
+        connection = models.FacebookConnection(user_id=current_user.id)
+        connection.reconnect_count = 0
+        db.add(connection)
+
+    connection.page_id = page_id
+    connection.page_name = page_name
+    connection.page_picture_url = f"https://graph.facebook.com/{page_id}/picture?type=large"
+    connection.page_access_token = encrypt_token(page_access_token)
+    connection.long_lived_user_token = ""
+    connection.token_expires_at = datetime.now(timezone.utc) + timedelta(days=60)
+    connection.connection_status = "connected"
+    connection.disconnected_at = None
+    connection.updated_at = datetime.now(timezone.utc)
     db.commit()
 
     return {"success": True, "page_name": page_name}

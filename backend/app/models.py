@@ -36,7 +36,7 @@ class FacebookConnection(Base):
     page_id: Mapped[str] = mapped_column(String, nullable=False)
     page_name: Mapped[str] = mapped_column(String, nullable=False)
     page_picture_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    page_access_token: Mapped[str] = mapped_column(Text, nullable=False)
+    page_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     app_id: Mapped[str | None] = mapped_column(String, nullable=True)
     app_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
     instagram_business_account_id: Mapped[str | None] = mapped_column(
@@ -49,6 +49,11 @@ class FacebookConnection(Base):
         nullable=True,
     )
     connection_status: Mapped[str] = mapped_column(String, default="connected", nullable=False)
+    disconnected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    reconnect_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     connected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
