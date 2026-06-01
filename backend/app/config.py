@@ -22,8 +22,8 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://autopost-woad.vercel.app").rstrip("/")
+BACKEND_URL = os.getenv("BACKEND_URL", "https://autopost-qwgw.onrender.com").rstrip("/")
 CRON_SECRET = os.getenv("CRON_SECRET", "your_cron_secret_here")
-SCHEDULER_INTERVAL_SECONDS = int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "60"))
 
 
 def _normalize_database_url(database_url: str) -> str:
@@ -83,4 +83,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # Supabase storage (service key from Settings → API in Supabase dashboard)
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+
+# Upstash QStash Configuration
+QSTASH_TOKEN = os.getenv("QSTASH_TOKEN", "")
+QSTASH_CURRENT_SIGNING_KEY = os.getenv("QSTASH_CURRENT_SIGNING_KEY", "")
+QSTASH_NEXT_SIGNING_KEY = os.getenv("QSTASH_NEXT_SIGNING_KEY", "")
 

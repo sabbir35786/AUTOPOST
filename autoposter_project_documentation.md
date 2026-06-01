@@ -12,7 +12,7 @@ This project is a **social media management SaaS platform** similar to Ayrshare 
 - Backend: FastAPI (Python) deployed on **Render**
 - Database: **Supabase** (PostgreSQL)
 - AI: **Mistral AI** API for post generation
-- Scheduling: **cron-job.org** (free) pinging a backend endpoint every minute
+- Scheduling: **Upstash QStash** (serverless, no external service needed)
 - Facebook: Graph API via OAuth 2.0
 
 ---
@@ -41,6 +41,7 @@ This project is a **social media management SaaS platform** similar to Ayrshare 
 DATABASE_URL=your_supabase_postgresql_url
 SECRET_KEY=your_app_secret_key
 FRONTEND_URL=https://your-app.vercel.app
+BACKEND_URL=https://your-app.onrender.com
 FACEBOOK_APP_ID=from_facebook_developer_console
 FACEBOOK_APP_SECRET=from_facebook_developer_console
 FACEBOOK_REDIRECT_URI=https://your-app.onrender.com/auth/facebook/callback
@@ -48,6 +49,7 @@ FACEBOOK_TOKEN_ENCRYPTION_KEY=generated_32_char_random_string
 FACEBOOK_OAUTH_SCOPES=pages_manage_posts,pages_read_engagement,pages_show_list
 MISTRAL_API_KEY=from_mistral_console
 CRON_SECRET=generated_32_char_random_string
+QSTASH_TOKEN=from_upstash_qstash_dashboard
 ```
 
 ### How to Generate Secret Keys
@@ -300,26 +302,26 @@ Runs every Sunday midnight:
 
 ---
 
-## PART 9 — SCHEDULING SYSTEM
+# Scheduling System
 
 ### Architecture Decision
 **Do NOT run APScheduler inside the FastAPI web server.** This causes missed posts when Render free tier sleeps.
 
-**Correct Architecture:**
+**Correct Architecture (Upstash QStash):**
 ```
-cron-job.org (free, external)
-Pings every 1 minute
-        │
-        ▼ GET /api/internal/run-scheduler
-        │ Header: X-Cron-Secret: [secret]
-        ▼
+Upstash QStash
+Schedules every 1 minute with cron expression
+         │
+         ▼ GET /api/internal/run-scheduler
+         │ Header: X-Cron-Secret: [secret]
+         ▼
 Render Web Service (FastAPI)
 Runs scheduling logic when pinged
-        │
-        ▼
+         │
+         ▼
 Supabase PostgreSQL
-        │
-        ▼
+         │
+         ▼
 Facebook Graph API
 ```
 
@@ -337,15 +339,37 @@ Facebook Graph API
 
 ### Retry Logic
 - Failed posts retry up to 3 times with 5-minute gaps
-- After 3 failures → mark "permanently failed", email user
+- After 3 failures → mark "permanently failed"
 
-### cron-job.org Setup
-1. Create free account at cron-job.org
-2. Create new cronjob
-3. URL: `https://your-app.onrender.com/api/internal/run-scheduler`
-4. Schedule: Every 1 minute (`* * * * *`)
-5. Add header: `X-Cron-Secret` → your CRON_SECRET value
-6. Save and enable
+### Upstash QStash Setup
+1. Create account at upstash.com
+2. Create a QStash namespace
+3. Get the `QSTASH_TOKEN` from the dashboard
+4. Get `QSTASH_CURRENT_SIGNING_KEY` (for request verification) - optional but recommended
+5. Add to `.env`:
+   ```
+   QSTASH_TOKEN=your_qstash_token
+   QSTASH_CURRENT_SIGNING_KEY=your_signing_key
+   ```
+6. Add to Render environment variables
+7. The backend will auto-schedule itself on startup when QSTASH_TOKEN is set
+8. Alternatively, manually create a schedule via QStash dashboard:
+   - Destination: `https://your-backend.onrender.com/api/internal/run-scheduler`
+   - Cron: `* * * * *` (every minute)
+   - Headers: `X-Cron-Secret: your_cron_secret_value`
+
+### Environment Variables for QStash
+```
+# Required
+QSTASH_TOKEN=your_qstash_token_from_dashboard
+
+# Optional (for request verification)
+QSTASH_CURRENT_SIGNING_KEY=your_signing_key
+QSTASH_NEXT_SIGNING_KEY=next_signing_key_for_rotation
+
+# Required for scheduler endpoint
+CRON_SECRET=your_cron_secret
+```
 
 ---
 

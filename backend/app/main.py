@@ -39,9 +39,9 @@ from app.config import (
     SECRET_KEY,
     STABILITY_API_KEY,
     CRON_SECRET,
-    SCHEDULER_INTERVAL_SECONDS,
     SUPABASE_SERVICE_KEY,
     SUPABASE_URL,
+    QSTASH_TOKEN,
 )
 from app.crypto import decrypt_token, encrypt_token
 from app.database import create_database_tables, get_db
@@ -79,24 +79,10 @@ from app.learning.service import (
     run_weekly_learning_job,
     user_has_learning_access,
 )
+from app.qstash import schedule_scheduler_endpoint, _print_qstash_config_status
 
 pending_facebook_credentials: dict[int, dict] = {}
-scheduler_task: asyncio.Task | None = None
 last_scheduler_run_at: datetime | None = None
-
-
-async def _scheduled_post_worker() -> None:
-    global last_scheduler_run_at
-    while True:
-        try:
-            await run_scheduled_posts()
-            await refresh_due_tracked_pages_all()
-            last_scheduler_run_at = datetime.now(timezone.utc)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            print(f"Scheduled post worker failed: {exc}")
-        await asyncio.sleep(SCHEDULER_INTERVAL_SECONDS)
 
 
 def _print_startup_config_status() -> None:
@@ -119,6 +105,7 @@ def _print_startup_config_status() -> None:
         "GEMINI_API_KEY": bool(GEMINI_API_KEY),
         "SUPABASE_URL": bool(SUPABASE_URL),
         "SUPABASE_SERVICE_KEY": bool(SUPABASE_SERVICE_KEY),
+        "QSTASH_TOKEN": bool(QSTASH_TOKEN),
     }
     print("Environment configuration:")
     for name, loaded in required_env.items():
@@ -177,22 +164,17 @@ async def _ensure_supabase_storage_bucket() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global scheduler_task
     _print_startup_config_status()
+    _print_qstash_config_status()
     create_database_tables()
     clear_all_user_posting_locks()
-    scheduler_task = asyncio.create_task(_scheduled_post_worker())
     asyncio.create_task(_ensure_supabase_storage_bucket())
+    if QSTASH_TOKEN:
+        asyncio.create_task(schedule_scheduler_endpoint())
     try:
         yield
     finally:
-        if scheduler_task is not None:
-            scheduler_task.cancel()
-            try:
-                await scheduler_task
-            except asyncio.CancelledError:
-                pass
-            scheduler_task = None
+        pass
 
 
 app = FastAPI(title="Auto Poster API", lifespan=lifespan)
@@ -250,7 +232,6 @@ async def run_internal_scheduler(request: Request):
             )
         
         await run_scheduled_posts()
-        await refresh_due_tracked_pages_all()
         last_scheduler_run_at = datetime.now(timezone.utc)
         
         return {
