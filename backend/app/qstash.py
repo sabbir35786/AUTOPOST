@@ -1,13 +1,20 @@
-from qstash import QStash
+from typing import Any
+
+try:
+    from qstash import QStash
+except ModuleNotFoundError:
+    QStash = None
 
 from app.config import BACKEND_URL, CRON_SECRET, QSTASH_TOKEN
 
 
-_client: QStash | None = None
+_client: Any | None = None
 
 
-def get_qstash_client() -> QStash | None:
+def get_qstash_client() -> Any | None:
     global _client
+    if QStash is None:
+        return None
     if _client is None and QSTASH_TOKEN:
         _client = QStash(token=QSTASH_TOKEN)
     return _client
@@ -38,3 +45,5 @@ def _print_qstash_config_status() -> None:
     print("QStash configuration:")
     status_icon = "OK" if QSTASH_TOKEN else "MISSING"
     print(f"  [{status_icon}] QSTASH_TOKEN {'loaded' if QSTASH_TOKEN else 'is missing'}")
+    if QStash is None:
+        print("  [MISSING] qstash package is not installed")

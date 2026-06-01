@@ -1,4 +1,6 @@
 -- Table 1 — model_settings
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE TABLE IF NOT EXISTS model_settings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id Integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -53,8 +55,8 @@ CREATE TABLE IF NOT EXISTS image_prompt_settings (
     persona_id Integer NOT NULL REFERENCES ai_personas(id) ON DELETE CASCADE,
     user_id Integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     subject_description TEXT,
-    style_tags TEXT[],
-    mood_tags TEXT[],
+    style_tags JSONB,
+    mood_tags JSONB,
     color_palette VARCHAR,
     negative_prompt TEXT,
     aspect_ratio VARCHAR DEFAULT '1:1',

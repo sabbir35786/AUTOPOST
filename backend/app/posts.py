@@ -244,6 +244,7 @@ async def publish_post_to_facebook(
         if media and media.image_url:
             image_url = media.image_url
             media.is_used = True
+            media.used_in_post_id = post_log.id
             db.commit()
 
     endpoint, params = _build_facebook_post_request(
@@ -652,7 +653,7 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
                 freq = settings.image_frequency
                 if freq == "every_post":
                     should_generate = True
-                elif freq == "every_other" and total_posts % 2 == 1:
+                elif freq == "every_other" and total_posts % 2 == 0:
                     should_generate = True
                 elif freq == "1_in_3" and total_posts % 3 == 2:
                     should_generate = True
@@ -720,7 +721,10 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
                                     model_name=model_name,
                                     api_key=api_key,
                                 )
-                            img_bytes = await asyncio.wait_for(_gen(), timeout=settings.image_max_wait_seconds)
+                            img_bytes = await asyncio.wait_for(
+                                _gen(),
+                                timeout=max(10, min(settings.image_max_wait_seconds or 120, 180)),
+                            )
                             job_id_str = str(uuid.uuid4())
                             filename = f"{settings.user_id}/{job_id_str}.png"
                             pub_url = await async_upload_to_supabase(filename, img_bytes)
@@ -738,10 +742,10 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
                             db.flush()
                             post_log.media_library_id = str(media.id)
                             elapsed = int(time.time() - start_img_t)
-                            print(f"Auto image generation for persona {settings.name}: provider={provider_name} status=success seconds={elapsed}")
+                            print(f"Auto image generation for persona {settings.persona_name}: provider={provider_name} status=success seconds={elapsed}")
                         except asyncio.TimeoutError:
                             elapsed = int(time.time() - start_img_t)
-                            print(f"Auto image generation for persona {settings.name}: provider={provider_name} status=timeout seconds={elapsed}")
+                            print(f"Auto image generation for persona {settings.persona_name}: provider={provider_name} status=timeout seconds={elapsed}")
                             if settings.image_fallback_policy == "skip_post":
                                 post_log.status = "missed"
                                 post_log.error_message = "image_generation_failed (timeout)"
@@ -756,7 +760,7 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
                                     post_log.media_library_id = str(any_unused.id)
                         except Exception as e:
                             elapsed = int(time.time() - start_img_t)
-                            print(f"Auto image generation for persona {settings.name}: provider={provider_name} status=failed seconds={elapsed}")
+                            print(f"Auto image generation for persona {settings.persona_name}: provider={provider_name} status=failed seconds={elapsed}")
                             if settings.image_fallback_policy == "skip_post":
                                 post_log.status = "missed"
                                 post_log.error_message = "image_generation_failed (error)"

@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+import uuid
 
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
@@ -360,7 +361,7 @@ class AIPersona(Base):
 class ModelSettings(Base):
     __tablename__ = "model_settings"
 
-    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True)
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     task_category: Mapped[str] = mapped_column(String, nullable=False)
     provider_name: Mapped[str] = mapped_column(String, nullable=False)
@@ -373,7 +374,7 @@ class ModelSettings(Base):
 class ImageGenerationJob(Base):
     __tablename__ = "image_generation_jobs"
 
-    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True)
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     persona_id: Mapped[int | None] = mapped_column(ForeignKey("ai_personas.id", ondelete="SET NULL"), nullable=True)
     status: Mapped[str] = mapped_column(String, default="pending", index=True, nullable=False)
@@ -395,7 +396,7 @@ class ImageGenerationJob(Base):
 class MediaLibrary(Base):
     __tablename__ = "media_library"
 
-    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True)
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     persona_id: Mapped[int | None] = mapped_column(ForeignKey("ai_personas.id", ondelete="SET NULL"), nullable=True)
     image_url: Mapped[str] = mapped_column(Text, nullable=False)
@@ -411,7 +412,7 @@ class MediaLibrary(Base):
 class ImagePromptSettings(Base):
     __tablename__ = "image_prompt_settings"
 
-    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True)
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     persona_id: Mapped[int] = mapped_column(ForeignKey("ai_personas.id", ondelete="CASCADE"), unique=True, nullable=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     subject_description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -437,4 +438,3 @@ class OAuthState(Base):
     state: Mapped[str] = mapped_column(String, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-

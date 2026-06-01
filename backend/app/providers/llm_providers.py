@@ -119,6 +119,7 @@ def _generate_openai(
     temperature: float,
     max_tokens: int,
     images: list[str] | None = None,
+    response_format: dict | None = None,
 ) -> str | None:
     from openai import OpenAI  # type: ignore
 
@@ -301,7 +302,9 @@ def generate_text_for_user(
         if row:
             provider_name = row["provider_name"] or "mistral"
             model_name = row["model_name"] or "mistral-large-latest"
-            api_key = row["api_key_encrypted"] or MISTRAL_API_KEY
+            if row["api_key_encrypted"]:
+                from app.crypto import decrypt_token
+                api_key = decrypt_token(row["api_key_encrypted"])
 
     return generate_text(
         prompt=prompt,

@@ -224,6 +224,17 @@ def _ensure_product_blueprint_columns() -> None:
             "prompt_config": "json",
             "custom_prompt": "text",
             "creativity_level": "integer default 7 not null",
+            "include_image": "boolean default false not null",
+            "image_frequency": "varchar default 'every_post' not null",
+            "image_prompt_source": "varchar default 'persona_prompt' not null",
+            "image_fallback_policy": "varchar default 'text_only' not null",
+            "image_max_wait_seconds": "integer default 120 not null",
+        },
+    )
+    _add_missing_columns(
+        "post_logs",
+        {
+            "media_library_id": "uuid",
         },
     )
     _add_missing_columns(
@@ -291,6 +302,7 @@ def _migrate_ai_page_settings_to_personas() -> None:
         "post_logs",
         {
             "ai_persona_id": "integer",
+            "media_library_id": "uuid",
             "media_urls": "json default '[]' not null",
             "link_url": "text",
             "link_preview_data": "json",
@@ -327,6 +339,11 @@ def _migrate_ai_page_settings_to_personas() -> None:
             "last_performance_update_at": "timestamp",
             "last_auto_post_at": "timestamp",
             "consecutive_failures": "integer default 0 not null",
+            "include_image": "boolean default false not null",
+            "image_frequency": "varchar default 'every_post' not null",
+            "image_prompt_source": "varchar default 'persona_prompt' not null",
+            "image_fallback_policy": "varchar default 'text_only' not null",
+            "image_max_wait_seconds": "integer default 120 not null",
         },
     )
 

@@ -278,7 +278,10 @@ def get_image_provider_for_user(user_id: int, db) -> tuple:
     if row:
         provider_name = (row["provider_name"] or "fal").lower()
         model_name = row["model_name"] or "FLUX.1-schnell"
-        api_key = row["api_key_encrypted"] or ""
+        api_key = ""
+        if row["api_key_encrypted"]:
+            from app.crypto import decrypt_token
+            api_key = decrypt_token(row["api_key_encrypted"])
         provider_cls = _PROVIDER_MAP.get(provider_name, FalProvider)
     else:
         provider_cls = FalProvider
