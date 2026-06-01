@@ -103,7 +103,13 @@ def _generate_mistral(
         raise RuntimeError(f"Mistral request failed ({response.status_code}): {response.text[:200]}")
 
     data = response.json()
-    return data.get("choices", [{}])[0].get("message", {}).get("content")
+    content = data.get("choices", [{}])[0].get("message", {}).get("content")
+    if isinstance(content, list):
+        return "".join(
+            item.get("text", "") if isinstance(item, dict) else str(item)
+            for item in content
+        )
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +265,40 @@ def _generate_gemini(
                 })
 
     response = model.generate_content(contents)
-    return response.text if response and response.text else None
+    if response is None:
+        return None
+
+    if hasattr(response, "text") and response.text:
+        return response.text
+
+    if isinstance(response, dict):
+        if response.get("text"):
+            return response["text"]
+        if response.get("output_text"):
+            return response["output_text"]
+        result = response.get("result")
+        if isinstance(result, list) and result:
+            first = result[0]
+            if isinstance(first, dict):
+                return first.get("output_text") or first.get("text")
+
+    if hasattr(response, "result"):
+        result = getattr(response, "result")
+        if isinstance(result, list) and result:
+            first = result[0]
+            if hasattr(first, "output_text") and getattr(first, "output_text"):
+                return getattr(first, "output_text")
+            if hasattr(first, "text") and getattr(first, "text"):
+                return getattr(first, "text")
+            if isinstance(first, dict):
+                return first.get("output_text") or first.get("text")
+
+    if hasattr(response, "content"):
+        content = getattr(response, "content")
+        if isinstance(content, str) and content:
+            return content
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +345,11 @@ def generate_text_for_user(
             if row["api_key_encrypted"]:
                 from app.crypto import decrypt_token
                 api_key = decrypt_token(row["api_key_encrypted"])
+                if not api_key:
+                    raise RuntimeError(
+                        "Saved BYOK API key could not be decrypted. "
+                        "Re-enter your API key in AI settings."
+                    )
 
     if not provider_name or not model_name or not api_key:
         raise RuntimeError(

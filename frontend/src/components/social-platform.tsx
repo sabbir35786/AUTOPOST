@@ -1171,8 +1171,12 @@ function ModelRouterPanel() {
       const current = value[task] || { task_category: task, provider_name: "mistral", model_name: "mistral-small-latest" }
       const provider = patch.provider_name || current.provider_name
       const model = patch.provider_name ? llmProviderModels[provider]?.[0] || current.model_name : patch.model_name || current.model_name
-      return { ...value, [task]: { ...current, ...patch, provider_name: provider, model_name: model } }
+      const providerChanged = Boolean(patch.provider_name && patch.provider_name !== current.provider_name)
+      return { ...value, [task]: { ...current, ...patch, provider_name: provider, model_name: model, has_api_key: providerChanged ? false : current.has_api_key } }
     })
+    if (patch.provider_name) {
+      setKeys((value) => ({ ...value, [task]: "" }))
+    }
   }
 
   async function saveModels() {
@@ -1180,7 +1184,7 @@ function ModelRouterPanel() {
     try {
       const payload = modelTasks.map((task) => ({
         ...(settings[task.id] || { task_category: task.id, provider_name: "mistral", model_name: "mistral-small-latest" }),
-        api_key: keys[task.id] || undefined,
+        api_key: keys[task.id]?.trim() || undefined,
       }))
       await api.post("/api/models/settings", payload)
       toast.success("Model router saved.")
@@ -1198,7 +1202,7 @@ function ModelRouterPanel() {
 
   async function testTask(task: string) {
     const setting = settings[task] || { task_category: task, provider_name: "mistral", model_name: "mistral-small-latest" }
-    const apiKey = keys[task]
+    const apiKey = keys[task]?.trim()
     if (!apiKey && !setting.has_api_key) {
       toast.error("Paste an API key first.")
       return

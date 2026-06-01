@@ -74,10 +74,14 @@ async def collect_due_engagement_snapshots(db: Session) -> None:
 
 async def fetch_facebook_engagement(facebook_post_id: str, connection: models.FacebookConnection) -> dict[str, int]:
     fields = "likes.summary(true),comments.summary(true),shares,insights.metric(post_impressions_unique)"
+    access_token = decrypt_token(connection.page_access_token)
+    if not access_token:
+        return {"likes": 0, "comments": 0, "shares": 0, "reach": 0}
+
     async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL, timeout=30) as client:
         response = await client.get(
             facebook_post_id,
-            params={"fields": fields, "access_token": decrypt_token(connection.page_access_token)},
+            params={"fields": fields, "access_token": access_token},
         )
     if response.status_code >= 400:
         return {"likes": 0, "comments": 0, "shares": 0, "reach": 0}

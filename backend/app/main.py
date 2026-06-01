@@ -624,7 +624,10 @@ def _analysis_token(db: Session, current_user: models.User, own_page_connection_
         )
     if connection is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Connect a Facebook Page before analyzing public pages")
-    return decrypt_token(connection.page_access_token)
+    token = decrypt_token(connection.page_access_token)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to decrypt Facebook access token.")
+    return token
 
 
 
@@ -1760,6 +1763,8 @@ async def recover_facebook_page_history(
         raise HTTPException(status_code=400, detail="Page is disconnected or access token is missing")
 
     access_token = decrypt_token(connection.page_access_token)
+    if not access_token:
+        raise HTTPException(status_code=500, detail="Unable to decrypt Facebook access token.")
     page_id = connection.page_id
 
     async with httpx.AsyncClient(base_url=FACEBOOK_GRAPH_API_BASE_URL) as client:
