@@ -12,6 +12,7 @@ from app.providers.llm_providers import (
     DEFAULT_LLM_MODEL,
     DEFAULT_LLM_PROVIDER,
     TEXT_LLM_TASK_CATEGORIES,
+    _resolve_gemini_model,
     generate_text,
     platform_key_configured,
 )
@@ -41,8 +42,13 @@ def _normalize_provider(provider_name: str) -> str:
 
 def _normalize_model(provider: str, model_name: str) -> str:
     model = model_name.strip()
+    if provider == "gemini":
+        model = _resolve_gemini_model(model)
     allowed = AVAILABLE_LLM_MODELS[provider]
     if model not in allowed:
+        # Accept mapped Gemini ids even if not listed (e.g. env default).
+        if provider == "gemini" and model.startswith("gemini-"):
+            return model
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported model '{model_name}' for {provider}.",

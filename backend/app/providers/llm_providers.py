@@ -16,15 +16,32 @@ import httpx
 from app.config import (
     ANTHROPIC_API_KEY,
     GEMINI_API_KEY,
+    GEMINI_MODEL,
     MISTRAL_API_BASE_URL,
     MISTRAL_API_KEY,
     MISTRAL_MODEL,
     OPENAI_API_KEY,
 )
 
+def _gemini_model_options() -> list[str]:
+    options = [GEMINI_MODEL, "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+    seen: set[str] = set()
+    unique: list[str] = []
+    for name in options:
+        if name and name not in seen:
+            seen.add(name)
+            unique.append(name)
+    return unique
+
+
 AVAILABLE_LLM_MODELS: dict[str, list[str]] = {
     "mistral": ["mistral-large-latest", "mistral-small-latest"],
-    "gemini": ["gemini-1.5-pro", "gemini-1.5-flash"],
+    "gemini": _gemini_model_options(),
+}
+_LEGACY_GEMINI_MODELS = {
+    "gemini-1.5-pro": "gemini-2.0-flash",
+    "gemini-1.5-flash": "gemini-2.0-flash",
+    "gemini-pro": "gemini-2.0-flash",
 }
 DEFAULT_LLM_PROVIDER = "mistral"
 DEFAULT_LLM_MODEL = MISTRAL_MODEL or "mistral-small-latest"
@@ -246,9 +263,30 @@ def _generate_anthropic(
 
 
 # ---------------------------------------------------------------------------
-# Provider: Google Gemini
-# Available models: gemini-1.5-pro, gemini-1.5-flash
+# Provider: Google Gemini (Google AI Studio API key)
 # ---------------------------------------------------------------------------
+
+def _resolve_gemini_model(model_name: str) -> str:
+    name = (model_name or GEMINI_MODEL or "gemini-2.0-flash").strip()
+    return _LEGACY_GEMINI_MODELS.get(name, name)
+
+
+def _extract_gemini_text(response) -> str | None:
+    candidates = getattr(response, "candidates", None) or []
+    if candidates:
+        parts = getattr(candidates[0].content, "parts", None) or []
+        chunks = [part.text for part in parts if getattr(part, "text", None)]
+        if chunks:
+            return "\n".join(chunks).strip()
+
+    try:
+        text = getattr(response, "text", None)
+        if text:
+            return str(text).strip()
+    except ValueError:
+        pass
+    return None
+
 
 def _generate_gemini(
     prompt: str,
@@ -263,78 +301,65 @@ def _generate_gemini(
 
     effective_key = api_key or GEMINI_API_KEY
     if not effective_key:
-        raise RuntimeError("Gemini API key is not configured.")
+        raise RuntimeError(
+            "Gemini API key is not configured. Add GEMINI_API_KEY to backend/.env "
+            "(from https://aistudio.google.com/apikey)."
+        )
 
     genai.configure(api_key=effective_key)
+    resolved_model = _resolve_gemini_model(model_name)
 
-    prompt_text = prompt
+    model_kwargs: dict = {"model_name": resolved_model}
     if system_prompt:
-        prompt_text = f"{system_prompt}\n\n{prompt}"
+        model_kwargs["system_instruction"] = system_prompt
 
-    response = None
-    if hasattr(genai, "generate_text"):
-        response = genai.generate_text(
-            model=model_name,
-            prompt=prompt_text,
-            temperature=temperature,
-            max_output_tokens=max_tokens,
+    model = genai.GenerativeModel(**model_kwargs)
+    generation_config = genai.types.GenerationConfig(
+        temperature=temperature,
+        max_output_tokens=max_tokens,
+    )
+
+    contents: str | list = prompt
+    if images:
+        parts: list = [{"text": prompt}]
+        for image_url in images:
+            parts.append({"file_data": {"file_uri": image_url}})
+        contents = parts
+
+    try:
+        response = model.generate_content(
+            contents,
+            generation_config=generation_config,
         )
-    elif hasattr(genai, "TextGenerationModel"):
-        model = genai.TextGenerationModel(model_name=model_name)
-        if hasattr(model, "predict"):
-            response = model.predict(
-                prompt_text,
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-            )
-        elif hasattr(model, "generate_text"):
-            response = model.generate_text(
-                prompt_text,
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-            )
-        else:
-            raise RuntimeError("Installed Gemini client does not support text generation for the selected model.")
-    else:
-        raise RuntimeError(
-            "Installed google.generativeai client does not support Gemini text generation. "
-            "Please upgrade the package or use a supported Gemini driver."
-        )
+    except Exception as exc:
+        message = str(exc)
+        if "API_KEY_INVALID" in message or "API key not valid" in message:
+            raise RuntimeError(
+                "Gemini API key is invalid. Create a new key at https://aistudio.google.com/apikey "
+                "and set GEMINI_API_KEY in backend/.env."
+            ) from exc
+        if "429" in message or "quota" in message.lower() or "ResourceExhausted" in type(exc).__name__:
+            raise RuntimeError(
+                f"Gemini rate limit or quota reached for model {resolved_model}. "
+                "Wait a minute, try another model in Settings, or check usage at https://ai.dev/rate-limit."
+            ) from exc
+        raise RuntimeError(f"Gemini request failed: {message}") from exc
 
-    if response is None:
-        return None
+    feedback = getattr(response, "prompt_feedback", None)
+    block_reason = getattr(feedback, "block_reason", None) if feedback else None
+    if block_reason:
+        raise RuntimeError(f"Gemini blocked the request: {block_reason}")
 
-    if hasattr(response, "text") and response.text:
-        return response.text
+    text = _extract_gemini_text(response)
+    if text:
+        return text
 
-    if isinstance(response, dict):
-        if response.get("text"):
-            return response["text"]
-        if response.get("output_text"):
-            return response["output_text"]
-        result = response.get("result")
-        if isinstance(result, list) and result:
-            first = result[0]
-            if isinstance(first, dict):
-                return first.get("output_text") or first.get("text")
-
-    if hasattr(response, "result"):
-        result = getattr(response, "result")
-        if isinstance(result, list) and result:
-            first = result[0]
-            if hasattr(first, "output_text") and getattr(first, "output_text"):
-                return getattr(first, "output_text")
-            if hasattr(first, "text") and getattr(first, "text"):
-                return getattr(first, "text")
-            if isinstance(first, dict):
-                return first.get("output_text") or first.get("text")
-
-    if hasattr(response, "content"):
-        content = getattr(response, "content")
-        if isinstance(content, str) and content:
-            return content
-
-    return None
+    finish_reason = None
+    if getattr(response, "candidates", None):
+        finish_reason = getattr(response.candidates[0], "finish_reason", None)
+    raise RuntimeError(
+        f"Gemini returned an empty response (model={resolved_model}, finish_reason={finish_reason})."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +390,11 @@ def _resolve_user_llm_choice(user_id: int | None, task_category: str, db) -> tup
                 continue
             allowed_models = AVAILABLE_LLM_MODELS[candidate_provider]
             candidate_model = row["model_name"] or allowed_models[0]
-            if candidate_model not in allowed_models:
+            if candidate_provider == "gemini":
+                candidate_model = _resolve_gemini_model(candidate_model)
+            elif candidate_model not in allowed_models:
+                candidate_model = allowed_models[0]
+            if candidate_provider != "gemini" and candidate_model not in allowed_models:
                 candidate_model = allowed_models[0]
             provider_name = candidate_provider
             model_name = candidate_model

@@ -802,7 +802,7 @@ const neverOptions = ["Use formal language", "Use slang", "Make promises", "Use 
 const structureOptions = ["No fixed structure, let AI decide", "Hook then value then CTA", "Story then lesson then question", "Fact then explanation then opinion", "List format", "Single powerful statement"]
 const llmProviderModels: Record<string, string[]> = {
   mistral: ["mistral-large-latest", "mistral-small-latest"],
-  gemini: ["gemini-1.5-pro", "gemini-1.5-flash"],
+  gemini: ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"],
 }
 
 type ModelPreference = {

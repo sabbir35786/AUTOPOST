@@ -78,7 +78,9 @@ ANTHROPIC_API_BASE_URL = os.getenv("ANTHROPIC_API_BASE_URL", "https://api.anthro
 # Image generation providers
 FAL_API_KEY = os.getenv("FAL_API_KEY", "")
 STABILITY_API_KEY = os.getenv("STABILITY_API_KEY", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# Google AI Studio (https://aistudio.google.com/apikey) — GEMINI_API_KEY or GOOGLE_API_KEY
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # Supabase storage (service key from Settings → API in Supabase dashboard)
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
