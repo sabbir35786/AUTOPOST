@@ -55,6 +55,8 @@ from app.posts import (
     publish_post_to_facebook,
     release_user_posting,
     run_scheduled_posts,
+    generate_persona_post_with_user_model,
+    score_post_quality_with_user_model,
     try_claim_user_posting,
     verify_page_connection_for_publish,
 )
@@ -95,10 +97,10 @@ def _print_startup_config_status() -> None:
         "FACEBOOK_REDIRECT_URI": bool(FACEBOOK_REDIRECT_URI),
         "FACEBOOK_TOKEN_ENCRYPTION_KEY": bool(FACEBOOK_TOKEN_ENCRYPTION_KEY),
         "FACEBOOK_OAUTH_SCOPES": bool(FACEBOOK_OAUTH_SCOPES),
-        "MISTRAL_API_KEY": bool(MISTRAL_API_KEY),
         "CRON_SECRET": bool(CRON_SECRET and CRON_SECRET != "your_cron_secret_here"),
     }
     optional_env = {
+        "MISTRAL_API_KEY": bool(MISTRAL_API_KEY),
         "FAL_API_KEY": bool(FAL_API_KEY),
         "STABILITY_API_KEY": bool(STABILITY_API_KEY),
         "OPENAI_API_KEY": bool(OPENAI_API_KEY),
@@ -1634,28 +1636,13 @@ def generate_ai_post(
             build_strategy_prompt_hint(db, settings),
         ]
         learning_hint = " ".join(part for part in hint_parts if part)
-        if settings.custom_prompt and settings.custom_prompt.strip():
-            content = generate_ai_facebook_post_from_prompt(
-                settings.custom_prompt,
-                settings.creativity_level,
-                recent_topics,
-                payload.topic_hint,
-                learning_hint,
-                MISTRAL_MODEL,
-            )
-        else:
-            content = generate_ai_facebook_post(
-                settings.niche,
-                [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
-                settings.custom_instructions,
-                settings.language,
-                settings.hashtags_enabled,
-                settings.hashtag_count,
-                settings.always_include_engagement_hook,
-                recent_topics,
-                payload.topic_hint or learning_hint,
-                MISTRAL_MODEL,
-            )
+        content = generate_persona_post_with_user_model(
+            db,
+            settings,
+            recent_topics=recent_topics,
+            topic_hint=payload.topic_hint,
+            learning_hint=learning_hint,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     return {"content": content}
@@ -1691,29 +1678,14 @@ async def generate_and_publish_ai_post(
                 build_strategy_prompt_hint(db, settings),
             ]
             learning_hint = " ".join(part for part in hint_parts if part)
-            if settings.custom_prompt and settings.custom_prompt.strip():
-                content = generate_ai_facebook_post_from_prompt(
-                    settings.custom_prompt,
-                    settings.creativity_level,
-                    recent_topics,
-                    payload.topic_hint,
-                    learning_hint,
-                    MISTRAL_MODEL,
-                )
-            else:
-                content = generate_ai_facebook_post(
-                    settings.niche,
-                    [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
-                    settings.custom_instructions,
-                    settings.language,
-                    settings.hashtags_enabled,
-                    settings.hashtag_count,
-                    settings.always_include_engagement_hook,
-                    recent_topics,
-                    payload.topic_hint or learning_hint,
-                    MISTRAL_MODEL,
-                )
-            score = check_post_quality(content, MISTRAL_MODEL)
+            content = generate_persona_post_with_user_model(
+                db,
+                settings,
+                recent_topics=recent_topics,
+                topic_hint=payload.topic_hint,
+                learning_hint=learning_hint,
+            )
+            score = score_post_quality_with_user_model(db, current_user.id, content)
             if score >= 6:
                 break
             print(f"Generated post scored {score}/10 (below threshold 6), regenerating (attempt {attempt + 1}/{max_attempts})...")
@@ -1987,7 +1959,7 @@ async def generate_post(
 
     try:
         schedule, connection = get_user_schedule_and_connection(db, current_user.id)
-        content = generate_post_content(schedule.niche)
+        content = generate_post_content(schedule.niche, db, current_user.id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RuntimeError as exc:

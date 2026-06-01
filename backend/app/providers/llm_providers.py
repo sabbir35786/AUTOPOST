@@ -6,9 +6,9 @@ provider library (Mistral, OpenAI, Anthropic, Google Gemini) based on
 ``provider_name``.
 
 Also exposes ``generate_text_for_user`` which looks up the user's
-``model_settings`` row for a given ``task_category`` and routes accordingly,
-falling back to Mistral ``mistral-large-latest`` + the platform key when no
-row exists.
+    ``model_settings`` row for a given ``task_category`` and routes accordingly.
+    User-facing generation is BYOK: if no user key exists, callers receive a
+    clear configuration error instead of relying on platform environment keys.
 """
 
 from __future__ import annotations
@@ -279,12 +279,13 @@ def generate_text_for_user(
     """
     Look up the user's ``model_settings`` row for *task_category*.
 
-    If a row exists use those settings; otherwise fall back to Mistral
-    ``mistral-large-latest`` with the platform ``MISTRAL_API_KEY``.
+    If a row exists use those settings; otherwise raise a clear BYOK setup
+    error. Platform keys are still accepted by ``generate_text`` for explicit
+    internal/test calls, but this user-aware path does not depend on them.
     """
-    provider_name = "mistral"
-    model_name = "mistral-large-latest"
-    api_key = MISTRAL_API_KEY
+    provider_name = ""
+    model_name = ""
+    api_key = ""
 
     if user_id is not None and db is not None:
         from sqlalchemy import text as sa_text
@@ -305,6 +306,12 @@ def generate_text_for_user(
             if row["api_key_encrypted"]:
                 from app.crypto import decrypt_token
                 api_key = decrypt_token(row["api_key_encrypted"])
+
+    if not provider_name or not model_name or not api_key:
+        raise RuntimeError(
+            f"No BYOK model/API key configured for task '{task_category}'. "
+            "Open AI Settings and add a provider API key."
+        )
 
     return generate_text(
         prompt=prompt,

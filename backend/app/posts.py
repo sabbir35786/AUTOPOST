@@ -18,6 +18,7 @@ from app.config import (
 from app.crypto import decrypt_token
 from app.database import SessionLocal
 from app.mistral_service import generate_ai_facebook_post, generate_ai_facebook_post_from_prompt, check_post_quality, extract_post_topic
+from app.providers.llm_providers import generate_text_for_user
 from app.learning.service import build_learning_prompt_hint, build_strategy_prompt_hint, should_persona_post_now, user_has_learning_access
 
 
@@ -32,9 +33,110 @@ def build_post_prompt(niche: str) -> str:
     )
 
 
-def generate_post_content(niche: str) -> str:
+def _persona_post_prompt(
+    settings: models.AIPersona,
+    recent_topics: list[str] | None = None,
+    topic_hint: str | None = None,
+    learning_hint: str | None = None,
+) -> tuple[str, str]:
+    """Build the post-generation prompt used by BYOK model settings."""
+    instructions: list[str] = []
+    if settings.custom_prompt and settings.custom_prompt.strip():
+        instructions.append(settings.custom_prompt.strip())
+    else:
+        tone_tags = [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()]
+        instructions.extend(
+            [
+                f"Page topic: {settings.niche}.",
+                f"Tone: {', '.join(tone_tags) or 'clear, useful, friendly'}.",
+                f"Language: {settings.language}.",
+                f"Length preference: creativity level {settings.creativity_level}/10.",
+            ]
+        )
+        if settings.custom_instructions and settings.custom_instructions.strip():
+            instructions.append(f"Extra instructions: {settings.custom_instructions.strip()}.")
+        if settings.hashtags_enabled:
+            instructions.append(f"Include {max(1, min(settings.hashtag_count, 5))} relevant hashtags.")
+        if settings.always_include_engagement_hook:
+            instructions.append("End with a natural question or call to action.")
+
+    if recent_topics:
+        instructions.append(f"Do not repeat these recent topics: {', '.join(recent_topics)}.")
+    if topic_hint:
+        instructions.append(f"Focus this post on: {topic_hint.strip()}.")
+    if learning_hint:
+        instructions.append(learning_hint.strip())
+    instructions.append("Return only the Facebook post text. No labels, no explanation.")
+
+    system_prompt = (
+        "You are an expert social media writer. Create polished, platform-ready "
+        "Facebook posts that follow the user's saved persona and constraints exactly."
+    )
+    return system_prompt, "\n".join(instructions)
+
+
+def generate_persona_post_with_user_model(
+    db: Session,
+    settings: models.AIPersona,
+    recent_topics: list[str] | None = None,
+    topic_hint: str | None = None,
+    learning_hint: str | None = None,
+) -> str:
+    system_prompt, prompt = _persona_post_prompt(settings, recent_topics, topic_hint, learning_hint)
+    content = generate_text_for_user(
+        user_id=settings.user_id,
+        task_category="post_generation",
+        prompt=prompt,
+        system_prompt=system_prompt,
+        temperature=max(0.1, min(settings.creativity_level / 10, 1.0)),
+        max_tokens=360,
+        db=db,
+    )
+    if not content or not content.strip():
+        raise RuntimeError(
+            "No BYOK model is configured for post generation. Add a provider and API key in AI settings."
+        )
+    return content.strip()
+
+
+def score_post_quality_with_user_model(db: Session, user_id: int, content: str) -> int:
+    try:
+        score = generate_text_for_user(
+            user_id=user_id,
+            task_category="post_analysis",
+            prompt=(
+                "Rate this Facebook post from 1 to 10 for clarity, usefulness, "
+                f"and engagement. Return only one integer.\n\n{content}"
+            ),
+            system_prompt="You are a strict social media quality reviewer.",
+            temperature=0.0,
+            max_tokens=8,
+            db=db,
+        )
+        if score:
+            return max(1, min(10, int("".join(ch for ch in score if ch.isdigit())[:2] or "7")))
+    except Exception:
+        pass
+    return 7
+
+
+def generate_post_content(niche: str, db: Session | None = None, user_id: int | None = None) -> str:
+    if db is not None and user_id is not None:
+        content = generate_text_for_user(
+            user_id=user_id,
+            task_category="post_generation",
+            prompt=build_post_prompt(niche),
+            system_prompt="You write concise, friendly social media posts.",
+            temperature=0.8,
+            max_tokens=220,
+            db=db,
+        )
+        if not content or not content.strip():
+            raise RuntimeError("The selected BYOK model returned empty content")
+        return content.strip()
+
     if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
+        raise RuntimeError("No BYOK post generation model is configured for this user.")
 
     from openai import OpenAI
 
@@ -501,7 +603,7 @@ async def run_scheduled_posts() -> None:
                 if connection is None:
                     continue
 
-                content = generate_post_content(schedule.niche)
+                content = generate_post_content(schedule.niche, db, schedule.user_id)
                 post_log = create_draft_post(
                     db,
                     schedule.user_id,
@@ -600,27 +702,13 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
                     build_strategy_prompt_hint(db, settings),
                 ]
                 learning_hint = " ".join(part for part in hint_parts if part)
-                if settings.custom_prompt and settings.custom_prompt.strip():
-                    content = generate_ai_facebook_post_from_prompt(
-                        settings.custom_prompt,
-                        settings.creativity_level,
-                        recent_topics,
-                        None,
-                        learning_hint,
-                    )
-                else:
-                    content = generate_ai_facebook_post(
-                        settings.niche,
-                        [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()],
-                        settings.custom_instructions,
-                        settings.language,
-                        settings.hashtags_enabled,
-                        settings.hashtag_count,
-                        settings.always_include_engagement_hook,
-                        recent_topics,
-                        learning_hint,
-                    )
-                score = check_post_quality(content)
+                content = generate_persona_post_with_user_model(
+                    db,
+                    settings,
+                    recent_topics=recent_topics,
+                    learning_hint=learning_hint,
+                )
+                score = score_post_quality_with_user_model(db, settings.user_id, content)
                 if score >= 6:
                     break
                 print(f"Auto post scored {score}/10 (below 6), regenerating (attempt {attempt + 1}/{max_attempts})...")

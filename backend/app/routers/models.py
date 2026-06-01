@@ -20,7 +20,8 @@ class ModelSettingInput(BaseModel):
 class TestProviderRequest(BaseModel):
     provider_name: str
     model_name: str
-    api_key: str
+    api_key: Optional[str] = None
+    task_category: Optional[str] = None
 
 VALID_TASK_CATEGORIES = [
     "post_generation",
@@ -48,10 +49,10 @@ def save_model_settings(
 
         encrypted_key = None
         if setting.api_key:
-            # We can use simple encryption here or just store it for MVP if we haven't imported crypto
-            # Actually, let's use the app.crypto module
             from app.crypto import encrypt_token
             encrypted_key = encrypt_token(setting.api_key)
+        elif not existing:
+            continue
 
         if existing:
             existing.provider_name = setting.provider_name
@@ -96,8 +97,21 @@ def get_model_settings(
 @router.post("/test")
 async def test_provider(
     req: TestProviderRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     provider = req.provider_name.lower()
+    api_key = req.api_key or ""
+    if not api_key and req.task_category:
+        saved = db.query(models.ModelSettings).filter(
+            models.ModelSettings.user_id == current_user.id,
+            models.ModelSettings.task_category == req.task_category,
+        ).first()
+        if saved and saved.api_key_encrypted:
+            from app.crypto import decrypt_token
+            api_key = decrypt_token(saved.api_key_encrypted)
+    if not api_key:
+        return {"success": False, "error": "No API key provided or saved for this task."}
     
     try:
         if provider in ["mistral", "openai", "anthropic", "gemini"]:
@@ -107,7 +121,7 @@ async def test_provider(
                 system_prompt="You are a tester.",
                 model_name=req.model_name,
                 provider_name=provider,
-                api_key=req.api_key,
+                api_key=api_key,
                 temperature=0.0,
                 max_tokens=10
             )
@@ -132,7 +146,7 @@ async def test_provider(
                     negative_prompt="",
                     aspect_ratio="1:1",
                     model_name=req.model_name,
-                    api_key=req.api_key
+                    api_key=api_key
                 )
             
             # Quick 15s timeout
