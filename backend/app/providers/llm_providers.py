@@ -5,10 +5,8 @@ Provides a single ``generate_text`` function that dispatches to the correct
 provider library (Mistral, OpenAI, Anthropic, Google Gemini) based on
 ``provider_name``.
 
-Also exposes ``generate_text_for_user`` which looks up the user's
-    ``model_settings`` row for a given ``task_category`` and routes accordingly.
-    User-facing generation is BYOK: if no user key exists, callers receive a
-    clear configuration error instead of relying on platform environment keys.
+``generate_text_for_user`` reads the user's saved provider/model preference
+from ``model_settings`` and uses platform API keys from the server environment.
 """
 
 from __future__ import annotations
@@ -20,8 +18,36 @@ from app.config import (
     GEMINI_API_KEY,
     MISTRAL_API_BASE_URL,
     MISTRAL_API_KEY,
+    MISTRAL_MODEL,
     OPENAI_API_KEY,
 )
+
+AVAILABLE_LLM_MODELS: dict[str, list[str]] = {
+    "mistral": ["mistral-large-latest", "mistral-small-latest"],
+    "gemini": ["gemini-1.5-pro", "gemini-1.5-flash"],
+}
+DEFAULT_LLM_PROVIDER = "mistral"
+DEFAULT_LLM_MODEL = MISTRAL_MODEL or "mistral-small-latest"
+TEXT_LLM_TASK_CATEGORIES = [
+    "post_generation",
+    "post_analysis",
+    "image_prompt_generation",
+    "style_analysis",
+    "recommendations",
+]
+
+
+def platform_key_configured(provider_name: str) -> bool:
+    provider = provider_name.strip().lower()
+    if provider in ("mistral", "mistralai"):
+        return bool(MISTRAL_API_KEY)
+    if provider in ("gemini", "google", "google_gemini"):
+        return bool(GEMINI_API_KEY)
+    if provider in ("openai", "open_ai"):
+        return bool(OPENAI_API_KEY)
+    if provider in ("anthropic", "claude"):
+        return bool(ANTHROPIC_API_KEY)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +341,44 @@ def _generate_gemini(
 # User-aware helper: look up model_settings and dispatch
 # ---------------------------------------------------------------------------
 
+def _resolve_user_llm_choice(user_id: int | None, task_category: str, db) -> tuple[str, str]:
+    provider_name = DEFAULT_LLM_PROVIDER
+    model_name = DEFAULT_LLM_MODEL
+
+    if user_id is not None and db is not None:
+        from sqlalchemy import text as sa_text
+
+        for category in (task_category, "post_generation"):
+            row = db.execute(
+                sa_text(
+                    "SELECT provider_name, model_name "
+                    "FROM model_settings "
+                    "WHERE user_id = :uid AND task_category = :cat "
+                    "LIMIT 1"
+                ),
+                {"uid": user_id, "cat": category},
+            ).mappings().first()
+            if not row:
+                continue
+            candidate_provider = (row["provider_name"] or DEFAULT_LLM_PROVIDER).strip().lower()
+            if candidate_provider not in AVAILABLE_LLM_MODELS:
+                continue
+            allowed_models = AVAILABLE_LLM_MODELS[candidate_provider]
+            candidate_model = row["model_name"] or allowed_models[0]
+            if candidate_model not in allowed_models:
+                candidate_model = allowed_models[0]
+            provider_name = candidate_provider
+            model_name = candidate_model
+            break
+
+    if not platform_key_configured(provider_name):
+        raise RuntimeError(
+            f"The server does not have an API key configured for {provider_name}. "
+            "Choose another model in Settings or ask the administrator to add keys."
+        )
+    return provider_name, model_name
+
+
 def generate_text_for_user(
     user_id: int | None,
     task_category: str,
@@ -325,54 +389,15 @@ def generate_text_for_user(
     images: list[str] | None = None,
     db=None,
 ) -> str | None:
-    """
-    Look up the user's ``model_settings`` row for *task_category*.
-
-    If a row exists use those settings; otherwise raise a clear BYOK setup
-    error. Platform keys are still accepted by ``generate_text`` for explicit
-    internal/test calls, but this user-aware path does not depend on them.
-    """
-    provider_name = ""
-    model_name = ""
-    api_key = ""
-
-    if user_id is not None and db is not None:
-        from sqlalchemy import text as sa_text
-
-        row = db.execute(
-            sa_text(
-                "SELECT provider_name, model_name, api_key_encrypted "
-                "FROM model_settings "
-                "WHERE user_id = :uid AND task_category = :cat "
-                "LIMIT 1"
-            ),
-            {"uid": user_id, "cat": task_category},
-        ).mappings().first()
-
-        if row:
-            provider_name = row["provider_name"] or "mistral"
-            model_name = row["model_name"] or "mistral-large-latest"
-            if row["api_key_encrypted"]:
-                from app.crypto import decrypt_token
-                api_key = decrypt_token(row["api_key_encrypted"])
-                if not api_key:
-                    raise RuntimeError(
-                        "Saved BYOK API key could not be decrypted. "
-                        "Re-enter your API key in AI settings."
-                    )
-
-    if not provider_name or not model_name or not api_key:
-        raise RuntimeError(
-            f"No BYOK model/API key configured for task '{task_category}'. "
-            "Open AI Settings and add a provider API key."
-        )
+    """Look up the user's model preference and generate with platform API keys."""
+    provider_name, model_name = _resolve_user_llm_choice(user_id, task_category, db)
 
     return generate_text(
         prompt=prompt,
         system_prompt=system_prompt,
         model_name=model_name,
         provider_name=provider_name,
-        api_key=api_key,
+        api_key="",
         temperature=temperature,
         max_tokens=max_tokens,
         images=images,

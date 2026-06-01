@@ -39,7 +39,7 @@ def _persona_post_prompt(
     topic_hint: str | None = None,
     learning_hint: str | None = None,
 ) -> tuple[str, str]:
-    """Build the post-generation prompt used by BYOK model settings."""
+    """Build the post-generation prompt used by the user's AI persona."""
     instructions: list[str] = []
     if settings.custom_prompt and settings.custom_prompt.strip():
         instructions.append(settings.custom_prompt.strip())
@@ -94,7 +94,7 @@ def generate_persona_post_with_user_model(
     )
     if not content or not content.strip():
         raise RuntimeError(
-            "No BYOK model is configured for post generation. Add a provider and API key in AI settings."
+            "Post generation returned empty content. Check your AI model in Settings."
         )
     return content.strip()
 
@@ -132,11 +132,11 @@ def generate_post_content(niche: str, db: Session | None = None, user_id: int | 
             db=db,
         )
         if not content or not content.strip():
-            raise RuntimeError("The selected BYOK model returned empty content")
+            raise RuntimeError("The selected AI model returned empty content.")
         return content.strip()
 
     if not OPENAI_API_KEY:
-        raise RuntimeError("No BYOK post generation model is configured for this user.")
+        raise RuntimeError("No AI model is configured for post generation.")
 
     from openai import OpenAI
 

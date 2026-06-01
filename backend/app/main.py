@@ -1540,6 +1540,18 @@ def dashboard_intelligence(
     report_ready = bool(top_post_row or recommendations)
     onboarding = [
         {"label": "Connect your Facebook Page", "done": bool(pages), "href": "/dashboard/settings"},
+        {
+            "label": "Choose your AI model (Mistral or Gemini)",
+            "done": bool(
+                db.query(models.ModelSettings)
+                .filter(
+                    models.ModelSettings.user_id == current_user.id,
+                    models.ModelSettings.task_category == "post_generation",
+                )
+                .first()
+            ),
+            "href": "/dashboard/settings",
+        },
         {"label": "Build your first AI Persona", "done": bool(personas), "href": "/dashboard/ai-settings"},
         {"label": "Build your custom prompt", "done": prompt_done, "href": "/dashboard/ai-settings"},
         {"label": "Generate and publish your first post", "done": published_count > 0, "href": "/dashboard/create"},

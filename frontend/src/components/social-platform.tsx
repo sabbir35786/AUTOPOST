@@ -325,6 +325,7 @@ function HomeView({ pages, posts, onConnected, timezone }: { pages: PageConnecti
     <>
       <PageTitle title="Smart Dashboard" subtitle="Live status, learned patterns, and the next best action." />
       {intel?.warnings.map((warning) => <div key={warning.text} className={cn("rounded-md border p-4 text-sm", warning.level === "red" ? "border-red-200 bg-red-50 text-red-700" : "border-amber-200 bg-amber-50 text-amber-700")}><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><span>{warning.text}</span><Button asChild variant="outline"><Link href={warning.href}>Fix Now</Link></Button></div></div>)}
+      <DashboardHintsCard />
       {!pages.length ? <ConnectEmpty onConnected={onConnected} /> : <ConnectedPagesSection pages={pages} onConnected={onConnected} />}
       <section className="grid gap-4 md:grid-cols-3">
         <Stat label="Posts Published This Month" value={published} tone="green" />
@@ -590,7 +591,7 @@ function StyleAnalyzerView({ pages }: { pages: PageConnection[] }) {
       toast.success("Persona generated! Opening Prompt Studio...")
       setTimeout(() => router.push("/dashboard/ai-settings"), 1200)
     } catch (err: any) {
-      setError(err?.response?.data?.detail || "Could not generate persona. Check your AI API key and try again.")
+      setError(err?.response?.data?.detail || "Could not generate persona. Check your AI model in Settings and try again.")
       setStep("input")
     }
   }
@@ -800,24 +801,21 @@ const includeOptions = ["A question at the end", "A call to action", "Emojis", "
 const neverOptions = ["Use formal language", "Use slang", "Make promises", "Use more than 5 hashtags", "Start with the word 'I'", "Use exclamation marks excessively"]
 const structureOptions = ["No fixed structure, let AI decide", "Hook then value then CTA", "Story then lesson then question", "Fact then explanation then opinion", "List format", "Single powerful statement"]
 const llmProviderModels: Record<string, string[]> = {
-  mistral: ["mistral-large-latest", "mistral-small-latest", "mistral-medium"],
-  openai: ["gpt-4o", "gpt-4o-mini"],
-  anthropic: ["claude-sonnet-4-5", "claude-haiku-4-5"],
+  mistral: ["mistral-large-latest", "mistral-small-latest"],
   gemini: ["gemini-1.5-pro", "gemini-1.5-flash"],
 }
-const modelTasks = [
-  { id: "post_generation", label: "Post writing" },
-  { id: "post_analysis", label: "Quality scoring" },
-  { id: "image_prompt_generation", label: "Image prompt writing" },
-  { id: "style_analysis", label: "Style analysis" },
-  { id: "recommendations", label: "Recommendations" },
-]
 
-type ModelSetting = {
-  task_category: string
+type ModelPreference = {
   provider_name: string
   model_name: string
-  has_api_key?: boolean
+  configured?: boolean
+}
+
+type ModelProviderOption = {
+  id: string
+  label: string
+  models: { id: string; label: string }[]
+  configured: boolean
 }
 
 function emptyPromptConfig(): PromptStudioConfig {
@@ -1117,7 +1115,6 @@ function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab,
   return <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40 p-4"><Card className="mx-auto my-6 max-w-6xl"><CardHeader><CardTitle className="flex items-center gap-2">Prompt Studio <Sparkles className="size-4 text-purple-600" /></CardTitle></CardHeader><CardContent className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_420px]">
     <div className="grid gap-5">
       {fromStyleAnalyzer ? <div className="rounded-md border-2 border-purple-400 bg-purple-50 p-4 animate-in fade-in zoom-in duration-300"><div className="flex items-center gap-2 font-semibold text-purple-900 mb-1"><Sparkles className="size-4" /> Persona auto-generated from your posts!</div><p className="text-sm text-purple-800">All fields have been filled in by the AI based on your writing style. Review them, then scroll down to <strong>assign posting days</strong> and hit <strong>Save Prompt</strong>.</p></div> : null}
-      <ModelRouterPanel />
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '0ms' }}><Label>Start from a Template</Label><Select value={config.template} onChange={(event) => onChange(applyTemplate(draft, event.target.value))}>{templateNames.map((template) => <option key={template}>{template}</option>)}</Select><div className="grid gap-3 md:grid-cols-2"><div className="grid gap-2"><Label>Persona Name</Label><Input value={draft.persona_name} onChange={(event) => onChange({ ...draft, persona_name: event.target.value })} /></div><div className="grid gap-2"><Label>Priority Level</Label><Select value={draft.priority_level} onChange={(event) => onChange({ ...draft, priority_level: event.target.value as AIPersona["priority_level"] })}><option>High</option><option>Normal</option><option>Low</option></Select></div></div></div>
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '150ms' }}><h2 className="font-semibold">Identity Questions</h2><div className="grid gap-2"><Label>What is this page about?</Label><Input value={draft.niche} onChange={(event) => onChange({ ...draft, niche: event.target.value })} placeholder="personal finance tips for young professionals in Bangladesh" /></div><div className="grid gap-2"><Label>Who is your audience?</Label><Input value={config.audience} onChange={(event) => onConfig({ audience: event.target.value })} /></div><div className="grid gap-2"><Label>What is the main goal of your posts?</Label><Select value={config.goal} onChange={(event) => onConfig({ goal: event.target.value })}>{goalOptions.map((goal) => <option key={goal}>{goal}</option>)}<option>Other</option></Select></div><div className="grid gap-2"><Label>What is your brand personality?</Label><div className="flex flex-wrap gap-2">{toneOptions.map((tone) => <Button key={tone} type="button" variant={draft.tone_tags.includes(tone) ? "default" : "outline"} className={draft.tone_tags.includes(tone) ? "bg-blue-700 hover:bg-blue-800" : ""} onClick={() => onToggleTone(tone)}>{draft.tone_tags.includes(tone) ? <Check className="size-4" /> : null}{tone}</Button>)}</div><p className="text-xs text-slate-500">Select up to 4.</p></div></div>
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '300ms' }}><h2 className="font-semibold">Content Rules</h2><TagInput label="What topics should the AI always write about?" values={config.always_topics} onAdd={(value) => onAddTag("always_topics", value)} onRemove={(value) => onConfig({ always_topics: config.always_topics.filter((item) => item !== value) })} /><TagInput label="What topics should the AI NEVER write about?" values={config.never_topics} onAdd={(value) => onAddTag("never_topics", value)} onRemove={(value) => onConfig({ never_topics: config.never_topics.filter((item) => item !== value) })} /><div className="grid gap-2"><Label>What should every post include?</Label><div className="flex flex-wrap gap-2">{includeOptions.map((item) => <Button key={item} type="button" variant={config.every_post_includes.includes(item) ? "default" : "outline"} onClick={() => onToggleConfigList("every_post_includes", item)}>{item}</Button>)}</div></div><div className="grid gap-2"><Label>What should posts NEVER do?</Label><div className="flex flex-wrap gap-2">{neverOptions.map((item) => <Button key={item} type="button" variant={config.never_do.includes(item) ? "default" : "outline"} onClick={() => onToggleConfigList("never_do", item)}>{item}</Button>)}</div></div><div className="grid gap-2"><Label>How long should posts be?</Label><input type="range" min={0} max={2} value={["Short", "Medium", "Long"].indexOf(config.length)} onChange={(event) => onConfig({ length: (["Short", "Medium", "Long"] as const)[Number(event.target.value)] })} /><div className="flex justify-between text-xs text-slate-500"><span>Short</span><span>Medium</span><span>Long</span></div><div className="flex items-center justify-between rounded-md border p-3"><Label>Vary the length automatically</Label><Switch checked={config.vary_length} onCheckedChange={(checked) => onConfig({ vary_length: checked })} /></div></div></div>
@@ -1152,96 +1149,128 @@ function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab,
   </CardContent></Card></div>
 }
 
-function ModelRouterPanel() {
-  const [settings, setSettings] = React.useState<Record<string, ModelSetting>>({})
-  const [keys, setKeys] = React.useState<Record<string, string>>({})
+function DashboardHintsCard() {
+  const [preference, setPreference] = React.useState<ModelPreference | null>(null)
+  React.useEffect(() => {
+    api.get<ModelPreference>("/api/models/preference").then((response) => setPreference(response.data)).catch(() => setPreference(null))
+  }, [])
+  const providerLabel = preference?.provider_name === "gemini" ? "Google Gemini" : "Mistral"
+  const modelLabel = preference?.model_name || "mistral-small-latest"
+  return (
+    <Card className="border-blue-200 bg-blue-50/40">
+      <CardHeader>
+        <CardTitle className="text-base">Quick start</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-3 text-sm text-slate-700">
+        <p>Connect a Facebook page in <Link className="font-medium text-blue-700 underline" href="/dashboard/settings">Settings</Link>, choose your AI model there (Mistral or Gemini), then build personas in <Link className="font-medium text-blue-700 underline" href="/dashboard/ai-settings">Prompt Studio</Link>.</p>
+        <p className="rounded-md border border-blue-100 bg-white px-3 py-2">
+          Current AI model: <span className="font-medium">{providerLabel}</span> · <span className="font-medium">{modelLabel}</span>
+          {preference && preference.configured === false ? <span className="ml-2 text-amber-700">— server key missing for this provider</span> : null}
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button asChild size="sm" variant="outline"><Link href="/dashboard/settings">AI model & account</Link></Button>
+          <Button asChild size="sm" variant="outline"><Link href="/dashboard/ai-settings">Prompt Studio</Link></Button>
+          <Button asChild size="sm" className="bg-blue-700 hover:bg-blue-800"><Link href="/dashboard/create">Create a post</Link></Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function AIModelSettingsCard() {
+  const [preference, setPreference] = React.useState<ModelPreference>({ provider_name: "mistral", model_name: "mistral-small-latest" })
+  const [providers, setProviders] = React.useState<ModelProviderOption[]>([])
   const [saving, setSaving] = React.useState(false)
-  const [testing, setTesting] = React.useState<string | null>(null)
+  const [testing, setTesting] = React.useState(false)
 
   React.useEffect(() => {
-    api.get<ModelSetting[]>("/api/models/settings").then((response) => {
-      const next: Record<string, ModelSetting> = {}
-      response.data.forEach((item) => { next[item.task_category] = item })
-      setSettings(next)
+    Promise.all([
+      api.get<{ providers: ModelProviderOption[] }>("/api/models/options"),
+      api.get<ModelPreference>("/api/models/preference"),
+    ]).then(([optionsResponse, preferenceResponse]) => {
+      setProviders(optionsResponse.data.providers)
+      setPreference(preferenceResponse.data)
     }).catch(() => null)
   }, [])
 
-  function updateTask(task: string, patch: Partial<ModelSetting>) {
-    setSettings((value) => {
-      const current = value[task] || { task_category: task, provider_name: "mistral", model_name: "mistral-small-latest" }
-      const provider = patch.provider_name || current.provider_name
-      const model = patch.provider_name ? llmProviderModels[provider]?.[0] || current.model_name : patch.model_name || current.model_name
-      const providerChanged = Boolean(patch.provider_name && patch.provider_name !== current.provider_name)
-      return { ...value, [task]: { ...current, ...patch, provider_name: provider, model_name: model, has_api_key: providerChanged ? false : current.has_api_key } }
-    })
-    if (patch.provider_name) {
-      setKeys((value) => ({ ...value, [task]: "" }))
-    }
+  const models = llmProviderModels[preference.provider_name] || llmProviderModels.mistral
+  const selectedProvider = providers.find((item) => item.id === preference.provider_name)
+
+  function changeProvider(providerName: string) {
+    const firstModel = llmProviderModels[providerName]?.[0] || preference.model_name
+    setPreference({ ...preference, provider_name: providerName, model_name: firstModel })
   }
 
-  async function saveModels() {
+  async function savePreference() {
     setSaving(true)
     try {
-      const payload = modelTasks.map((task) => ({
-        ...(settings[task.id] || { task_category: task.id, provider_name: "mistral", model_name: "mistral-small-latest" }),
-        api_key: keys[task.id]?.trim() || undefined,
-      }))
-      await api.post("/api/models/settings", payload)
-      toast.success("Model router saved.")
-      setKeys({})
-      const response = await api.get<ModelSetting[]>("/api/models/settings")
-      const next: Record<string, ModelSetting> = {}
-      response.data.forEach((item) => { next[item.task_category] = item })
-      setSettings(next)
+      const response = await api.put<ModelPreference>("/api/models/preference", preference)
+      setPreference(response.data)
+      toast.success("AI model saved.")
     } catch (error) {
-      toast.error(getApiErrorMessage(error, "Could not save model settings."))
+      toast.error(getApiErrorMessage(error, "Could not save AI model."))
     } finally {
       setSaving(false)
     }
   }
 
-  async function testTask(task: string) {
-    const setting = settings[task] || { task_category: task, provider_name: "mistral", model_name: "mistral-small-latest" }
-    const apiKey = keys[task]?.trim()
-    if (!apiKey && !setting.has_api_key) {
-      toast.error("Paste an API key first.")
-      return
-    }
-    setTesting(task)
+  async function testPreference() {
+    setTesting(true)
     try {
       const response = await api.post<{ success: boolean; message?: string; error?: string }>("/api/models/test", {
-        provider_name: setting.provider_name,
-        model_name: setting.model_name,
-        api_key: apiKey,
-        task_category: task,
+        provider_name: preference.provider_name,
+        model_name: preference.model_name,
       })
       response.data.success ? toast.success(response.data.message || "Model works.") : toast.error(response.data.error || "Model test failed.")
     } catch (error) {
       toast.error(getApiErrorMessage(error, "Model test failed."))
     } finally {
-      setTesting(null)
+      setTesting(false)
     }
   }
 
-  return <div className="grid gap-3 rounded-md border p-4">
-    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-      <div><h2 className="font-semibold">Model Router</h2><p className="text-xs text-slate-500">BYOK per task. Server env keys are not required for writing, analysis, or image-prompt work.</p></div>
-      <Button type="button" className="bg-blue-700 hover:bg-blue-800" onClick={saveModels} disabled={saving}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Plug className="size-4" />} Save Models</Button>
-    </div>
-    <div className="grid gap-2">
-      {modelTasks.map((task) => {
-        const setting = settings[task.id] || { task_category: task.id, provider_name: "mistral", model_name: "mistral-small-latest" }
-        const models = llmProviderModels[setting.provider_name] || llmProviderModels.mistral
-        return <div key={task.id} className="grid gap-2 rounded-md border bg-white p-3 lg:grid-cols-[150px_140px_1fr_1.2fr_auto] lg:items-center">
-          <div><div className="text-sm font-medium">{task.label}</div><div className="text-xs text-slate-500">{setting.has_api_key ? "Key saved" : "Needs key"}</div></div>
-          <Select value={setting.provider_name} onChange={(event) => updateTask(task.id, { provider_name: event.target.value })}>{Object.keys(llmProviderModels).map((provider) => <option key={provider} value={provider}>{provider}</option>)}</Select>
-          <Select value={setting.model_name} onChange={(event) => updateTask(task.id, { model_name: event.target.value })}>{models.map((model) => <option key={model} value={model}>{model}</option>)}</Select>
-          <Input type="password" value={keys[task.id] || ""} onChange={(event) => setKeys((value) => ({ ...value, [task.id]: event.target.value }))} placeholder={setting.has_api_key ? "Leave blank to keep saved key" : "Paste provider API key"} />
-          <Button type="button" variant="outline" onClick={() => testTask(task.id)} disabled={testing === task.id}>{testing === task.id ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />} Test</Button>
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>AI model</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-3">
+        <p className="text-sm text-slate-500">Choose which model writes posts, scores quality, and powers analysis. API keys are managed on the server — you do not need to paste keys here.</p>
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-2">
+            <Label>Provider</Label>
+            <Select value={preference.provider_name} onChange={(event) => changeProvider(event.target.value)}>
+              {providers.map((provider) => (
+                <option key={provider.id} value={provider.id} disabled={!provider.configured}>
+                  {provider.label}{provider.configured ? "" : " (not configured on server)"}
+                </option>
+              ))}
+              {!providers.length ? Object.keys(llmProviderModels).map((provider) => <option key={provider} value={provider}>{provider}</option>) : null}
+            </Select>
+          </div>
+          <div className="grid gap-2">
+            <Label>Model</Label>
+            <Select value={preference.model_name} onChange={(event) => setPreference({ ...preference, model_name: event.target.value })}>
+              {models.map((model) => <option key={model} value={model}>{model}</option>)}
+            </Select>
+          </div>
         </div>
-      })}
-    </div>
-  </div>
+        {selectedProvider && !selectedProvider.configured ? (
+          <p className="text-sm text-amber-700">This provider is not available until the administrator adds its API key to the server environment.</p>
+        ) : null}
+        <div className="flex flex-wrap gap-2">
+          <Button className="bg-blue-700 hover:bg-blue-800" onClick={savePreference} disabled={saving}>
+            {saving ? <Loader2 className="size-4 animate-spin" /> : null}
+            Save AI model
+          </Button>
+          <Button variant="outline" onClick={testPreference} disabled={testing}>
+            {testing ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
+            Test connection
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
 }
 
 function TagInput({ label, values, onAdd, onRemove }: { label: string; values: string[]; onAdd: (value: string) => void; onRemove: (value: string) => void }) {
@@ -1345,7 +1374,7 @@ function SettingsView({ pages, timezone, onChanged }: { pages: PageConnection[];
     }
   }
 
-  return <><PageTitle title="Settings" subtitle="Account, page connections, and timezone." /><Card><CardHeader><CardTitle>Account</CardTitle></CardHeader><CardContent className="grid gap-3"><Label>Email</Label><Input value={email} onChange={(event) => setEmail(event.target.value)} /><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={saveAccount}>Save Account</Button></CardContent></Card><Card><CardHeader><CardTitle>Connected Pages</CardTitle></CardHeader><CardContent className="grid gap-3">{pages.map((page) => (
+  return <><PageTitle title="Settings" subtitle="Account, AI model, page connections, and timezone." /><AIModelSettingsCard /><Card><CardHeader><CardTitle>Account</CardTitle></CardHeader><CardContent className="grid gap-3"><Label>Email</Label><Input value={email} onChange={(event) => setEmail(event.target.value)} /><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={saveAccount}>Save Account</Button></CardContent></Card><Card><CardHeader><CardTitle>Connected Pages</CardTitle></CardHeader><CardContent className="grid gap-3">{pages.map((page) => (
     <PageConnectionCard
       key={page.id}
       page={page}

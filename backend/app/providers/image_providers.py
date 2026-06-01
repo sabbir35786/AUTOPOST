@@ -259,33 +259,7 @@ _PROVIDER_MAP: dict[str, type] = {
 
 def get_image_provider_for_user(user_id: int, db) -> tuple:
     """
-    Read model_settings for task_category='image_generation' for this user.
-    Returns (provider_instance, model_name, api_key).
-    Falls back to FalProvider + FLUX.1-schnell + platform FAL_API_KEY if no row exists.
+    Returns (provider_instance, model_name, api_key) using platform image keys.
     """
-    from sqlalchemy import text
-
-    row = db.execute(
-        text(
-            "SELECT provider_name, model_name, api_key_encrypted "
-            "FROM model_settings "
-            "WHERE user_id = :uid AND task_category = 'image_generation' "
-            "LIMIT 1"
-        ),
-        {"uid": user_id},
-    ).mappings().first()
-
-    if row:
-        provider_name = (row["provider_name"] or "fal").lower()
-        model_name = row["model_name"] or "FLUX.1-schnell"
-        api_key = ""
-        if row["api_key_encrypted"]:
-            from app.crypto import decrypt_token
-            api_key = decrypt_token(row["api_key_encrypted"])
-        provider_cls = _PROVIDER_MAP.get(provider_name, FalProvider)
-    else:
-        provider_cls = FalProvider
-        model_name = "FLUX.1-schnell"
-        api_key = FAL_API_KEY
-
-    return provider_cls(), model_name, api_key
+    _ = user_id, db
+    return FalProvider(), "FLUX.1-schnell", FAL_API_KEY
