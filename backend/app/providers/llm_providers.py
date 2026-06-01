@@ -241,30 +241,40 @@ def _generate_gemini(
 
     genai.configure(api_key=effective_key)
 
-    generation_config = genai.types.GenerationConfig(
-        temperature=temperature,
-        max_output_tokens=max_tokens,
-    )
+    prompt_text = prompt
+    if system_prompt:
+        prompt_text = f"{system_prompt}\n\n{prompt}"
 
-    model = genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=system_prompt if system_prompt else None,
-        generation_config=generation_config,
-    )
-    
-    contents = [prompt]
-    if images:
-        import base64
-        for img in images:
-            if img.startswith("data:"):
-                mime_type = img.split(";")[0].split(":")[1]
-                data = img.split(",")[1]
-                contents.append({
-                    "mime_type": mime_type,
-                    "data": base64.b64decode(data)
-                })
+    response = None
+    if hasattr(genai, "generate_text"):
+        response = genai.generate_text(
+            model=model_name,
+            prompt=prompt_text,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
+    elif hasattr(genai, "TextGenerationModel"):
+        model = genai.TextGenerationModel(model_name=model_name)
+        if hasattr(model, "predict"):
+            response = model.predict(
+                prompt_text,
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+            )
+        elif hasattr(model, "generate_text"):
+            response = model.generate_text(
+                prompt_text,
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+            )
+        else:
+            raise RuntimeError("Installed Gemini client does not support text generation for the selected model.")
+    else:
+        raise RuntimeError(
+            "Installed google.generativeai client does not support Gemini text generation. "
+            "Please upgrade the package or use a supported Gemini driver."
+        )
 
-    response = model.generate_content(contents)
     if response is None:
         return None
 
