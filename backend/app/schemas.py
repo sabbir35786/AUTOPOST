@@ -394,7 +394,7 @@ class ChatResponse(BaseModel):
 class ImageTemplateBase(BaseModel):
     name: str
     reference_image_url: str
-    layers_json: dict
+    template_json: dict
 
 
 class ImageTemplateCreate(ImageTemplateBase):
@@ -405,6 +405,5 @@ class ImageTemplateRead(ImageTemplateBase):
     id: str
     user_id: int
     created_at: datetime
-    updated_at: datetime
 
     model_config = {"from_attributes": True}

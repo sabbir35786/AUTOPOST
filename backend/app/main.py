@@ -1421,7 +1421,24 @@ def apply_style_to_persona(
             "Do not copy exact wording; adapt the pattern for my own page."
         )
     elif payload.inspiration_post:
-        style_text = f"Use this post as style inspiration, without copying it: {payload.inspiration_post.strip()}"
+        # Never persist the raw reference post text. Extract only style characteristics.
+        extracted_style = generate_text_for_user(
+            user_id=current_user.id,
+            task_category="post_analysis",
+            prompt=(
+                "Analyze this reference post and extract style characteristics only.\n"
+                "Return concise guidance covering tone, pacing, structure, and writing patterns.\n"
+                "Do not quote or include original sentences.\n\n"
+                f"{payload.inspiration_post.strip()}"
+            ),
+            system_prompt="You are a writing style analyst. Output style guidance only.",
+            temperature=0.1,
+            max_tokens=260,
+            db=db,
+        )
+        style_text = (extracted_style or "").strip()
+        if style_text:
+            style_text = f"Use this analyzed style as inspiration: {style_text}"
     if not style_text:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Analysis or inspiration post is required")
     existing = persona.custom_instructions or ""

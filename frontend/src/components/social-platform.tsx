@@ -186,13 +186,14 @@ const navItems = [
   { href: "/dashboard/ai-settings", label: "Prompt Studio", icon: Sparkles },
   { href: "/dashboard/style-analyzer", label: "Style Analyzer", icon: Search },
   { href: "/dashboard/page-tracker", label: "Page Tracker", icon: Radar },
+  { href: "/dashboard/templates", label: "Templates", icon: Image },
   { href: "/dashboard/scheduled", label: "Scheduled Posts", icon: CalendarClock },
   { href: "/dashboard/published", label: "Published Posts", icon: FileText },
   { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ]
 
-export function SocialPlatform({ view }: { view: "home" | "create" | "ai-settings" | "style-analyzer" | "page-tracker" | "scheduled" | "published" | "analytics" | "settings" }) {
+export function SocialPlatform({ view }: { view: "home" | "create" | "ai-settings" | "style-analyzer" | "page-tracker" | "templates" | "scheduled" | "published" | "analytics" | "settings" }) {
   const router = useRouter()
   const pathname = usePathname()
   const { user, isAuthenticated, isLoading, logout } = useAuth()
@@ -310,6 +311,7 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
         {!loading && view === "ai-settings" ? <AISettingsView pages={pages} /> : null}
         {!loading && view === "style-analyzer" ? <StyleAnalyzerView pages={pages} /> : null}
         {!loading && view === "page-tracker" ? <PageTrackerView pages={pages} /> : null}
+        {!loading && view === "templates" ? <TemplateLibraryView /> : null}
         {!loading && view === "scheduled" ? <PostList title="Scheduled Posts" posts={posts.filter((post) => post.status === "scheduled")} emptyAction="/dashboard/create" emptyText="No upcoming posts yet." timezone={timezone} onChanged={load} /> : null}
         {!loading && view === "published" ? <PostList title="Published Posts" posts={posts.filter((post) => post.status === "published" || post.status === "success")} emptyAction="/dashboard/create" emptyText="No published posts yet." timezone={timezone} published onChanged={load} /> : null}
         {!loading && view === "analytics" ? <AnalyticsView analytics={analytics} setAnalytics={setAnalytics} /> : null}
@@ -340,7 +342,7 @@ function HomeView({ pages, posts, onConnected, timezone }: { pages: PageConnecti
         <Stat label="Posts Failed" value={failed} tone="red" />
       </section>
       {intel ? <section className="grid gap-4 lg:grid-cols-3">
-        <Card><CardHeader><CardTitle>What Is Happening Right Now</CardTitle></CardHeader><CardContent className="grid gap-3 text-sm"><div><p className="font-medium">Next scheduled post</p><p className="text-slate-500">{intel.next_scheduled_post ? `Publishes in ${intel.next_scheduled_post.minutes_until} minutes` : "No scheduled post"}</p></div><div><p className="font-medium">Last published post</p><p className="line-clamp-2 text-slate-500">{intel.last_published_post?.content || "No published posts yet"}</p>{intel.last_published_post ? <p className="mt-1 text-xs text-slate-500">Likes {intel.last_published_post.likes_count} · Comments {intel.last_published_post.comments_count} · Shares {intel.last_published_post.shares_count} · Score {intel.last_published_post.engagement_score.toFixed(1)}</p> : null}</div><div><p className="font-medium">System health</p><p className={cn("flex items-center gap-2", intel.cron_health.ok ? "text-green-700" : "text-red-700")}><span className={cn("size-2 rounded-full", intel.cron_health.ok ? "bg-green-600" : "bg-red-600")} />Cron {intel.cron_health.ok ? "healthy" : "needs attention"}</p><p className="text-xs text-slate-500">{intel.facebook_connections.every((page) => page.status === "connected") ? "Facebook connections healthy" : "A Facebook page needs attention"}</p></div></CardContent></Card>
+        <Card><CardHeader><CardTitle>What Is Happening Right Now</CardTitle></CardHeader><CardContent className="grid gap-3 text-sm"><div><p className="font-medium">Next scheduled post</p><p className="text-slate-500">{intel.next_scheduled_post ? `Publishes in ${intel.next_scheduled_post.minutes_until} minutes` : "No scheduled post"}</p></div><div><p className="font-medium">Last published post</p><p className="text-slate-500 whitespace-pre-wrap break-words overflow-visible">{intel.last_published_post?.content || "No published posts yet"}</p>{intel.last_published_post ? <p className="mt-1 text-xs text-slate-500">Likes {intel.last_published_post.likes_count} · Comments {intel.last_published_post.comments_count} · Shares {intel.last_published_post.shares_count} · Score {intel.last_published_post.engagement_score.toFixed(1)}</p> : null}</div><div><p className="font-medium">System health</p><p className={cn("flex items-center gap-2", intel.cron_health.ok ? "text-green-700" : "text-red-700")}><span className={cn("size-2 rounded-full", intel.cron_health.ok ? "bg-green-600" : "bg-red-600")} />Cron {intel.cron_health.ok ? "healthy" : "needs attention"}</p><p className="text-xs text-slate-500">{intel.facebook_connections.every((page) => page.status === "connected") ? "Facebook connections healthy" : "A Facebook page needs attention"}</p></div></CardContent></Card>
         {!onboardingDone ? <Card><CardHeader><CardTitle>Contextual Onboarding</CardTitle></CardHeader><CardContent className="grid gap-2">{intel.onboarding_steps.map((step, index) => <div key={step.label} className="flex items-center justify-between gap-3 rounded-md border p-2 text-sm"><span className={step.done ? "text-slate-500 line-through" : "font-medium"}>{index + 1}. {step.label}</span>{step.done ? <span className="text-green-700">Done</span> : <Button asChild size="sm" variant="outline"><Link href={step.href}>Do this now</Link></Button>}</div>)}</CardContent></Card> : <LearnedInsightsPanel insights={intel.learned_insights} />}
         <Card><CardHeader><CardTitle>What You Should Do Next</CardTitle></CardHeader><CardContent className="grid gap-3">{intel.action_items.map((item) => <div key={item.id} className="grid gap-2 rounded-md border p-3 text-sm"><p>{item.text}</p><Button asChild className="w-fit bg-blue-700 hover:bg-blue-800"><Link href={item.href}>{item.action_label}</Link></Button></div>)}{!intel.action_items.length ? <p className="text-sm text-slate-500">No urgent actions. Keep publishing and let the system gather more signal.</p> : null}</CardContent></Card>
       </section> : null}
@@ -477,7 +479,7 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
   const [generatingLayered, setGeneratingLayered] = React.useState(false)
 
   React.useEffect(() => {
-    api.get<any[]>("/api/images/templates")
+    api.get<any[]>("/api/image-templates")
       .then((res) => setTemplates(res.data))
       .catch((err) => console.error("Error loading templates:", err))
   }, [])
@@ -1233,87 +1235,42 @@ function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab,
   onStrategyDecision: (action: string, prompt?: string) => void
 }) {
   const [typedPrompt, setTypedPrompt] = React.useState("")
-  const [analyzing, setAnalyzing] = React.useState(false)
-  const [testingImage, setTestingImage] = React.useState(false)
-  const [publishingMode, setPublishingMode] = React.useState<"text" | "image" | null>(null)
-  const [testResult, setTestResult] = React.useState<any>(null)
-  const [referenceImageFile, setReferenceImageFile] = React.useState<File | null>(null)
-  const [logoImageFile, setLogoImageFile] = React.useState<File | null>(null)
+  const [savedTemplates, setSavedTemplates] = React.useState<any[]>([])
+  const [assignedTemplate, setAssignedTemplate] = React.useState<{ image_template_id: string | null; name: string | null }>({ image_template_id: null, name: null })
+  const [assigningTemplate, setAssigningTemplate] = React.useState(false)
 
-  async function handleReferenceImageChange(file: File | null) {
-    if (!file) return
-    setReferenceImageFile(file)
-    setAnalyzing(true)
+  React.useEffect(() => {
+    if (!draft.id) return
+    api.get("/api/image-templates").then((res) => setSavedTemplates(res.data || [])).catch(() => setSavedTemplates([]))
+    api.get(`/api/personas/${draft.id}/assign-image-template`).then((res) => setAssignedTemplate(res.data)).catch(() => setAssignedTemplate({ image_template_id: null, name: null }))
+  }, [draft.id])
+
+  async function assignTemplate(templateId: string) {
+    if (!draft.id || !templateId) return
+    setAssigningTemplate(true)
     try {
-      const formData = new FormData()
-      formData.append("reference_image", file)
-      if (logoImageFile) {
-        formData.append("logo", logoImageFile)
-      }
-      const response = await api.post("/api/images/prompt/analyze-reference", formData, {
-        headers: { "Content-Type": "multipart/form-data" }
-      })
-      toast.success("Reference image analyzed successfully!")
-      setTestResult(response.data)
-      onChange({
-        ...draft,
-        template_layers_json: response.data.layers_json,
-        template_reference_image_url: response.data.reference_image_url || draft.template_reference_image_url || null,
-        template_logo_url: response.data.logo_url || draft.template_logo_url || null,
-      })
+      await api.post(`/api/personas/${draft.id}/assign-image-template`, { image_template_id: templateId })
+      const selected = savedTemplates.find((item) => item.id === templateId)
+      setAssignedTemplate({ image_template_id: templateId, name: selected?.name || "Assigned template" })
+      toast.success("Image template assigned")
     } catch (error: any) {
-      toast.error(error?.response?.data?.detail || "Failed to analyze reference image.")
+      toast.error(error?.response?.data?.detail || "Could not assign image template.")
     } finally {
-      setAnalyzing(false)
+      setAssigningTemplate(false)
     }
   }
 
-  async function testTemplateGeneration() {
-    if (!draft.id) {
-      toast.error("Please save the persona first.")
-      return
-    }
-    setTestingImage(true)
+  async function unassignTemplate() {
+    if (!draft.id) return
+    setAssigningTemplate(true)
     try {
-      const response = await api.post("/api/images/test-template-generation", {
-        persona_id: draft.id,
-        topic_hint: "test topic"
-      })
-      setTestResult(response.data)
-      if (response.data.success) {
-        toast.success("Template generation test successful!")
-      } else {
-        toast.error("Template generation test failed.")
-      }
+      await api.delete(`/api/personas/${draft.id}/assign-image-template`)
+      setAssignedTemplate({ image_template_id: null, name: null })
+      toast.success("Image template unassigned")
     } catch (error: any) {
-      toast.error(error?.response?.data?.detail || "Failed to test template generation.")
+      toast.error(error?.response?.data?.detail || "Could not unassign image template.")
     } finally {
-      setTestingImage(false)
-    }
-  }
-
-  async function publishTestPost(includeImage: boolean) {
-    if (!draft.id) {
-      toast.error("Please save the persona first.")
-      return
-    }
-    const postText = testResult?.post_text || ""
-    setPublishingMode(includeImage ? "image" : "text")
-    try {
-      const response = await api.post("/api/images/publish-template-post", {
-        persona_id: draft.id,
-        post_text: postText,
-        include_image: includeImage,
-      })
-      if (response.data.success) {
-        toast.success(includeImage ? "Published test post with image." : "Published text-only test post.")
-      } else {
-        toast.error(response.data.error_message || "Publish failed.")
-      }
-    } catch (error: any) {
-      toast.error(error?.response?.data?.detail || "Failed to publish test post.")
-    } finally {
-      setPublishingMode(null)
+      setAssigningTemplate(false)
     }
   }
 
@@ -1339,7 +1296,7 @@ function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab,
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '300ms' }}><h2 className="font-semibold">Content Rules</h2><TagInput label="What topics should the AI always write about?" values={config.always_topics} onAdd={(value) => onAddTag("always_topics", value)} onRemove={(value) => onConfig({ always_topics: config.always_topics.filter((item) => item !== value) })} /><TagInput label="What topics should the AI NEVER write about?" values={config.never_topics} onAdd={(value) => onAddTag("never_topics", value)} onRemove={(value) => onConfig({ never_topics: config.never_topics.filter((item) => item !== value) })} /><div className="grid gap-2"><Label>What should every post include?</Label><div className="flex flex-wrap gap-2">{includeOptions.map((item) => <Button key={item} type="button" variant={config.every_post_includes.includes(item) ? "default" : "outline"} onClick={() => onToggleConfigList("every_post_includes", item)}>{item}</Button>)}</div></div><div className="grid gap-2"><Label>What should posts NEVER do?</Label><div className="flex flex-wrap gap-2">{neverOptions.map((item) => <Button key={item} type="button" variant={config.never_do.includes(item) ? "default" : "outline"} onClick={() => onToggleConfigList("never_do", item)}>{item}</Button>)}</div></div><div className="grid gap-2"><Label>How long should posts be?</Label><input type="range" min={0} max={2} value={["Short", "Medium", "Long"].indexOf(config.length)} onChange={(event) => onConfig({ length: (["Short", "Medium", "Long"] as const)[Number(event.target.value)] })} /><div className="flex justify-between text-xs text-slate-500"><span>Short</span><span>Medium</span><span>Long</span></div></div></div>
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '450ms' }}><h2 className="font-semibold">Format and Style Rules</h2><div className="grid gap-2"><Label>How should posts be structured?</Label><Select value={config.structure} onChange={(event) => onConfig({ structure: event.target.value })}>{structureOptions.map((item) => <option key={item}>{item}</option>)}</Select></div><div className="grid gap-2"><Label>What writing style examples do you love?</Label><Textarea className="min-h-28" value={config.examples} onChange={(event) => onConfig({ examples: event.target.value })} placeholder="Paste example posts that feel like what you want. The AI will study these." /></div><div className="grid gap-2"><Label>What language should posts be written in?</Label><Select value={draft.language} onChange={(event) => onChange({ ...draft, language: event.target.value })}>{languages.map((language) => <option key={language}>{language}</option>)}</Select></div></div>
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '600ms' }}><h2 className="font-semibold">Advanced Control</h2><div className="grid gap-2"><Label>Write any additional instructions in your own words</Label><Textarea className="min-h-28" value={draft.custom_instructions || ""} onChange={(event) => onChange({ ...draft, custom_instructions: event.target.value })} /></div><div className="grid gap-2"><Label>Rate how creative vs safe you want the AI to be: {draft.creativity_level}/10</Label><input type="range" min={1} max={10} value={draft.creativity_level} onChange={(event) => onChange({ ...draft, creativity_level: Number(event.target.value) })} /><div className="flex justify-between text-xs text-slate-500"><span>Very safe, predictable, consistent.</span><span>Very creative, experimental, surprising.</span></div></div><div className="grid gap-3 md:grid-cols-2"><div className="grid gap-2"><Label>Assigned Days</Label><div className="flex flex-wrap gap-2">{dayOptions.map((day) => <Button key={day} type="button" variant={draft.assigned_days.includes(day) ? "default" : "outline"} onClick={() => onToggleDay(day)}>{day}</Button>)}</div></div><div className="grid gap-2"><Label>Posting Times</Label>{draft.posting_time_slots.map((slot, index) => <Input key={`${slot}-${index}`} type="time" value={slot} onChange={(event) => onChange({ ...draft, posting_time_slots: draft.posting_time_slots.map((item, itemIndex) => itemIndex === index ? event.target.value : item) })} />)}</div></div><div className="flex items-center justify-between rounded-md border p-3"><Label>Learning Mode</Label><Switch checked={draft.learning_mode_enabled} onCheckedChange={(checked) => onChange({ ...draft, learning_mode_enabled: checked })} /></div>{draft.learned_patterns_summary ? <p className="text-sm text-slate-500">{draft.learned_patterns_summary}</p> : null}</div>
-      <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '750ms' }}><h2 className="font-semibold flex items-center gap-2"><LayoutTemplate className="size-4" /> Advanced Template Image Generation</h2><div className="flex items-center justify-between rounded-md border p-3 bg-slate-50"><div><Label className="cursor-pointer">Enable Template-Based Image Generation (Advanced Mode)</Label><p className="text-xs text-amber-700">Upgrade or activate this to publish rich-media posts from one saved template.</p></div><Switch checked={draft.template_image_generation_enabled || false} onCheckedChange={(checked) => onChange({ ...draft, template_image_generation_enabled: checked, include_image: checked })} /></div>{draft.template_image_generation_enabled ? <div className="grid gap-3 mt-3"><div className="grid gap-2"><Label>Reference Image (Upload once to analyze template structure)</Label><Input type="file" accept="image/*" onChange={(event) => handleReferenceImageChange(event.target.files?.[0] || null)} /></div><div className="grid gap-2"><Label>Persona Logo (Optional)</Label><Input type="file" accept="image/*" onChange={(event) => setLogoImageFile(event.target.files?.[0] || null)} /></div><div className="grid gap-2"><Label>Runtime fallback policy</Label><Select value={draft.image_fallback_policy || "text_only"} onChange={(event) => onChange({ ...draft, image_fallback_policy: event.target.value as AIPersona["image_fallback_policy"] })}><option value="text_only">Publish caption only</option><option value="use_library">Use unused library image</option><option value="skip_post">Skip post</option></Select></div>{analyzing ? <div className="text-sm text-purple-700 animate-pulse flex items-center gap-2 py-2"><Loader2 className="size-4 animate-spin mr-1" /> Uploading reference image and analyzing visual structure statelessly...</div> : null}{testResult?.layers_json ? <div className="rounded-md border p-3 bg-slate-50"><h3 className="font-semibold text-sm mb-2">Template Structure Extracted</h3><div className="text-xs text-slate-600"><p><strong>Background:</strong> {testResult.layers_json.background?.type || "N/A"} - {testResult.layers_json.background?.description || "N/A"}</p><p><strong>Text Boxes:</strong> {testResult.layers_json.text_boxes?.length || 0} found</p>{testResult.layers_json.text_boxes?.map((box: any, i: number) => <p key={i} className="ml-2">- {box.purpose} at ({box.x_pct}%, {box.y_pct}%)</p>)}</div></div> : null}<div className="flex flex-wrap gap-2"><Button className="w-fit" onClick={testTemplateGeneration} disabled={testingImage}>{testingImage ? <><Loader2 className="size-4 animate-spin mr-2" /> Generating image...</> : <><RefreshCw className="size-4 mr-2" /> Test Image Generation</>}</Button><Button variant="outline" onClick={() => publishTestPost(false)} disabled={!!publishingMode}>{publishingMode === "text" ? <><Loader2 className="size-4 animate-spin" /> Publishing...</> : "Publish Test Text Only"}</Button><Button variant="outline" onClick={() => publishTestPost(true)} disabled={!!publishingMode}>{publishingMode === "image" ? <><Loader2 className="size-4 animate-spin" /> Publishing...</> : "Publish Test With Image"}</Button></div>{testResult?.post_text ? <div className="rounded-md border p-3 bg-white"><h3 className="font-semibold text-sm mb-2">Generated Caption</h3><p className="whitespace-pre-wrap text-sm text-slate-700">{testResult.post_text}</p></div> : null}{testResult?.image_url ? <div className="rounded-md border p-3 bg-slate-50"><h3 className="font-semibold text-sm mb-2">Generated Image Preview</h3><img src={testResult.image_url} alt="Generated" className="max-w-full h-auto rounded-md" /></div> : null}</div> : <div className="rounded-md border border-dashed p-3 text-center text-sm text-slate-500"><p>Advanced Mode is inactive. Image controls stay disabled and Facebook posts publish as text-only captions.</p></div>}</div>
+      <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '750ms' }}><h2 className="font-semibold flex items-center gap-2"><LayoutTemplate className="size-4" /> Image Template</h2><div className="grid gap-2"><Label>Assigned template</Label><p className="text-sm text-slate-600">{assignedTemplate.name || "None assigned"}</p>{assignedTemplate.image_template_id ? <Button variant="outline" onClick={unassignTemplate} disabled={assigningTemplate}>Unassign</Button> : null}</div><div className="grid gap-2"><Label>Select template</Label><Select value={assignedTemplate.image_template_id || ""} onChange={(event) => assignTemplate(event.target.value)}><option value="">Choose a saved template</option>{savedTemplates.map((tpl) => <option key={tpl.id} value={tpl.id}>{tpl.name}</option>)}</Select><p className="text-xs text-slate-500">Manage templates in the Templates page.</p></div></div>
     </div>
     <aside className="grid h-fit gap-3 rounded-md border bg-slate-50 p-4 lg:sticky lg:top-4 overflow-y-auto max-h-[85vh]">
       {strategy && !strategy.applied_to_prompt && strategy.suggested_prompt ? (
@@ -1771,7 +1728,7 @@ function Stat({ label, value, tone = "blue" }: { label: string; value: number; t
 }
 
 function PostRow({ post, timezone }: { post: Post; timezone: string }) {
-  return <div className="grid gap-2 rounded-md border p-3"><div className="flex items-center justify-between gap-2"><div className="flex flex-wrap gap-2"><span className={cn("rounded-full px-2 py-1 text-xs font-medium", badgeClass(post.status))}>{post.status}</span>{post.ai_generated ? <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2 py-1 text-xs font-medium text-purple-700"><Sparkles className="size-3" /> AI Generated</span> : null}</div><span className="text-xs text-slate-500">{formatDate(post.posted_at || post.scheduled_at || null, timezone)}</span></div><p className="line-clamp-3 text-sm text-slate-600">{post.content}</p>{post.media_urls?.[0] ? <img alt="" className="h-24 w-32 rounded-md object-cover" src={post.media_urls[0]} /> : null}</div>
+  return <div className="grid gap-2 rounded-md border p-3"><div className="flex items-center justify-between gap-2"><div className="flex flex-wrap gap-2"><span className={cn("rounded-full px-2 py-1 text-xs font-medium", badgeClass(post.status))}>{post.status}</span>{post.ai_generated ? <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2 py-1 text-xs font-medium text-purple-700"><Sparkles className="size-3" /> AI Generated</span> : null}</div><span className="text-xs text-slate-500">{formatDate(post.posted_at || post.scheduled_at || null, timezone)}</span></div><p className="text-sm text-slate-600 whitespace-pre-wrap break-words overflow-visible">{post.content}</p>{post.media_urls?.[0] ? <img alt="" className="h-24 w-32 rounded-md object-cover" src={post.media_urls[0]} /> : null}</div>
 }
 
 function Empty({ text, action }: { text: string; action: string }) {
@@ -1797,6 +1754,7 @@ function formatDate(value: string | null, timezone: string) {
 
 function TemplateLibraryView() {
   const [templates, setTemplates] = React.useState<any[]>([])
+  const [selectedTemplate, setSelectedTemplate] = React.useState<any | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [analyzing, setAnalyzing] = React.useState(false)
   const [name, setName] = React.useState("")
@@ -1805,7 +1763,7 @@ function TemplateLibraryView() {
   const loadTemplates = React.useCallback(async () => {
     setLoading(true)
     try {
-      const response = await api.get<any[]>("/api/images/templates")
+      const response = await api.get<any[]>("/api/image-templates")
       setTemplates(response.data)
     } catch (err) {
       console.error("Failed to load templates:", err)
@@ -1827,9 +1785,9 @@ function TemplateLibraryView() {
     setAnalyzing(true)
     try {
       const formData = new FormData()
-      formData.append("name", name)
-      formData.append("file", file)
-      await api.post("/api/images/analyze-template", formData, {
+      formData.append("name", name.trim())
+      formData.append("image", file)
+      await api.post("/api/image-templates/analyze", formData, {
         headers: {
           "Content-Type": "multipart/form-data"
         }
@@ -1848,7 +1806,7 @@ function TemplateLibraryView() {
   async function handleDelete(id: string) {
     if (!confirm("Are you sure you want to delete this template?")) return
     try {
-      await api.delete(`/api/images/templates/${id}`)
+      await api.delete(`/api/image-templates/${id}`)
       toast.success("Template deleted successfully")
       loadTemplates()
     } catch (err: any) {
@@ -1856,13 +1814,22 @@ function TemplateLibraryView() {
     }
   }
 
+  async function openTemplate(id: string) {
+    try {
+      const response = await api.get(`/api/image-templates/${id}`)
+      setSelectedTemplate(response.data)
+    } catch {
+      toast.error("Could not load template details.")
+    }
+  }
+
   return (
     <>
-      <PageTitle title="Template Library" subtitle="Upload reference layouts. The AI visual intelligence maps design layers for pixel-perfect automation." />
+      <PageTitle title="Templates" subtitle="Upload reference images and reuse extracted layer structures across personas." />
       <div className="grid gap-6 md:grid-cols-3 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards">
         <Card className="md:col-span-1 h-fit">
           <CardHeader>
-            <CardTitle>Create Design Template</CardTitle>
+            <CardTitle>Upload Reference Image</CardTitle>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleAnalyze} className="grid gap-4">
@@ -1888,7 +1855,7 @@ function TemplateLibraryView() {
               </div>
               <Button type="submit" className="bg-purple-700 text-white hover:bg-purple-800 w-full" disabled={analyzing}>
                 {analyzing ? <Loader2 className="size-4 animate-spin mr-2" /> : <Sparkles className="size-4 mr-2" />}
-                {analyzing ? "Analyzing Design layers..." : "Extract Design Layers"}
+                {analyzing ? "Analyzing image structure..." : "Extract Design Layers"}
               </Button>
             </form>
           </CardContent>
@@ -1896,7 +1863,7 @@ function TemplateLibraryView() {
         
         <Card className="md:col-span-2">
           <CardHeader>
-            <CardTitle>Your Layout Templates</CardTitle>
+            <CardTitle>Saved Templates</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
             {loading ? (
@@ -1905,17 +1872,9 @@ function TemplateLibraryView() {
               <div className="col-span-2 text-center py-10 text-slate-500">No layout templates saved. Upload one to get started!</div>
             ) : (
               templates.map((tpl) => (
-                <div key={tpl.id} className="relative overflow-hidden rounded-lg border bg-white shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow">
+                <button type="button" key={tpl.id} onClick={() => openTemplate(tpl.id)} className="text-left relative overflow-hidden rounded-lg border bg-white shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow">
                   <div className="relative aspect-video w-full overflow-hidden bg-slate-100 border-b">
                     <img src={tpl.reference_image_url} alt={tpl.name} className="h-full w-full object-cover" />
-                    <div className="absolute inset-0 bg-black/60 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center p-3 text-white text-xs overflow-auto">
-                      <div className="grid gap-1">
-                        <p className="font-semibold text-center uppercase tracking-wider text-purple-400 mb-1">Detected Composition</p>
-                        <p>Background: <span className="font-medium text-slate-300">{tpl.layers_json?.background?.type || 'photographic'}</span></p>
-                        <p>Logo: <span className="font-medium text-slate-300">{tpl.layers_json?.logo_position ? 'Yes' : 'No'}</span></p>
-                        <p>Text Boxes: <span className="font-medium text-slate-300">{tpl.layers_json?.text_boxes?.length || 0}</span></p>
-                      </div>
-                    </div>
                   </div>
                   <div className="p-4 flex items-center justify-between">
                     <div>
@@ -1926,12 +1885,40 @@ function TemplateLibraryView() {
                       <Trash2 className="size-4" />
                     </Button>
                   </div>
-                </div>
+                </button>
               ))
             )}
           </CardContent>
         </Card>
       </div>
+      {selectedTemplate ? (
+        <div className="fixed inset-0 z-50 bg-black/40 p-4 overflow-y-auto">
+          <Card className="mx-auto mt-10 max-w-2xl">
+            <CardHeader>
+              <CardTitle className="flex items-center justify-between">
+                <span>{selectedTemplate.name}</span>
+                <Button variant="ghost" size="icon" onClick={() => setSelectedTemplate(null)}><X className="size-4" /></Button>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-4">
+              <img src={selectedTemplate.reference_image_url} alt={selectedTemplate.name} className="w-full rounded-md border" />
+              <div className="text-sm text-slate-700">
+                {(() => {
+                  const layers = selectedTemplate?.template_json?.layers || []
+                  const counts = layers.reduce((acc: Record<string, number>, layer: any) => {
+                    const key = String(layer?.type || "unknown")
+                    acc[key] = (acc[key] || 0) + 1
+                    return acc
+                  }, {})
+                  const entries = Object.entries(counts)
+                  if (!entries.length) return <p>No layers found.</p>
+                  return entries.map(([type, count]) => <p key={type}>{count} {type.replaceAll("_", " ")} layer{count > 1 ? "s" : ""}</p>)
+                })()}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
     </>
   )
 }

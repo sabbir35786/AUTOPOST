@@ -51,6 +51,44 @@ class GenerateFromTextRequest(BaseModel):
 
 # --- Helper functions ---
 
+def _clean_json_response(raw: str) -> str:
+    text = (raw or "").strip()
+    if "```" in text:
+        start = text.find("```")
+        end = text.rfind("```")
+        if start != -1 and end != -1 and end > start:
+            text = text[start + 3:end].strip()
+    text = "\n".join(line for line in text.splitlines() if not line.strip().startswith("```")).strip()
+    return text
+
+
+def _parse_json_with_fallback(response_text: str, *, base64_image: str, model_name: str, provider_name: str) -> dict:
+    try:
+        return json.loads(_clean_json_response(response_text))
+    except Exception:
+        try:
+            repaired = generate_text(
+                prompt=(
+                    "The following text is supposed to be a valid JSON object but it is malformed. "
+                    "Fix it and return only the raw valid JSON with no explanation, no markdown, no backticks:\n\n"
+                    f"{response_text}"
+                ),
+                system_prompt="Return only valid raw JSON.",
+                model_name=model_name,
+                provider_name=provider_name,
+                api_key="",
+                temperature=0.0,
+                max_tokens=4096,
+                images=[base64_image],
+            )
+            return json.loads(_clean_json_response(repaired or ""))
+        except Exception:
+            raise HTTPException(
+                status_code=422,
+                detail="Could not extract a valid template from this image. Please try a clearer image.",
+            )
+
+
 def _upload_to_supabase(filename: str, file_bytes: bytes, content_type: str = "image/png") -> str:
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         raise RuntimeError("Supabase configuration missing.")
@@ -548,7 +586,7 @@ Return ONLY raw JSON. Do not include markdown or explanations."""
                 provider_name=provider_name,
                 api_key="",
                 temperature=0.2,
-                max_tokens=1000,
+                max_tokens=4096,
                 images=[base64_image],
             )
         except Exception as exc:
@@ -560,16 +598,12 @@ Return ONLY raw JSON. Do not include markdown or explanations."""
         if not response_text:
             raise HTTPException(status_code=500, detail="Vision LLM returned empty response")
 
-        raw_response = response_text.strip()
-        if raw_response.startswith("```"):
-            lines = raw_response.splitlines()
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            raw_response = "\n".join(lines).strip()
-
-        layers_json = json.loads(raw_response)
+        layers_json = _parse_json_with_fallback(
+            response_text,
+            base64_image=base64_image,
+            model_name=model_name,
+            provider_name=provider_name,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -641,7 +675,18 @@ def list_templates(
     templates = db.query(models.ImageTemplate).filter(
         models.ImageTemplate.user_id == current_user.id
     ).all()
-    return templates
+    return [
+        {
+            "id": t.id,
+            "user_id": t.user_id,
+            "name": t.name,
+            "reference_image_url": t.reference_image_url,
+            "layers_json": t.template_json,
+            "template_json": t.template_json,
+            "created_at": t.created_at,
+        }
+        for t in templates
+    ]
 
 
 @router.delete("/templates/{template_id}")
@@ -717,7 +762,7 @@ Important: Return ONLY a raw JSON string. Do not wrap it in markdown code blocks
             provider_name=provider_name,
             api_key="",
             temperature=0.2,
-            max_tokens=1000,
+            max_tokens=4096,
             images=[base64_image],
         )
     except Exception as exc:
@@ -729,30 +774,19 @@ Important: Return ONLY a raw JSON string. Do not wrap it in markdown code blocks
     if not response_text:
         raise HTTPException(status_code=500, detail="Vision LLM returned empty response")
 
-    # Clean code blocks
-    raw_response = response_text.strip()
-    if raw_response.startswith("```"):
-        lines = raw_response.splitlines()
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines[-1].startswith("```"):
-            lines = lines[:-1]
-        raw_response = "\n".join(lines).strip()
-
-    try:
-        layers_json = json.loads(raw_response)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to parse JSON from Vision LLM: {str(e)}. Raw content: {response_text}"
-        )
+    layers_json = _parse_json_with_fallback(
+        response_text,
+        base64_image=base64_image,
+        model_name=model_name,
+        provider_name=provider_name,
+    )
 
     # 4. Save template
     template = models.ImageTemplate(
         user_id=current_user.id,
         name=name,
         reference_image_url=public_url,
-        layers_json=layers_json
+        template_json=layers_json
     )
     db.add(template)
     db.commit()
@@ -837,7 +871,7 @@ Important: Return ONLY a raw JSON string. Do not wrap it in markdown code blocks
             provider_name=provider_name,
             api_key="",
             temperature=0.2,
-            max_tokens=1000,
+            max_tokens=4096,
             images=[base64_image],
         )
     except Exception as exc:
@@ -849,23 +883,12 @@ Important: Return ONLY a raw JSON string. Do not wrap it in markdown code blocks
     if not response_text:
         raise HTTPException(status_code=500, detail="Vision LLM returned empty response")
 
-    # Clean code blocks
-    raw_response = response_text.strip()
-    if raw_response.startswith("```"):
-        lines = raw_response.splitlines()
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines[-1].startswith("```"):
-            lines = lines[:-1]
-        raw_response = "\n".join(lines).strip()
-
-    try:
-        layers_json = json.loads(raw_response)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to parse JSON from Vision LLM: {str(e)}. Raw content: {response_text}"
-        )
+    layers_json = _parse_json_with_fallback(
+        response_text,
+        base64_image=base64_image,
+        model_name=model_name,
+        provider_name=provider_name,
+    )
 
     # 5. Save to image_prompt_settings
     settings = db.query(models.ImagePromptSettings).filter(
@@ -1046,12 +1069,7 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
             except Exception as e:
                 print(f"Error fetching logo URL: {e}")
 
-        # Fallback to local logo.png
-        if not logo_img:
-            try:
-                logo_img = Image.open("logo.png")
-            except Exception as e:
-                print(f"Error loading fallback logo.png: {e}")
+        # No local-disk fallback logos; use uploaded/supabase assets only.
 
     # 5. Compose with Pillow
     try:
@@ -1326,7 +1344,8 @@ async def generate_layered_image(
         raise HTTPException(status_code=404, detail="Template not found")
 
     # 2. Layer 1: Background Prompt & Image Generation
-    bg_style = template.layers_json.get("background", {}).get("description", "simple abstract background")
+    layers_json = template.template_json or {}
+    bg_style = layers_json.get("background", {}).get("description", "simple abstract background")
     system_prompt = "You are an expert prompt engineer for AI image generators."
     prompt_for_bg = f"Write a high-quality prompt for generating a clean background image based on the topic: '{req.topic}'. The background style should be: {bg_style}. IMPORTANT: This background image must contain absolutely no text, letters, logos, writing, watermarks, or signatures of any kind. It should only contain background textures, photographic elements, or abstract designs."
     
@@ -1362,7 +1381,7 @@ async def generate_layered_image(
         raise HTTPException(status_code=500, detail=f"Failed to generate background image: {str(e)}")
 
     # 3. Layer 2: Text Copy Generation
-    text_boxes = template.layers_json.get("text_boxes", [])
+    text_boxes = layers_json.get("text_boxes", [])
     copy_map = {}
     if text_boxes:
         boxes_desc = "\n".join([f"- Purpose: {b.get('purpose', 'Headline')}" for b in text_boxes])
@@ -1399,7 +1418,7 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
 
     # 4. Layer 3: Logo Asset
     logo_img = None
-    logo_pos = template.layers_json.get("logo_position")
+    logo_pos = layers_json.get("logo_position")
     if logo_pos and (current_user.brand_logo_url or True):
         # Try user's uploaded brand logo first
         logo_url = current_user.brand_logo_url
@@ -1412,12 +1431,7 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
             except Exception as e:
                 print(f"Error fetching user logo URL: {e}")
         
-        # Fallback to local logo.png if user logo fails or is empty
-        if not logo_img:
-            try:
-                logo_img = Image.open("logo.png")
-            except Exception as e:
-                print(f"Error loading fallback logo.png: {e}")
+        # No local-disk fallback logos; use uploaded/supabase assets only.
 
     # 5. Compositor (Pillow Assembly)
     try:

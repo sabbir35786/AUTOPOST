@@ -455,24 +455,25 @@ class ImageTemplate(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
     reference_image_url: Mapped[str] = mapped_column(Text, nullable=False)
-    layers_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    template_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
+class PersonaImageTemplateAssignment(Base):
+    __tablename__ = "persona_image_template_assignments"
 
-class PersonaImageTemplate(Base):
-    __tablename__ = "persona_image_templates"
-
-    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     persona_id: Mapped[int] = mapped_column(
         ForeignKey("ai_personas.id", ondelete="CASCADE"),
+        primary_key=True,
         unique=True,
         index=True,
         nullable=False,
     )
-    reference_image_url: Mapped[str] = mapped_column(Text, nullable=False)
-    template_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
+    image_template_id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False),
+        ForeignKey("image_templates.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    assigned_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,

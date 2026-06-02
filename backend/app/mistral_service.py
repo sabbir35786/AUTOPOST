@@ -309,7 +309,7 @@ def generate_persona_from_posts(posts: list[str], model: str = "mistral-small-la
         '    "never_do": ["<items from: Use formal language | Use slang | Make promises | Use more than 5 hashtags | Start with the word I | Use exclamation marks excessively>"],\n'
         '    "length": "<Short or Medium or Long based on typical post length>",\n'
         '    "structure": "<one of: No fixed structure let AI decide | Hook then value then CTA | Story then lesson then question | Fact then explanation then opinion | List format | Single powerful statement>",\n'
-        '    "examples": "<paste the single best representative example post from the provided posts here>"\n'
+        '    "examples": "<write a short abstract style pattern example, never copy any original post text>"\n'
         "  }\n"
         "}"
     )
@@ -361,6 +361,9 @@ def generate_persona_from_posts(posts: list[str], model: str = "mistral-small-la
         data.setdefault("always_include_engagement_hook", False)
         data.setdefault("creativity_level", 7)
         data.setdefault("language", "English")
+        # Ensure no raw reference post text is persisted in prompt config examples.
+        if isinstance(pc.get("examples"), str):
+            pc["examples"] = pc["examples"][:240]
         data["prompt_config"] = pc
 
         return data
