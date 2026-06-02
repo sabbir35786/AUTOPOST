@@ -847,14 +847,8 @@ def assemble_prompt_string(question_answers: dict, custom_instructions: str | No
         if never_list:
             parts.append(f"Posts must never: {', '.join(never_list).lower()}.")
 
-    # 8. Length / Vary length
-    length = question_answers.get("length")
-    vary_length = question_answers.get("vary_length", True)
-    if length and str(length).strip():
-        if vary_length:
-            parts.append(f"Vary post length, rotating around {str(length).strip().lower()} posts.")
-        else:
-            parts.append(f"Aim for {str(length).strip().lower()} length posts.")
+    # 8. Length / Vary length - Moved to user prompt in posts.py to ensure it's properly applied
+    # This prevents duplicate instructions and ensures vary_length setting is respected
 
     # 9. Structure
     structure = question_answers.get("structure")
@@ -2459,6 +2453,8 @@ def update_current_user(
         current_user.email = payload.email
     if payload.timezone:
         current_user.timezone = payload.timezone
+    if payload.brand_logo_url is not None:
+        current_user.brand_logo_url = payload.brand_logo_url
     db.commit()
     db.refresh(current_user)
     return current_user

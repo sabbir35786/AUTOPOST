@@ -16,3 +16,5 @@ mistralai
 python-multipart
 itsdangerous
 qstash
+pillow
+

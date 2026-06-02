@@ -204,6 +204,7 @@ def _ensure_product_blueprint_columns() -> None:
             "email_verified": "boolean default true not null",
             "timezone": "varchar default 'UTC' not null",
             "plan": "varchar default 'free' not null",
+            "brand_logo_url": "text",
         },
     )
     _add_missing_columns(

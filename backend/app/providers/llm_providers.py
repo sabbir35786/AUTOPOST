@@ -321,10 +321,25 @@ def _generate_gemini(
 
     contents: str | list = prompt
     if images:
-        parts: list = [{"text": prompt}]
+        import io
+        import base64
+        from PIL import Image
+        parts: list = []
+        if prompt:
+            parts.append(prompt)
         for image_url in images:
-            parts.append({"file_data": {"file_uri": image_url}})
+            if isinstance(image_url, str) and image_url.startswith("data:image/"):
+                try:
+                    header, base64_data = image_url.split(",", 1)
+                    image_bytes = base64.b64decode(base64_data)
+                    pil_img = Image.open(io.BytesIO(image_bytes))
+                    parts.append(pil_img)
+                except Exception as e:
+                    print(f"Error parsing base64 image: {e}")
+            else:
+                parts.append({"file_data": {"file_uri": image_url}})
         contents = parts
+
 
     try:
         response = model.generate_content(

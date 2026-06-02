@@ -21,6 +21,7 @@ class UserRead(BaseModel):
     email_verified: bool = True
     timezone: str = "UTC"
     plan: str = "free"
+    brand_logo_url: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -84,6 +85,7 @@ class FacebookStatus(BaseModel):
 class UserUpdate(BaseModel):
     email: str | None = None
     timezone: str | None = None
+    brand_logo_url: str | None = None
 
 
 class PageConnectionRead(BaseModel):
@@ -375,3 +377,23 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     model: str
+
+
+class ImageTemplateBase(BaseModel):
+    name: str
+    reference_image_url: str
+    layers_json: dict
+
+
+class ImageTemplateCreate(ImageTemplateBase):
+    pass
+
+
+class ImageTemplateRead(ImageTemplateBase):
+    id: str
+    user_id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+

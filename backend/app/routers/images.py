@@ -10,12 +10,17 @@ import time
 from datetime import datetime, timezone
 import base64
 
+import json
+import io
+from PIL import Image, ImageDraw, ImageFont
+
 from app import models
 from app.database import get_db
 from app.auth import get_current_user
 from app.config import SUPABASE_URL, SUPABASE_SERVICE_KEY
 from app.providers.image_providers import get_image_provider_for_user
-from app.providers.llm_providers import generate_text_for_user
+from app.providers.llm_providers import generate_text_for_user, generate_text
+
 
 router = APIRouter(prefix="/api/images", tags=["images"])
 
@@ -569,3 +574,368 @@ def generate_from_text(
         raise HTTPException(status_code=500, detail="Failed to generate image prompt")
         
     return {"generated_prompt": response_text.strip()}
+
+
+# --- Template-Based Multi-Layer Image System ---
+
+class GenerateLayeredRequest(BaseModel):
+    template_id: str
+    topic: str
+    post_text: Optional[str] = None
+
+
+def get_pillow_font(size: int):
+    font_names = [
+        "arial.ttf",
+        "LiberationSans-Regular.ttf",
+        "DejaVuSans.ttf",
+        "Roboto-Regular.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+    ]
+    for font_name in font_names:
+        try:
+            return ImageFont.truetype(font_name, size)
+        except IOError:
+            continue
+    return ImageFont.load_default()
+
+
+@router.get("/templates")
+def list_templates(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    templates = db.query(models.ImageTemplate).filter(
+        models.ImageTemplate.user_id == current_user.id
+    ).all()
+    return templates
+
+
+@router.delete("/templates/{template_id}")
+def delete_template(
+    template_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    template = db.query(models.ImageTemplate).filter(
+        models.ImageTemplate.id == template_id,
+        models.ImageTemplate.user_id == current_user.id
+    ).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    db.delete(template)
+    db.commit()
+    return {"message": "Template deleted successfully"}
+
+
+@router.post("/analyze-template")
+async def analyze_template(
+    name: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    file_bytes = await file.read()
+    
+    # 1. Upload reference image to Supabase
+    filename = f"templates/{uuid.uuid4()}.png"
+    try:
+        public_url = await async_upload_to_supabase(filename, file_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload reference image to Supabase: {str(e)}")
+
+    # 2. Base64 encode for Vision LLM
+    mimetype = file.content_type or "image/png"
+    b64 = base64.b64encode(file_bytes).decode('utf-8')
+    base64_image = f"data:{mimetype};base64,{b64}"
+
+    # 3. Request analysis from Vision LLM
+    system_prompt = "You are an expert visual layout analyzer."
+    prompt = """Analyze the layout of the reference image and describe its structure in a strict JSON format with the following keys:
+- 'background': { 'type': 'photographic' | 'solid' | 'gradient' | 'abstract', 'description': 'detailed description of the background style (e.g. vibrant blue mesh gradient, corporate white desk layout)' }
+- 'text_boxes': a list of objects, each containing:
+  - 'purpose': e.g., 'Main Headline', 'Call to Action', 'Subheading'
+  - 'x_pct': relative X position of the text box start (0 to 100)
+  - 'y_pct': relative Y position of the text box start (0 to 100)
+  - 'font_size_pct': relative font size (0 to 100) where 5 is medium, 8 is large, 3 is small
+  - 'color_hex': hex code for text color (e.g., '#FFFFFF')
+  - 'alignment': 'left' | 'center' | 'right'
+- 'logo_position': { 'x_pct': relative X, 'y_pct': relative Y, 'width_pct': relative width, 'height_pct': relative height } (or null if no logo)
+
+Important: Return ONLY a raw JSON string. Do not wrap it in markdown code blocks like ```json. Do not include any explanations.
+"""
+    try:
+        # Use gemini directly (we set model_name to gemini-2.0-flash by default if using gemini provider)
+        # We can pass images directly to generate_text
+        response_text = generate_text(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            model_name="gemini-2.0-flash",
+            provider_name="gemini",
+            api_key="",
+            temperature=0.2,
+            max_tokens=1000,
+            images=[base64_image]
+        )
+    except Exception as e:
+        # Fallback to OpenAI if Gemini fails or is not configured
+        try:
+            response_text = generate_text(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model_name="gpt-4o",
+                provider_name="openai",
+                api_key="",
+                temperature=0.2,
+                max_tokens=1000,
+                images=[base64_image]
+            )
+        except Exception as oe:
+            raise HTTPException(status_code=500, detail=f"LLM Vision analysis failed: {str(e)} / {str(oe)}")
+
+    if not response_text:
+        raise HTTPException(status_code=500, detail="Vision LLM returned empty response")
+
+    # Clean code blocks
+    raw_response = response_text.strip()
+    if raw_response.startswith("```"):
+        lines = raw_response.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines[-1].startswith("```"):
+            lines = lines[:-1]
+        raw_response = "\n".join(lines).strip()
+
+    try:
+        layers_json = json.loads(raw_response)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to parse JSON from Vision LLM: {str(e)}. Raw content: {response_text}"
+        )
+
+    # 4. Save template
+    template = models.ImageTemplate(
+        user_id=current_user.id,
+        name=name,
+        reference_image_url=public_url,
+        layers_json=layers_json
+    )
+    db.add(template)
+    db.commit()
+    db.refresh(template)
+
+    return template
+
+
+@router.post("/generate-layered")
+async def generate_layered_image(
+    req: GenerateLayeredRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    # 1. Fetch template
+    template = db.query(models.ImageTemplate).filter(
+        models.ImageTemplate.id == req.template_id,
+        models.ImageTemplate.user_id == current_user.id
+    ).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    # 2. Layer 1: Background Prompt & Image Generation
+    bg_style = template.layers_json.get("background", {}).get("description", "simple abstract background")
+    system_prompt = "You are an expert prompt engineer for AI image generators."
+    prompt_for_bg = f"Write a high-quality prompt for generating a clean background image based on the topic: '{req.topic}'. The background style should be: {bg_style}. IMPORTANT: This background image must contain absolutely no text, letters, logos, writing, watermarks, or signatures of any kind. It should only contain background textures, photographic elements, or abstract designs."
+    
+    bg_prompt = generate_text_for_user(
+        user_id=current_user.id,
+        task_category="image_prompt_generation",
+        prompt=prompt_for_bg,
+        system_prompt=system_prompt,
+        db=db,
+        temperature=0.7,
+        max_tokens=200,
+    )
+    if not bg_prompt:
+        bg_prompt = f"abstract background related to {req.topic}, style: {bg_style}"
+
+    # Explicitly enforce negative prompts or append structured instructions
+    bg_prompt = f"{bg_prompt}, empty background, no people writing, no text, copy-space, clean"
+
+    provider_instance, model_name, api_key = get_image_provider_for_user(current_user.id, db)
+    
+    try:
+        # Generate background image
+        def _generate():
+            return provider_instance.generate(
+                prompt=bg_prompt,
+                negative_prompt="text, letters, words, logo, writing, watermark, signature, symbols",
+                aspect_ratio="1:1",
+                model_name=model_name,
+                api_key=api_key
+            )
+        bg_bytes = await asyncio.to_thread(_generate())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate background image: {str(e)}")
+
+    # 3. Layer 2: Text Copy Generation
+    text_boxes = template.layers_json.get("text_boxes", [])
+    copy_map = {}
+    if text_boxes:
+        boxes_desc = "\n".join([f"- Purpose: {b.get('purpose', 'Headline')}" for b in text_boxes])
+        prompt_for_copy = f"""We are generating text copy for a social media post graphic on the topic: '{req.topic}'.
+Context/Post text: {req.post_text or ''}
+We need to fill the following text boxes in our template:
+{boxes_desc}
+
+For each text box, write a very short, catchy copy suitable for the purpose.
+Return a raw JSON object mapping each box's exact Purpose to the written text string. Do not wrap in markdown block, just return raw JSON."""
+        
+        copy_resp = generate_text_for_user(
+            user_id=current_user.id,
+            task_category="post_generation",
+            prompt=prompt_for_copy,
+            system_prompt="You are a social media copywriter. Respond ONLY with a raw JSON mapping.",
+            db=db,
+            temperature=0.6,
+            max_tokens=400,
+        )
+        if copy_resp:
+            raw_cr = copy_resp.strip()
+            if raw_cr.startswith("```"):
+                lines = raw_cr.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                raw_cr = "\n".join(lines).strip()
+            try:
+                copy_map = json.loads(raw_cr)
+            except Exception:
+                pass
+
+    # 4. Layer 3: Logo Asset
+    logo_img = None
+    logo_pos = template.layers_json.get("logo_position")
+    if logo_pos and (current_user.brand_logo_url or True):
+        # Try user's uploaded brand logo first
+        logo_url = current_user.brand_logo_url
+        if logo_url:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.get(logo_url)
+                    if resp.status_code == 200:
+                        logo_img = Image.open(io.BytesIO(resp.content))
+            except Exception as e:
+                print(f"Error fetching user logo URL: {e}")
+        
+        # Fallback to local logo.png if user logo fails or is empty
+        if not logo_img:
+            try:
+                logo_img = Image.open("logo.png")
+            except Exception as e:
+                print(f"Error loading fallback logo.png: {e}")
+
+    # 5. Compositor (Pillow Assembly)
+    try:
+        bg_image = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
+        W, H = bg_image.size
+        
+        # Overlay Logo if present and logo coordinates exist
+        if logo_img and logo_pos:
+            logo_img = logo_img.convert("RGBA")
+            target_w = int(W * (float(logo_pos.get("width_pct", 15)) / 100.0))
+            if target_w > 0:
+                aspect = logo_img.height / logo_img.width
+                target_h = int(target_w * aspect)
+                logo_resized = logo_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                
+                logo_x = int(W * (float(logo_pos.get("x_pct", 5)) / 100.0))
+                logo_y = int(H * (float(logo_pos.get("y_pct", 5)) / 100.0))
+                
+                # Create composition layer
+                logo_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                logo_layer.paste(logo_resized, (logo_x, logo_y))
+                bg_image = Image.alpha_composite(bg_image, logo_layer)
+
+        # Draw Text Boxes
+        draw = ImageDraw.Draw(bg_image)
+        for box in text_boxes:
+            purpose = box.get("purpose", "")
+            text_str = copy_map.get(purpose) or copy_map.get(purpose.lower()) or copy_map.get(purpose.replace(" ", ""))
+            if not text_str:
+                # Direct fallback text if LLM failed
+                text_str = req.topic if "headline" in purpose.lower() else "Learn More"
+
+            x_pct = float(box.get("x_pct", 50))
+            y_pct = float(box.get("y_pct", 50))
+            font_size_pct = float(box.get("font_size_pct", 5))
+            color_hex = box.get("color_hex", "#FFFFFF")
+            alignment = box.get("alignment", "center")
+
+            # Determine font size relative to image height
+            fs = max(12, int(H * (font_size_pct / 100.0)))
+            font = get_pillow_font(fs)
+
+            # Clean color format
+            if not color_hex.startswith("#"):
+                color_hex = f"#{color_hex}"
+
+            # Calculate text size for alignment adjustment
+            try:
+                bbox = draw.textbbox((0, 0), text_str, font=font)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+            except AttributeError:
+                tw, th = draw.textsize(text_str, font=font)
+
+            tx = int(W * (x_pct / 100.0))
+            ty = int(H * (y_pct / 100.0))
+
+            if alignment == "center":
+                tx -= int(tw / 2)
+            elif alignment == "right":
+                tx -= tw
+
+            # Draw text shadow / stroke for legibility
+            draw.text((tx + 1, ty + 1), text_str, font=font, fill="#000000")
+            draw.text((tx, ty), text_str, font=font, fill=color_hex)
+
+        # Convert back to RGB and export as bytes
+        final_image = bg_image.convert("RGB")
+        out_io = io.BytesIO()
+        final_image.save(out_io, format="PNG")
+        final_bytes = out_io.getvalue()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Pillow Compositor failed: {str(e)}")
+
+    # 6. Upload & Save
+    job_id = str(uuid.uuid4())
+    filename = f"{current_user.id}/template_{job_id}.png"
+    try:
+        public_url = await async_upload_to_supabase(filename, final_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload finished image: {str(e)}")
+
+    # Create Media Library Entry
+    media = models.MediaLibrary(
+        user_id=current_user.id,
+        image_url=public_url,
+        storage_path=filename,
+        generation_prompt=bg_prompt,
+        provider=provider_name if 'provider_name' in locals() else 'compositor',
+        model_name=model_name if 'model_name' in locals() else 'layered'
+    )
+    db.add(media)
+    db.commit()
+    db.refresh(media)
+
+    return {
+        "media_library_id": str(media.id),
+        "image_url": public_url,
+        "copy_map": copy_map,
+        "bg_prompt": bg_prompt
+    }
+

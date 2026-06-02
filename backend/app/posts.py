@@ -93,6 +93,18 @@ def _persona_post_prompt(
 
     instructions: list[str] = []
     instructions.append(f"Length preference: creativity level {settings.creativity_level}/10.")
+    
+    # Add post length instructions directly to user prompt (not system prompt) to ensure they're applied
+    # Extract length and vary_length settings from persona's prompt_config if available
+    if hasattr(settings, 'prompt_config') and settings.prompt_config:
+        length = settings.prompt_config.get("length")
+        vary_length = settings.prompt_config.get("vary_length", True)
+        if length and str(length).strip():
+            if vary_length:
+                instructions.append(f"Vary post length, rotating around {str(length).strip().lower()} posts.")
+            else:
+                instructions.append(f"Aim for {str(length).strip().lower()} length posts.")
+    
     if settings.hashtags_enabled:
         instructions.append(f"Include {max(1, min(settings.hashtag_count, 5))} relevant hashtags.")
     if settings.always_include_engagement_hook:
