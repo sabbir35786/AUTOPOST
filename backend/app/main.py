@@ -278,6 +278,43 @@ def init_db(request: Request):
         )
 
 
+@app.get("/api/internal/debug-prompt/{persona_id}")
+def debug_prompt(persona_id: int, request: Request, db: Session = Depends(get_db)):
+    try:
+        cron_header = request.headers.get("X-Cron-Secret")
+        auth_header = request.headers.get("Authorization")
+        expected_bearer = f"Bearer {CRON_SECRET}"
+        if cron_header != CRON_SECRET and auth_header != expected_bearer:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized",
+            )
+
+        persona = db.query(models.AIPersona).filter(models.AIPersona.id == persona_id).first()
+        if not persona:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Persona not found",
+            )
+
+        from app.posts import _persona_post_prompt
+        system_prompt, prompt = _persona_post_prompt(persona, db)
+
+        return {
+            "persona_id": persona.id,
+            "persona_name": persona.persona_name,
+            "system_prompt": system_prompt,
+            "prompt": prompt,
+        }
+    except HTTPException as exc:
+        raise exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+
+
 @app.post("/auth/register", response_model=schemas.UserRead, status_code=status.HTTP_201_CREATED)
 def register(user_data: schemas.UserCreate, db: Session = Depends(get_db)):
     email = user_data.email.strip().lower()
@@ -737,6 +774,105 @@ def _record_learning_signal(
     ))
 
 
+def assemble_prompt_string(question_answers: dict, custom_instructions: str | None) -> str:
+    parts = []
+
+    # 1. Audience
+    audience = question_answers.get("audience")
+    if audience and str(audience).strip():
+        parts.append(f"The target audience is {str(audience).strip()}.")
+
+    # 2. Goal
+    goal = question_answers.get("goal")
+    if goal and str(goal).strip():
+        parts.append(f"The main goal of the posts is to {str(goal).strip().lower()}.")
+
+    # 3. Brand Personality
+    brand_personality = question_answers.get("brand_personality")
+    if brand_personality:
+        if isinstance(brand_personality, list):
+            personality_list = [str(item).strip() for item in brand_personality if str(item).strip()]
+        elif isinstance(brand_personality, str):
+            personality_list = [item.strip() for item in brand_personality.split(",") if item.strip()]
+        else:
+            personality_list = []
+        if personality_list:
+            parts.append(f"Use a {', '.join(personality_list).lower()} brand personality.")
+
+    # 4. Topics to always write about
+    always_topics = question_answers.get("always_topics")
+    if always_topics:
+        if isinstance(always_topics, list):
+            topics_list = [str(item).strip() for item in always_topics if str(item).strip()]
+        elif isinstance(always_topics, str):
+            topics_list = [item.strip() for item in always_topics.split(",") if item.strip()]
+        else:
+            topics_list = []
+        if topics_list:
+            parts.append(f"Always write about: {', '.join(topics_list)}.")
+
+    # 5. Topics to never write about
+    never_topics = question_answers.get("never_topics")
+    if never_topics:
+        if isinstance(never_topics, list):
+            topics_list = [str(item).strip() for item in never_topics if str(item).strip()]
+        elif isinstance(never_topics, str):
+            topics_list = [item.strip() for item in never_topics.split(",") if item.strip()]
+        else:
+            topics_list = []
+        if topics_list:
+            parts.append(f"Never write about: {', '.join(topics_list)}.")
+
+    # 6. Every post should include
+    every_post_includes = question_answers.get("every_post_includes")
+    if every_post_includes:
+        if isinstance(every_post_includes, list):
+            includes_list = [str(item).strip() for item in every_post_includes if str(item).strip()]
+        elif isinstance(every_post_includes, str):
+            includes_list = [item.strip() for item in every_post_includes.split(",") if item.strip()]
+        else:
+            includes_list = []
+        if includes_list:
+            parts.append(f"Every post should include: {', '.join(includes_list)}.")
+
+    # 7. Things to never do
+    never_do = question_answers.get("never_do")
+    if never_do:
+        if isinstance(never_do, list):
+            never_list = [str(item).strip() for item in never_do if str(item).strip()]
+        elif isinstance(never_do, str):
+            never_list = [item.strip() for item in never_do.split(",") if item.strip()]
+        else:
+            never_list = []
+        if never_list:
+            parts.append(f"Posts must never: {', '.join(never_list).lower()}.")
+
+    # 8. Length / Vary length
+    length = question_answers.get("length")
+    vary_length = question_answers.get("vary_length", True)
+    if length and str(length).strip():
+        if vary_length:
+            parts.append(f"Vary post length, rotating around {str(length).strip().lower()} posts.")
+        else:
+            parts.append(f"Aim for {str(length).strip().lower()} length posts.")
+
+    # 9. Structure
+    structure = question_answers.get("structure")
+    if structure and str(structure).strip() and str(structure).strip() != "No fixed structure, let AI decide":
+        parts.append(f"Structure posts as: {str(structure).strip()}.")
+
+    # 10. Examples
+    examples = question_answers.get("examples")
+    if examples and str(examples).strip():
+        parts.append(f"Study these style examples and match their feel:\n{str(examples).strip()}")
+
+    # 11. Custom instructions
+    if custom_instructions and custom_instructions.strip():
+        parts.append(custom_instructions.strip())
+
+    return " ".join(parts)
+
+
 def _save_prompt_template_snapshot(db: Session, persona: models.AIPersona) -> None:
     config = persona.prompt_config or {}
     template_name = str(config.get("template") or persona.persona_name or "Custom")
@@ -751,7 +887,7 @@ def _save_prompt_template_snapshot(db: Session, persona: models.AIPersona) -> No
         db.add(target)
     target.template_name = template_name
     target.question_answers = config
-    target.assembled_prompt = persona.custom_instructions
+    target.assembled_prompt = assemble_prompt_string(config, persona.custom_instructions)
     target.raw_prompt = persona.custom_prompt
     target.creativity_level = persona.creativity_level
     examples = config.get("examples", "")
@@ -1083,6 +1219,7 @@ def apply_strategy_decision(
         persona.custom_instructions = payload.prompt
     
     strategy.applied_to_prompt = True
+    _save_prompt_template_snapshot(db, persona)
     db.commit()
     return {"success": True}
 

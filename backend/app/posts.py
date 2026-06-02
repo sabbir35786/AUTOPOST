@@ -35,30 +35,68 @@ def build_post_prompt(niche: str) -> str:
 
 def _persona_post_prompt(
     settings: models.AIPersona,
+    db: Session,
     recent_topics: list[str] | None = None,
     topic_hint: str | None = None,
     learning_hint: str | None = None,
 ) -> tuple[str, str]:
     """Build the post-generation prompt used by the user's AI persona."""
-    instructions: list[str] = []
-    if settings.custom_prompt and settings.custom_prompt.strip():
-        instructions.append(settings.custom_prompt.strip())
+    import logging
+
+    system_prompt_parts = [
+        "You are an expert social media writer. Create polished, platform-ready "
+        "Facebook posts that follow the user's saved persona and constraints exactly."
+    ]
+
+    # Include niche as context (Step 5)
+    if settings.niche:
+        system_prompt_parts.append(f"This page is about {settings.niche}. Every post must be relevant to this niche.")
+
+    # Convert tone tags into concrete instruction (Step 5)
+    tone_tags = [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()]
+    tone_str = ", ".join(tone_tags) or "clear, useful, friendly"
+    system_prompt_parts.append(
+        f"The tone of every post must be {tone_str}. Stay consistent with this tone across all posts. Do not drift toward a neutral or generic style."
+    )
+
+    # Load persona's linked prompt template (Step 3)
+    template = (
+        db.query(models.PromptTemplate)
+        .filter(models.PromptTemplate.persona_id == settings.id)
+        .order_by(models.PromptTemplate.created_at.desc())
+        .first()
+    )
+
+    if template and template.assembled_prompt and template.assembled_prompt.strip():
+        system_prompt_parts.append(template.assembled_prompt.strip())
     else:
-        tone_tags = [tag.strip() for tag in settings.tone_tags.split(",") if tag.strip()]
-        instructions.extend(
-            [
-                f"Page topic: {settings.niche}.",
-                f"Tone: {', '.join(tone_tags) or 'clear, useful, friendly'}.",
-                f"Language: {settings.language}.",
-                f"Length preference: creativity level {settings.creativity_level}/10.",
-            ]
-        )
+        logging.warning(f"No prompt template found for persona {settings.id}, using fallback.")
+        fallback_parts = []
+        if settings.niche:
+            fallback_parts.append(f"Page topic: {settings.niche}.")
+        if settings.tone_tags:
+            fallback_parts.append(f"Tone: {settings.tone_tags}.")
         if settings.custom_instructions and settings.custom_instructions.strip():
-            instructions.append(f"Extra instructions: {settings.custom_instructions.strip()}.")
-        if settings.hashtags_enabled:
-            instructions.append(f"Include {max(1, min(settings.hashtag_count, 5))} relevant hashtags.")
-        if settings.always_include_engagement_hook:
-            instructions.append("End with a natural question or call to action.")
+            fallback_parts.append(f"Extra instructions: {settings.custom_instructions.strip()}.")
+        if fallback_parts:
+            system_prompt_parts.append("\n".join(fallback_parts))
+
+    # Add language instructions at the very end of the system prompt (Step 4)
+    if settings.language and settings.language.strip():
+        system_prompt_parts.append(
+            f"You must write this post entirely in {settings.language.strip()}. "
+            f"The post content, hashtags, and any call to action must all be in {settings.language.strip()}. "
+            f"Do not use any other language."
+        )
+
+    system_prompt = "\n".join(system_prompt_parts)
+
+    instructions: list[str] = []
+    instructions.append(f"Length preference: creativity level {settings.creativity_level}/10.")
+    if settings.hashtags_enabled:
+        instructions.append(f"Include {max(1, min(settings.hashtag_count, 5))} relevant hashtags.")
+    if settings.always_include_engagement_hook:
+        instructions.append("End with a natural question or call to action.")
 
     if recent_topics:
         instructions.append(f"Do not repeat these recent topics: {', '.join(recent_topics)}.")
@@ -68,10 +106,6 @@ def _persona_post_prompt(
         instructions.append(learning_hint.strip())
     instructions.append("Return only the Facebook post text. No labels, no explanation.")
 
-    system_prompt = (
-        "You are an expert social media writer. Create polished, platform-ready "
-        "Facebook posts that follow the user's saved persona and constraints exactly."
-    )
     return system_prompt, "\n".join(instructions)
 
 
@@ -82,7 +116,7 @@ def generate_persona_post_with_user_model(
     topic_hint: str | None = None,
     learning_hint: str | None = None,
 ) -> str:
-    system_prompt, prompt = _persona_post_prompt(settings, recent_topics, topic_hint, learning_hint)
+    system_prompt, prompt = _persona_post_prompt(settings, db, recent_topics, topic_hint, learning_hint)
     content = generate_text_for_user(
         user_id=settings.user_id,
         task_category="post_generation",
