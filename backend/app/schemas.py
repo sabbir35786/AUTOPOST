@@ -200,6 +200,8 @@ class AIPersonaBase(BaseModel):
     image_fallback_policy: str = "text_only"
     template_image_generation_enabled: bool = False
     template_logo_url: str | None = None
+    template_layers_json: dict | None = None
+    template_reference_image_url: str | None = None
 
 
 class AIPersonaCreate(AIPersonaBase):
@@ -227,6 +229,8 @@ class AIPersonaRead(AIPersonaBase):
     image_fallback_policy: str = "text_only"
     template_image_generation_enabled: bool = False
     template_logo_url: str | None = None
+    template_layers_json: dict | None = None
+    template_reference_image_url: str | None = None
 
     model_config = {"from_attributes": True}
 

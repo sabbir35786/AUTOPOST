@@ -54,6 +54,10 @@ TEXT_LLM_TASK_CATEGORIES = [
 ]
 
 
+class ProviderConfigurationError(RuntimeError):
+    pass
+
+
 def platform_key_configured(provider_name: str) -> bool:
     provider = provider_name.strip().lower()
     if provider in ("mistral", "mistralai"):
@@ -65,6 +69,16 @@ def platform_key_configured(provider_name: str) -> bool:
     if provider in ("anthropic", "claude"):
         return bool(ANTHROPIC_API_KEY)
     return False
+
+
+def _get_first_configured_provider() -> tuple[str, str] | None:
+    for provider, models in AVAILABLE_LLM_MODELS.items():
+        if platform_key_configured(provider):
+            model_name = models[0]
+            if provider == "gemini":
+                model_name = _resolve_gemini_model(model_name)
+            return provider, model_name
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -443,12 +457,18 @@ def _resolve_user_llm_choice(user_id: int | None, task_category: str, db) -> tup
             model_name = candidate_model
             break
 
-    if not platform_key_configured(provider_name):
-        raise RuntimeError(
-            f"The server does not have an API key configured for {provider_name}. "
-            "Choose another model in Settings or ask the administrator to add keys."
-        )
-    return provider_name, model_name
+    if platform_key_configured(provider_name):
+        return provider_name, model_name
+
+    fallback = _get_first_configured_provider()
+    if fallback is not None:
+        fallback_provider, fallback_model = fallback
+        return fallback_provider, fallback_model
+
+    raise ProviderConfigurationError(
+        f"The server does not have an API key configured for {provider_name}. "
+        "Choose another model in Settings or ask the administrator to add keys."
+    )
 
 
 def generate_text_for_user(

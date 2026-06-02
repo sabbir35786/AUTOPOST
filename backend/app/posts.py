@@ -88,6 +88,7 @@ def _persona_post_prompt(
     recent_topics: list[str] | None = None,
     topic_hint: str | None = None,
     learning_hint: str | None = None,
+    prompt_template_override: str | None = None,
 ) -> tuple[str, str]:
     """Build the post-generation prompt used by the user's AI persona."""
     import logging
@@ -108,27 +109,32 @@ def _persona_post_prompt(
         f"The tone of every post must be {tone_str}. Stay consistent with this tone across all posts. Do not drift toward a neutral or generic style."
     )
 
-    # Load persona's linked prompt template (Step 3)
-    template = (
-        db.query(models.PromptTemplate)
-        .filter(models.PromptTemplate.persona_id == settings.id)
-        .order_by(models.PromptTemplate.created_at.desc())
-        .first()
-    )
-
-    if template and template.assembled_prompt and template.assembled_prompt.strip():
-        system_prompt_parts.append(template.assembled_prompt.strip())
+    # Load persona's linked prompt template (Step 3) or use override
+    if prompt_template_override and prompt_template_override.strip():
+        system_prompt_parts.append(prompt_template_override.strip())
     else:
-        logging.warning(f"No prompt template found for persona {settings.id}, using fallback.")
-        fallback_parts = []
-        if settings.niche:
-            fallback_parts.append(f"Page topic: {settings.niche}.")
-        if settings.tone_tags:
-            fallback_parts.append(f"Tone: {settings.tone_tags}.")
-        if settings.custom_instructions and settings.custom_instructions.strip():
-            fallback_parts.append(f"Extra instructions: {settings.custom_instructions.strip()}.")
-        if fallback_parts:
-            system_prompt_parts.append("\n".join(fallback_parts))
+        template = None
+        if settings.id is not None:
+            template = (
+                db.query(models.PromptTemplate)
+                .filter(models.PromptTemplate.persona_id == settings.id)
+                .order_by(models.PromptTemplate.created_at.desc())
+                .first()
+            )
+
+        if template and template.assembled_prompt and template.assembled_prompt.strip():
+            system_prompt_parts.append(template.assembled_prompt.strip())
+        else:
+            logging.warning(f"No prompt template found for persona {settings.id}, using fallback.")
+            fallback_parts = []
+            if settings.niche:
+                fallback_parts.append(f"Page topic: {settings.niche}.")
+            if settings.tone_tags:
+                fallback_parts.append(f"Tone: {settings.tone_tags}.")
+            if settings.custom_instructions and settings.custom_instructions.strip():
+                fallback_parts.append(f"Extra instructions: {settings.custom_instructions.strip()}.")
+            if fallback_parts:
+                system_prompt_parts.append("\n".join(fallback_parts))
 
     # Add language instructions at the very end of the system prompt (Step 4)
     if settings.language and settings.language.strip():
@@ -178,8 +184,16 @@ def generate_persona_post_with_user_model(
     recent_topics: list[str] | None = None,
     topic_hint: str | None = None,
     learning_hint: str | None = None,
+    prompt_template_override: str | None = None,
 ) -> str:
-    system_prompt, prompt = _persona_post_prompt(settings, db, recent_topics, topic_hint, learning_hint)
+    system_prompt, prompt = _persona_post_prompt(
+        settings,
+        db,
+        recent_topics=recent_topics,
+        topic_hint=topic_hint,
+        learning_hint=learning_hint,
+        prompt_template_override=prompt_template_override,
+    )
     content = generate_text_for_user(
         user_id=settings.user_id,
         task_category="post_generation",

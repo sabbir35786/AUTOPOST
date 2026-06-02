@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import asyncio
+import logging
 import secrets
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode, urlparse
@@ -60,6 +61,7 @@ from app.posts import (
     try_claim_user_posting,
     verify_page_connection_for_publish,
 )
+from app.providers.llm_providers import ProviderConfigurationError, generate_text_for_user
 from app.mistral_service import (
     analyze_style_with_mistral,
     classify_post_topic,
@@ -85,6 +87,7 @@ from app.qstash import schedule_scheduler_endpoint, _print_qstash_config_status
 
 pending_facebook_credentials: dict[int, dict] = {}
 last_scheduler_run_at: datetime | None = None
+logger = logging.getLogger(__name__)
 
 
 def _print_startup_config_status() -> None:
@@ -590,6 +593,14 @@ VALID_PRIORITIES = ["High", "Normal", "Low"]
 
 
 def _serialize_ai_persona(persona: models.AIPersona) -> dict:
+    image_settings = None
+    session = object_session(persona)
+    if session is not None:
+        image_settings = (
+            session.query(models.ImagePromptSettings)
+            .filter(models.ImagePromptSettings.persona_id == persona.id)
+            .first()
+        )
     return {
         "id": persona.id,
         "page_connection_id": persona.page_connection_id,
@@ -624,6 +635,8 @@ def _serialize_ai_persona(persona: models.AIPersona) -> dict:
         "image_fallback_policy": persona.image_fallback_policy,
         "template_image_generation_enabled": persona.template_image_generation_enabled,
         "template_logo_url": persona.template_logo_url,
+        "template_layers_json": image_settings.template_layers_json if image_settings else None,
+        "template_reference_image_url": image_settings.reference_image_url if image_settings else None,
     }
 
 
@@ -1058,6 +1071,37 @@ def _unassign_days_from_other_personas(
         persona.assigned_days = ",".join(remaining_days)
 
 
+def _upsert_persona_template_settings(
+    db: Session,
+    persona: models.AIPersona,
+    payload: schemas.AIPersonaBase,
+) -> None:
+    if not payload.template_image_generation_enabled:
+        return
+    if not payload.template_layers_json and not payload.template_reference_image_url and not payload.template_logo_url:
+        return
+
+    settings = (
+        db.query(models.ImagePromptSettings)
+        .filter(
+            models.ImagePromptSettings.persona_id == persona.id,
+            models.ImagePromptSettings.user_id == persona.user_id,
+        )
+        .first()
+    )
+    if settings is None:
+        settings = models.ImagePromptSettings(persona_id=persona.id, user_id=persona.user_id)
+        db.add(settings)
+
+    if payload.template_layers_json:
+        settings.template_layers_json = payload.template_layers_json
+        settings.template_analyzed_at = datetime.now(timezone.utc)
+    if payload.template_reference_image_url:
+        settings.reference_image_url = payload.template_reference_image_url
+    if payload.template_logo_url:
+        settings.template_logo_url = payload.template_logo_url
+
+
 def _get_ai_settings(db: Session, user_id: int, connection_id: int) -> models.AIPersona:
     _get_owned_page(db, user_id, connection_id)
     persona = (
@@ -1133,6 +1177,7 @@ def create_ai_persona(
     persona.template_image_generation_enabled = payload.template_image_generation_enabled
     persona.template_logo_url = payload.template_logo_url
     db.flush()
+    _upsert_persona_template_settings(db, persona, payload)
     _save_prompt_template_snapshot(db, persona)
     db.commit()
     db.refresh(persona)
@@ -1172,6 +1217,7 @@ def update_ai_persona(
     persona.image_fallback_policy = payload.image_fallback_policy
     persona.template_image_generation_enabled = payload.template_image_generation_enabled
     persona.template_logo_url = payload.template_logo_url
+    _upsert_persona_template_settings(db, persona, payload)
     persona.updated_at = datetime.now(timezone.utc)
     _save_prompt_template_snapshot(db, persona)
     db.commit()
@@ -1801,9 +1847,145 @@ def generate_ai_post(
             topic_hint=payload.topic_hint,
             learning_hint=learning_hint,
         )
+    except ProviderConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     return {"content": content}
+
+
+@app.post("/api/ai/prompt/test", response_model=schemas.AIGenerateResponse)
+def test_ai_prompt(
+    payload: dict,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid payload format.")
+
+        page_connection_id = payload.get("page_connection_id")
+        persona_payload = payload.get("ai_persona") or payload.get("persona")
+        prompt_text = (payload.get("prompt") or payload.get("custom_prompt") or "").strip()
+        topic_hint = payload.get("topic_hint")
+
+        # Extract prompt template override if provided
+        prompt_template_payload = payload.get("prompt_template") or payload.get("template")
+        prompt_template_override = None
+        if prompt_template_payload:
+            if isinstance(prompt_template_payload, dict):
+                prompt_template_override = prompt_template_payload.get("assembled_prompt")
+            elif isinstance(prompt_template_payload, str):
+                prompt_template_override = prompt_template_payload
+
+        if page_connection_id:
+            try:
+                conn_id = int(page_connection_id)
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid page_connection_id format.")
+            
+            settings = _get_ai_settings(db, current_user.id, conn_id)
+            content = generate_persona_post_with_user_model(
+                db,
+                settings,
+                topic_hint=topic_hint,
+                prompt_template_override=prompt_template_override,
+            )
+            return {"content": content}
+
+        if persona_payload:
+            if not isinstance(persona_payload, dict):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ai_persona payload format.")
+
+            # Safely parse page connection id
+            try:
+                persona_conn_id = int(persona_payload.get("page_connection_id") or 0)
+            except (ValueError, TypeError):
+                persona_conn_id = 0
+
+            # Safely parse tone tags
+            tags = persona_payload.get("tone_tags")
+            if not isinstance(tags, list):
+                tags = [tags] if isinstance(tags, str) else ["Professional"]
+            tone_tags_str = ",".join(str(t) for t in tags if t) or "Professional"
+
+            # Safely parse creativity level
+            creativity = persona_payload.get("creativity_level")
+            try:
+                creativity_val = int(creativity) if creativity is not None and str(creativity).strip() else 7
+            except (ValueError, TypeError):
+                creativity_val = 7
+
+            # Safely parse hashtag count
+            ht_count = persona_payload.get("hashtag_count")
+            try:
+                ht_val = int(ht_count) if ht_count is not None and str(ht_count).strip() else 3
+            except (ValueError, TypeError):
+                ht_val = 3
+
+            persona = models.AIPersona(
+                user_id=current_user.id,
+                page_connection_id=persona_conn_id,
+                persona_name=(persona_payload.get("persona_name") or "Prompt Test").strip(),
+                niche=(persona_payload.get("niche") or "").strip(),
+                tone_tags=tone_tags_str,
+                custom_instructions=persona_payload.get("custom_instructions"),
+                prompt_config=persona_payload.get("prompt_config"),
+                custom_prompt=persona_payload.get("custom_prompt") or prompt_text,
+                creativity_level=max(1, min(creativity_val, 10)),
+                language=persona_payload.get("language") or "English",
+                hashtags_enabled=bool(persona_payload.get("hashtags_enabled", False)),
+                hashtag_count=max(1, min(ht_val, 5)),
+                always_include_engagement_hook=bool(persona_payload.get("always_include_engagement_hook", False)),
+                assigned_days="",
+                posting_time_slots=["09:00"],
+                priority_level="Normal",
+            )
+            if not persona.niche:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Prompt test requires a niche or page topic.")
+            content = generate_persona_post_with_user_model(
+                db, 
+                persona, 
+                topic_hint=topic_hint,
+                prompt_template_override=prompt_template_override,
+            )
+            return {"content": content}
+
+        if prompt_text:
+            content = generate_text_for_user(
+                user_id=current_user.id,
+                task_category="post_generation",
+                prompt="Return only the Facebook post text.\n\n" + prompt_text,
+                system_prompt="You are an expert social media writer.",
+                db=db,
+                temperature=0.7,
+                max_tokens=360,
+            )
+            if not content or not content.strip():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Prompt test returned no content.")
+            return {"content": content.strip()}
+
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Prompt test requires a page, persona, or prompt payload.")
+    except ProviderConfigurationError as exc:
+        logger.exception(exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing API Key for the selected provider. Please verify your settings.",
+        ) from exc
+    except RuntimeError as exc:
+        logger.exception(exc)
+        err_msg = str(exc).lower()
+        if "api key" in err_msg or "not configured" in err_msg or "invalid key" in err_msg or "credentials" in err_msg:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing API Key for the selected provider. Please verify your settings.",
+            ) from exc
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Prompt test failed: {str(exc)}") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(exc)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Prompt test failed. Check server logs for details.") from exc
 
 
 @app.post("/api/ai/generate-and-publish", response_model=schemas.PostPublishResponse)
@@ -1903,6 +2085,8 @@ async def generate_and_publish_ai_post(
                     # text_only falls through and publishes the caption alone.
         success = await publish_post_to_facebook(db, post_log, connection)
         return {"success": success, "id": post_log.id, "status": post_log.status, "error_message": post_log.error_message}
+    except ProviderConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 

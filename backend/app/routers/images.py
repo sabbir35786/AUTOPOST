@@ -486,71 +486,103 @@ def get_prompt_settings(
 
 @router.post("/prompt/analyze-reference")
 async def analyze_reference(
-    persona_id: int = Form(...),
-    files: list[UploadFile] = File(...),
+    reference_image: UploadFile | None = File(None),
+    files: list[UploadFile] | None = File(None),
+    logo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    if len(files) > 3:
-        raise HTTPException(status_code=400, detail="Maximum 3 images allowed.")
-        
-    all_descriptors = []
-    system_prompt = "You are an expert visual analyst."
-    user_prompt = "Analyze this image and describe its visual style in specific technical terms for an image generation AI prompt. Include: lighting style, color palette, composition, texture, mood, technique. Return only a comma-separated list of descriptive style terms. Maximum 20 terms. No explanation."
-    
-    # Check if Gemini/OpenAI vision models are available directly.
-    # To keep it provider agnostic but robust, we'll implement a custom vision parser or use litellm style
-    # if our router doesn't support images yet. Let's build a quick direct call for gemini-1.5-pro or gpt-4o.
-    # We will use our generate_text_for_user with a special image kwargs.
-    
-    # Wait, llm_providers doesn't support images in the prompt yet. 
-    # I will modify llm_providers.py to optionally accept base64 images shortly.
-    # Let's assume generate_text_for_user will be updated to accept `images=...`
-    
-    base64_images = []
-    for file in files:
-        contents = await file.read()
-        b64 = base64.b64encode(contents).decode('utf-8')
-        mimetype = file.content_type or "image/jpeg"
-        base64_images.append(f"data:{mimetype};base64,{b64}")
+    selected_file = reference_image or (files[0] if files else None)
+    if selected_file is None:
+        raise HTTPException(status_code=400, detail="Reference image is required.")
+
+    ref_bytes = await selected_file.read()
+    if not ref_bytes:
+        raise HTTPException(status_code=400, detail="Reference image is empty.")
+
+    ref_public_url = None
+    try:
+        ref_filename = f"templates/ref_{uuid.uuid4()}.png"
+        ref_public_url = await async_upload_to_supabase(ref_filename, ref_bytes)
+    except Exception:
+        ref_public_url = None
+
+    logo_public_url = None
+    if logo:
+        logo_bytes = await logo.read()
+        if logo_bytes:
+            try:
+                logo_filename = f"templates/logo_{uuid.uuid4()}.png"
+                logo_public_url = await async_upload_to_supabase(logo_filename, logo_bytes)
+            except Exception:
+                logo_public_url = None
+
+    mimetype = selected_file.content_type or "image/png"
+    base64_image = f"data:{mimetype};base64,{base64.b64encode(ref_bytes).decode('utf-8')}"
+    system_prompt = "You are an expert visual layout analyzer."
+    prompt = """Analyze the layout of the reference image and describe its reusable template structure in strict JSON.
+Return these keys:
+- "background": { "type": "photographic" | "solid" | "gradient" | "abstract", "description": "detailed reusable background style", "style_tags": ["short style tags"] }
+- "text_boxes": [{ "purpose": "Main Headline", "x_pct": 0-100, "y_pct": 0-100, "font_size_pct": 0-100, "color_hex": "#FFFFFF", "alignment": "left" | "center" | "right" }]
+- "logo_position": { "x_pct": 0-100, "y_pct": 0-100, "width_pct": 0-100, "height_pct": 0-100 } or null
+
+Return ONLY raw JSON. Do not include markdown or explanations."""
 
     try:
-        from app.providers.llm_providers import generate_text_for_user
-        response_text = generate_text_for_user(
-            user_id=current_user.id,
-            task_category="style_analysis",
-            prompt=user_prompt,
-            system_prompt=system_prompt,
-            images=base64_images,
-            db=db,
-            temperature=0.3,
-            max_tokens=100,
-        )
-    except TypeError:
-        # Fallback if I haven't updated llm_providers yet or if it doesn't support it
-        raise HTTPException(status_code=501, detail="Vision LLM not supported yet. Please update llm_providers.py")
-        
-    if response_text:
-        descriptors = [d.strip() for d in response_text.split(',') if d.strip()]
-        all_descriptors.extend(descriptors)
+        try:
+            response_text = generate_text(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model_name="gemini-2.0-flash",
+                provider_name="gemini",
+                api_key="",
+                temperature=0.2,
+                max_tokens=1000,
+                images=[base64_image],
+            )
+        except Exception as gemini_error:
+            try:
+                response_text = generate_text(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    model_name="gpt-4o",
+                    provider_name="openai",
+                    api_key="",
+                    temperature=0.2,
+                    max_tokens=1000,
+                    images=[base64_image],
+                )
+            except Exception as openai_error:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Missing API Key for the selected provider. Please verify your settings. ({gemini_error}; {openai_error})",
+                )
 
-    # Deduplicate and limit
-    unique_descriptors = list(dict.fromkeys(all_descriptors))
-    final_descriptor_string = ", ".join(unique_descriptors)
-    
-    settings = db.query(models.ImagePromptSettings).filter(
-        models.ImagePromptSettings.persona_id == persona_id,
-        models.ImagePromptSettings.user_id == current_user.id
-    ).first()
-    
-    if not settings:
-        settings = models.ImagePromptSettings(persona_id=persona_id, user_id=current_user.id)
-        db.add(settings)
-        
-    settings.reference_image_descriptors = final_descriptor_string
-    db.commit()
+        if not response_text:
+            raise HTTPException(status_code=500, detail="Vision LLM returned empty response")
 
-    return {"descriptors": final_descriptor_string}
+        raw_response = response_text.strip()
+        if raw_response.startswith("```"):
+            lines = raw_response.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            raw_response = "\n".join(lines).strip()
+
+        layers_json = json.loads(raw_response)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to analyze reference image: {str(e)}")
+
+    return {
+        "success": True,
+        "reference_image_url": ref_public_url,
+        "logo_url": logo_public_url,
+        "layers_json": layers_json,
+        "analyzed_at": datetime.now(timezone.utc),
+    }
 
 @router.post("/prompt/generate-from-text")
 def generate_from_text(
@@ -906,21 +938,22 @@ async def generate_template_layered_image(
 
     layers_json = settings.template_layers_json
 
-    # 1. Generate background prompt using LLM
-    bg_style = layers_json.get("background", {}).get("description", "simple abstract background")
-    system_prompt_bg = "You are an expert prompt engineer for AI image generators."
-    prompt_for_bg = f"Write a high-quality prompt for generating a clean background image based on the topic: '{topic_hint or post_text}'. The background style should be: {bg_style}. IMPORTANT: This background image must contain absolutely no text, letters, logos, writing, watermarks, or signatures of any kind. It should only contain background textures, photographic elements, or abstract designs."
+    # 1. Prompt 1: The Background Asset Prompt Creator
+    style_tags = layers_json.get("background", {}).get("style_tags", [])
+    style_tags_str = ", ".join(style_tags) if style_tags else "abstract, modern design"
+    system_prompt_bg = f"Based on this social media post content: '{post_text}', write a highly descriptive, artistic prompt for an image generator like Fal.ai FLUX to build a background asset. The image must match the style guidelines: {style_tags_str} from the template. CRITICAL: The prompt must describe a clean background scene or design, and must strictly contain no written letters, text, or typography."
 
     bg_prompt = generate_text_for_user(
         user_id=user_id,
         task_category="image_prompt_generation",
-        prompt=prompt_for_bg,
+        prompt=post_text,
         system_prompt=system_prompt_bg,
         db=db,
         temperature=0.7,
         max_tokens=200,
     )
     if not bg_prompt:
+        bg_style = layers_json.get("background", {}).get("description", "simple abstract background")
         bg_prompt = f"abstract background related to {topic_hint or post_text}, style: {bg_style}"
 
     # Explicitly enforce negative prompts
@@ -942,10 +975,26 @@ async def generate_template_layered_image(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate background image: {str(e)}")
 
-    # 3. Generate overlay text copy
+    # 3. Prompt 2: The Text Overlay Creator
+    system_prompt_overlay = f"Based on this social media post content: '{post_text}', extract or write a single short headline, punchy hook, or news-style title suitable to be written directly across an image asset. Keep it under 60 characters and make it relevant to the post topic."
+    overlay_text = generate_text_for_user(
+        user_id=user_id,
+        task_category="post_generation",
+        prompt=post_text,
+        system_prompt=system_prompt_overlay,
+        db=db,
+        temperature=0.6,
+        max_tokens=100,
+    )
+    if overlay_text:
+        overlay_text = overlay_text.strip().replace('"', '').replace("'", "")
+    else:
+        overlay_text = topic_hint or "Learn More"
+
+    # Generate copy for any secondary/other text boxes using LLM if template has them
     text_boxes = layers_json.get("text_boxes", [])
     copy_map = {}
-    if text_boxes:
+    if len(text_boxes) > 1:
         boxes_desc = "\n".join([f"- Purpose: {b.get('purpose', 'Headline')}" for b in text_boxes])
         prompt_for_copy = f"""We are generating text copy for a social media post graphic on the topic: '{topic_hint or post_text}'.
 Context/Post text: {post_text}
@@ -1029,9 +1078,14 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
         draw = ImageDraw.Draw(bg_image)
         for box in text_boxes:
             purpose = box.get("purpose", "")
-            text_str = copy_map.get(purpose) or copy_map.get(purpose.lower()) or copy_map.get(purpose.replace(" ", ""))
-            if not text_str:
-                text_str = topic_hint if "headline" in purpose.lower() else "Learn More"
+            
+            # Map Prompt 2's overlay_text to the main headline/title box, or the only text box.
+            if "headline" in purpose.lower() or "title" in purpose.lower() or "hook" in purpose.lower() or len(text_boxes) == 1 or purpose == "Main Headline":
+                text_str = overlay_text
+            else:
+                text_str = copy_map.get(purpose) or copy_map.get(purpose.lower()) or copy_map.get(purpose.replace(" ", ""))
+                if not text_str:
+                    text_str = "Learn More"
 
             x_pct = float(box.get("x_pct", 50))
             y_pct = float(box.get("y_pct", 50))
