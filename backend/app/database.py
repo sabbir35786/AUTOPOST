@@ -47,6 +47,7 @@ def create_database_tables() -> None:
         _ensure_facebook_credential_columns()
         _ensure_facebook_connection_flow()
         _ensure_product_blueprint_columns()
+        _ensure_user_settings_table()
         _migrate_ai_page_settings_to_personas()
     except OperationalError as exc:
         message = str(exc.orig).lower() if getattr(exc, "orig", None) else str(exc).lower()
@@ -245,6 +246,51 @@ def _ensure_product_blueprint_columns() -> None:
             "page_name": "varchar",
             "is_active": "boolean default true not null",
             "last_checked_at": "timestamp",
+        },
+    )
+
+
+def _ensure_user_settings_table() -> None:
+    inspector = inspect(engine)
+    if not inspector.has_table("user_settings"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE user_settings (
+                        user_id INTEGER PRIMARY KEY,
+                        post_generation_provider VARCHAR DEFAULT 'openai' NOT NULL,
+                        post_generation_model VARCHAR DEFAULT 'gpt-4o' NOT NULL,
+                        image_generation_provider VARCHAR DEFAULT 'gemini' NOT NULL,
+                        image_generation_model VARCHAR DEFAULT 'imagen-3.0-generate-001' NOT NULL
+                    )
+                    """
+                )
+            )
+            # Best-effort FK (SQLite allows it, Postgres requires users table already)
+            try:
+                connection.execute(
+                    text(
+                        """
+                        ALTER TABLE user_settings
+                        ADD CONSTRAINT user_settings_user_id_fkey
+                        FOREIGN KEY (user_id)
+                        REFERENCES users(id)
+                        ON DELETE CASCADE
+                        """
+                    )
+                )
+            except Exception:
+                pass
+        return
+
+    _add_missing_columns(
+        "user_settings",
+        {
+            "post_generation_provider": "varchar default 'openai' not null",
+            "post_generation_model": "varchar default 'gpt-4o' not null",
+            "image_generation_provider": "varchar default 'gemini' not null",
+            "image_generation_model": "varchar default 'imagen-3.0-generate-001' not null",
         },
     )
 

@@ -70,6 +70,7 @@ from app.mistral_service import (
     generate_ai_recommendations,
 )
 from app.routers import images, models as models_router
+from app.routers.settings_models import router as settings_models_router
 from app.routers.persona_image_templates import router as persona_image_templates_router
 from app.routers.brand_automation import router as brand_automation_router
 from app.mistral_service import (
@@ -190,6 +191,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Auto Poster API", lifespan=lifespan)
 app.include_router(images.router)
 app.include_router(models_router.router)
+app.include_router(settings_models_router)
 app.include_router(persona_image_templates_router)
 app.include_router(brand_automation_router)
 

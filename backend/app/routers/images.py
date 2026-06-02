@@ -18,8 +18,9 @@ from app import models
 from app.database import get_db
 from app.auth import get_current_user
 from app.config import SUPABASE_URL, SUPABASE_SERVICE_KEY
-from app.providers.image_providers import get_image_provider_for_user
+from app.providers.image_providers import MissingProviderKeyError, get_image_provider_for_user
 from app.providers.llm_providers import generate_text_for_user, generate_text
+from app.providers.user_model_settings import MissingProviderKeyError as MissingPostKeyError, generate_post_text_for_user
 
 
 router = APIRouter(prefix="/api/images", tags=["images"])
@@ -184,6 +185,11 @@ async def run_image_generation_job(job_id: str, db: Session):
             job.status = "timeout"
             job.generation_seconds = int(time.time() - start_time)
             db.commit()
+        except MissingProviderKeyError as e:
+            job.status = "failed"
+            job.error_message = str(e)
+            job.generation_seconds = int(time.time() - start_time)
+            db.commit()
         except Exception as e:
             job.status = "failed"
             job.error_message = str(e)
@@ -220,7 +226,10 @@ async def start_generation(
     else:
         raise HTTPException(status_code=400, detail="No prompt provided.")
 
-    provider_instance, model_name, _ = get_image_provider_for_user(current_user.id, db)
+    try:
+        provider_instance, model_name, _ = get_image_provider_for_user(current_user.id, db)
+    except MissingProviderKeyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     provider_name = provider_instance.__class__.__name__.replace('Provider', '').lower()
 
     job = models.ImageGenerationJob(
@@ -1000,15 +1009,28 @@ async def generate_template_layered_image(
 
     # 3. Prompt 2: The Text Overlay Creator
     system_prompt_overlay = f"Based on this social media post content: '{post_text}', extract or write a single short headline, punchy hook, or news-style title suitable to be written directly across an image asset. Keep it under 60 characters and make it relevant to the post topic."
-    overlay_text = generate_text_for_user(
-        user_id=user_id,
-        task_category="post_generation",
-        prompt=post_text,
-        system_prompt=system_prompt_overlay,
-        db=db,
-        temperature=0.6,
-        max_tokens=100,
-    )
+    try:
+        overlay_text = generate_post_text_for_user(
+            user_id=user_id,
+            prompt=post_text,
+            system_prompt=system_prompt_overlay,
+            db=db,
+            temperature=0.6,
+            max_tokens=100,
+        )
+    except MissingPostKeyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if overlay_text is None:
+        overlay_text = generate_text_for_user(
+            user_id=user_id,
+            task_category="post_generation",
+            prompt=post_text,
+            system_prompt=system_prompt_overlay,
+            db=db,
+            temperature=0.6,
+            max_tokens=100,
+        )
     if overlay_text:
         overlay_text = overlay_text.strip().replace('"', '').replace("'", "")
     else:
@@ -1027,15 +1049,28 @@ We need to fill the following text boxes in our template:
 For each text box, write a very short, catchy copy suitable for the purpose.
 Return a raw JSON object mapping each box's exact Purpose to the written text string. Do not wrap in markdown block, just return raw JSON."""
 
-        copy_resp = generate_text_for_user(
-            user_id=user_id,
-            task_category="post_generation",
-            prompt=prompt_for_copy,
-            system_prompt="You are a social media copywriter. Respond ONLY with a raw JSON mapping.",
-            db=db,
-            temperature=0.6,
-            max_tokens=400,
-        )
+        try:
+            copy_resp = generate_post_text_for_user(
+                user_id=user_id,
+                prompt=prompt_for_copy,
+                system_prompt="You are a social media copywriter. Respond ONLY with a raw JSON mapping.",
+                db=db,
+                temperature=0.6,
+                max_tokens=400,
+            )
+        except MissingPostKeyError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        if copy_resp is None:
+            copy_resp = generate_text_for_user(
+                user_id=user_id,
+                task_category="post_generation",
+                prompt=prompt_for_copy,
+                system_prompt="You are a social media copywriter. Respond ONLY with a raw JSON mapping.",
+                db=db,
+                temperature=0.6,
+                max_tokens=400,
+            )
         if copy_resp:
             raw_cr = copy_resp.strip()
             if raw_cr.startswith("```"):
@@ -1393,15 +1428,28 @@ We need to fill the following text boxes in our template:
 For each text box, write a very short, catchy copy suitable for the purpose.
 Return a raw JSON object mapping each box's exact Purpose to the written text string. Do not wrap in markdown block, just return raw JSON."""
         
-        copy_resp = generate_text_for_user(
-            user_id=current_user.id,
-            task_category="post_generation",
-            prompt=prompt_for_copy,
-            system_prompt="You are a social media copywriter. Respond ONLY with a raw JSON mapping.",
-            db=db,
-            temperature=0.6,
-            max_tokens=400,
-        )
+        try:
+            copy_resp = generate_post_text_for_user(
+                user_id=current_user.id,
+                prompt=prompt_for_copy,
+                system_prompt="You are a social media copywriter. Respond ONLY with a raw JSON mapping.",
+                db=db,
+                temperature=0.6,
+                max_tokens=400,
+            )
+        except MissingPostKeyError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        if copy_resp is None:
+            copy_resp = generate_text_for_user(
+                user_id=current_user.id,
+                task_category="post_generation",
+                prompt=prompt_for_copy,
+                system_prompt="You are a social media copywriter. Respond ONLY with a raw JSON mapping.",
+                db=db,
+                temperature=0.6,
+                max_tokens=400,
+            )
         if copy_resp:
             raw_cr = copy_resp.strip()
             if raw_cr.startswith("```"):

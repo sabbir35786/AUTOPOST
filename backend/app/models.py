@@ -375,6 +375,21 @@ class ModelSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
 
+class UserSettings(Base):
+    __tablename__ = "user_settings"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+        nullable=False,
+    )
+    post_generation_provider: Mapped[str] = mapped_column(String, default="openai", nullable=False)
+    post_generation_model: Mapped[str] = mapped_column(String, default="gpt-4o", nullable=False)
+    image_generation_provider: Mapped[str] = mapped_column(String, default="gemini", nullable=False)
+    image_generation_model: Mapped[str] = mapped_column(String, default="imagen-3.0-generate-001", nullable=False)
+
+
 class ImageGenerationJob(Base):
     __tablename__ = "image_generation_jobs"
 

@@ -14,6 +14,12 @@ import httpx
 from app.config import FAL_API_KEY
 
 
+class MissingProviderKeyError(RuntimeError):
+    def __init__(self, provider: str):
+        super().__init__(f"API key for {provider} is not configured. Please add it in Settings.")
+        self.provider = provider
+
+
 # ---------------------------------------------------------------------------
 # Aspect ratio helpers
 # ---------------------------------------------------------------------------
@@ -261,5 +267,57 @@ def get_image_provider_for_user(user_id: int, db) -> tuple:
     """
     Returns (provider_instance, model_name, api_key) using platform image keys.
     """
-    _ = user_id, db
-    return FalProvider(), "FLUX.1-schnell", FAL_API_KEY
+    # Default to existing behavior unless user_settings row exists.
+    try:
+        from app import models
+
+        row = db.get(models.UserSettings, user_id) if db is not None else None
+    except Exception:
+        row = None
+
+    if not row:
+        return FalProvider(), "FLUX.1-schnell", FAL_API_KEY
+
+    provider = (row.image_generation_provider or "").strip().lower()
+    model_name = (row.image_generation_model or "").strip()
+
+    if provider not in _PROVIDER_MAP:
+        return FalProvider(), "FLUX.1-schnell", FAL_API_KEY
+
+    # Fail fast with the required UX message when a selected provider key is missing.
+    # (Fal isn't part of the new global selection list.)
+    if provider == "gemini":
+        from app.config import GEMINI_API_KEY
+        if not (GEMINI_API_KEY or "").strip():
+            raise MissingProviderKeyError("gemini")
+    elif provider == "openai":
+        from app.config import OPENAI_API_KEY
+        if not (OPENAI_API_KEY or "").strip():
+            raise MissingProviderKeyError("openai")
+    elif provider == "stability":
+        from app.config import STABILITY_API_KEY
+        if not (STABILITY_API_KEY or "").strip():
+            raise MissingProviderKeyError("stability")
+
+    provider_cls = _PROVIDER_MAP[provider]
+
+    # Normalize model names to what each provider class expects.
+    if provider_cls is GeminiProvider:
+        # GeminiProvider currently supports imagen-3.0-generate-002; accept requested
+        # ids but fallback to provider default if unknown.
+        if model_name not in GeminiProvider.AVAILABLE_MODELS:
+            model_name = GeminiProvider.AVAILABLE_MODELS[0]
+    elif provider_cls is OpenAIProvider:
+        if model_name not in OpenAIProvider.AVAILABLE_MODELS:
+            model_name = OpenAIProvider.AVAILABLE_MODELS[0]
+    elif provider_cls is StabilityProvider:
+        # Map requested canonical names to SDK engine ids when needed.
+        stability_map = {
+            "stable-diffusion-xl": "stable-diffusion-xl-1024-v1-0",
+            "stable-diffusion-3": "sd3-medium",
+        }
+        model_name = stability_map.get(model_name, model_name)
+        if model_name not in StabilityProvider.AVAILABLE_MODELS:
+            model_name = StabilityProvider.AVAILABLE_MODELS[0]
+
+    return provider_cls(), model_name, ""

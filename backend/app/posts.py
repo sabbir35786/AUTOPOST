@@ -19,6 +19,7 @@ from app.crypto import decrypt_token
 from app.database import SessionLocal
 from app.mistral_service import generate_ai_facebook_post, generate_ai_facebook_post_from_prompt, check_post_quality, extract_post_topic
 from app.providers.llm_providers import generate_text_for_user
+from app.providers.user_model_settings import MissingProviderKeyError as MissingUserKeyError, generate_post_text_for_user
 from app.learning.service import build_learning_prompt_hint, build_strategy_prompt_hint, should_persona_post_now, user_has_learning_access
 
 
@@ -142,15 +143,29 @@ def generate_persona_post_with_user_model(
         learning_hint=learning_hint,
         prompt_template_override=prompt_template_override,
     )
-    content = generate_text_for_user(
-        user_id=settings.user_id,
-        task_category="post_generation",
-        prompt=prompt,
-        system_prompt=system_prompt,
-        temperature=max(0.1, min(settings.creativity_level / 10, 1.0)),
-        max_tokens=360,
-        db=db,
-    )
+    temperature = max(0.1, min(settings.creativity_level / 10, 1.0))
+    try:
+        content = generate_post_text_for_user(
+            user_id=settings.user_id,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=360,
+            db=db,
+        )
+    except MissingUserKeyError as e:
+        raise RuntimeError(str(e)) from e
+
+    if content is None:
+        content = generate_text_for_user(
+            user_id=settings.user_id,
+            task_category="post_generation",
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=360,
+            db=db,
+        )
     if not content or not content.strip():
         raise RuntimeError(
             "Post generation returned empty content. Check your AI model in Settings."
@@ -181,15 +196,29 @@ def score_post_quality_with_user_model(db: Session, user_id: int, content: str) 
 
 def generate_post_content(niche: str, db: Session | None = None, user_id: int | None = None) -> str:
     if db is not None and user_id is not None:
-        content = generate_text_for_user(
-            user_id=user_id,
-            task_category="post_generation",
-            prompt=build_post_prompt(niche),
-            system_prompt="You write concise, friendly social media posts.",
-            temperature=0.8,
-            max_tokens=220,
-            db=db,
-        )
+        system_prompt = "You write concise, friendly social media posts."
+        try:
+            content = generate_post_text_for_user(
+                user_id=user_id,
+                prompt=build_post_prompt(niche),
+                system_prompt=system_prompt,
+                temperature=0.8,
+                max_tokens=220,
+                db=db,
+            )
+        except MissingUserKeyError as e:
+            raise RuntimeError(str(e)) from e
+
+        if content is None:
+            content = generate_text_for_user(
+                user_id=user_id,
+                task_category="post_generation",
+                prompt=build_post_prompt(niche),
+                system_prompt=system_prompt,
+                temperature=0.8,
+                max_tokens=220,
+                db=db,
+            )
         if not content or not content.strip():
             raise RuntimeError("The selected AI model returned empty content.")
         return content.strip()
