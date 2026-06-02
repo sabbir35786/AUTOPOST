@@ -730,6 +730,523 @@ Important: Return ONLY a raw JSON string. Do not wrap it in markdown code blocks
     return template
 
 
+@router.post("/analyze-template-reference")
+async def analyze_template_reference(
+    persona_id: int = Form(...),
+    reference_image: UploadFile = File(...),
+    logo: UploadFile = File(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Analyze a reference image for template-based image generation using Vision LLM."""
+    # Verify persona belongs to user
+    persona = db.query(models.AIPersona).filter(
+        models.AIPersona.id == persona_id,
+        models.AIPersona.user_id == current_user.id
+    ).first()
+    if not persona:
+        raise HTTPException(status_code=404, detail="Persona not found")
+
+    # 1. Upload reference image to Supabase
+    ref_bytes = await reference_image.read()
+    ref_filename = f"templates/ref_{uuid.uuid4()}.png"
+    try:
+        ref_public_url = await async_upload_to_supabase(ref_filename, ref_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload reference image: {str(e)}")
+
+    # 2. Upload logo if provided
+    logo_public_url = None
+    if logo:
+        logo_bytes = await logo.read()
+        logo_filename = f"templates/logo_{uuid.uuid4()}.png"
+        try:
+            logo_public_url = await async_upload_to_supabase(logo_filename, logo_bytes)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to upload logo: {str(e)}")
+
+    # 3. Base64 encode reference image for Vision LLM
+    mimetype = reference_image.content_type or "image/png"
+    b64 = base64.b64encode(ref_bytes).decode('utf-8')
+    base64_image = f"data:{mimetype};base64,{b64}"
+
+    # 4. Request analysis from Vision LLM
+    system_prompt = "You are an expert visual layout analyzer."
+    prompt = """Analyze the layout of the reference image and describe its structure in a strict JSON format with the following keys:
+- 'background': { 'type': 'photographic' | 'solid' | 'gradient' | 'abstract', 'description': 'detailed description of the background style (e.g. vibrant blue mesh gradient, corporate white desk layout)' }
+- 'text_boxes': a list of objects, each containing:
+  - 'purpose': e.g., 'Main Headline', 'Call to Action', 'Subheading'
+  - 'x_pct': relative X position of the text box start (0 to 100)
+  - 'y_pct': relative Y position of the text box start (0 to 100)
+  - 'font_size_pct': relative font size (0 to 100) where 5 is medium, 8 is large, 3 is small
+  - 'color_hex': hex code for text color (e.g., '#FFFFFF')
+  - 'alignment': 'left' | 'center' | 'right'
+- 'logo_position': { 'x_pct': relative X, 'y_pct': relative Y, 'width_pct': relative width, 'height_pct': relative height } (or null if no logo)
+
+Important: Return ONLY a raw JSON string. Do not wrap it in markdown code blocks like ```json. Do not include any explanations.
+"""
+
+    try:
+        # Try Gemini first
+        response_text = generate_text(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            model_name="gemini-2.0-flash",
+            provider_name="gemini",
+            api_key="",
+            temperature=0.2,
+            max_tokens=1000,
+            images=[base64_image]
+        )
+    except Exception as e:
+        # Fallback to OpenAI if Gemini fails
+        try:
+            response_text = generate_text(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model_name="gpt-4o",
+                provider_name="openai",
+                api_key="",
+                temperature=0.2,
+                max_tokens=1000,
+                images=[base64_image]
+            )
+        except Exception as oe:
+            raise HTTPException(status_code=500, detail=f"Vision LLM analysis failed: {str(e)} / {str(oe)}")
+
+    if not response_text:
+        raise HTTPException(status_code=500, detail="Vision LLM returned empty response")
+
+    # Clean code blocks
+    raw_response = response_text.strip()
+    if raw_response.startswith("```"):
+        lines = raw_response.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines[-1].startswith("```"):
+            lines = lines[:-1]
+        raw_response = "\n".join(lines).strip()
+
+    try:
+        layers_json = json.loads(raw_response)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to parse JSON from Vision LLM: {str(e)}. Raw content: {response_text}"
+        )
+
+    # 5. Save to image_prompt_settings
+    settings = db.query(models.ImagePromptSettings).filter(
+        models.ImagePromptSettings.persona_id == persona_id
+    ).first()
+
+    if not settings:
+        settings = models.ImagePromptSettings(
+            persona_id=persona_id,
+            user_id=current_user.id
+        )
+        db.add(settings)
+
+    settings.reference_image_url = ref_public_url
+    settings.template_layers_json = layers_json
+    settings.template_analyzed_at = datetime.now(timezone.utc)
+    if logo_public_url:
+        settings.template_logo_url = logo_public_url
+
+    # Also update persona with logo if provided
+    if logo_public_url:
+        persona.template_logo_url = logo_public_url
+
+    db.commit()
+    db.refresh(settings)
+
+    return {
+        "success": True,
+        "reference_image_url": ref_public_url,
+        "logo_url": logo_public_url,
+        "layers_json": layers_json,
+        "analyzed_at": settings.template_analyzed_at
+    }
+
+
+class TestTemplateRequest(BaseModel):
+    persona_id: int
+    topic_hint: str | None = None
+    post_text: str | None = None
+
+
+class PublishTemplateRequest(BaseModel):
+    persona_id: int
+    post_text: str
+    include_image: bool = True
+
+
+async def generate_template_layered_image(
+    persona_id: int,
+    post_text: str,
+    topic_hint: str | None,
+    db: Session,
+    user_id: int,
+) -> tuple[str, str]:
+    """
+    Generate a layered image based on persona's template settings.
+    Returns (media_library_id, image_url).
+    """
+    # Fetch persona and template settings
+    persona = db.query(models.AIPersona).filter(models.AIPersona.id == persona_id).first()
+    if not persona:
+        raise HTTPException(status_code=404, detail="Persona not found")
+
+    settings = db.query(models.ImagePromptSettings).filter(
+        models.ImagePromptSettings.persona_id == persona_id
+    ).first()
+
+    if not settings or not settings.template_layers_json:
+        raise HTTPException(status_code=400, detail="Template not analyzed. Please analyze a reference image first.")
+
+    layers_json = settings.template_layers_json
+
+    # 1. Generate background prompt using LLM
+    bg_style = layers_json.get("background", {}).get("description", "simple abstract background")
+    system_prompt_bg = "You are an expert prompt engineer for AI image generators."
+    prompt_for_bg = f"Write a high-quality prompt for generating a clean background image based on the topic: '{topic_hint or post_text}'. The background style should be: {bg_style}. IMPORTANT: This background image must contain absolutely no text, letters, logos, writing, watermarks, or signatures of any kind. It should only contain background textures, photographic elements, or abstract designs."
+
+    bg_prompt = generate_text_for_user(
+        user_id=user_id,
+        task_category="image_prompt_generation",
+        prompt=prompt_for_bg,
+        system_prompt=system_prompt_bg,
+        db=db,
+        temperature=0.7,
+        max_tokens=200,
+    )
+    if not bg_prompt:
+        bg_prompt = f"abstract background related to {topic_hint or post_text}, style: {bg_style}"
+
+    # Explicitly enforce negative prompts
+    bg_prompt = f"{bg_prompt}, empty background, no people writing, no text, copy-space, clean"
+
+    # 2. Generate background image
+    provider_instance, model_name, api_key = get_image_provider_for_user(user_id, db)
+
+    try:
+        def _generate():
+            return provider_instance.generate(
+                prompt=bg_prompt,
+                negative_prompt="text, letters, words, logo, writing, watermark, signature, symbols",
+                aspect_ratio="1:1",
+                model_name=model_name,
+                api_key=api_key
+            )
+        bg_bytes = await asyncio.to_thread(_generate())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate background image: {str(e)}")
+
+    # 3. Generate overlay text copy
+    text_boxes = layers_json.get("text_boxes", [])
+    copy_map = {}
+    if text_boxes:
+        boxes_desc = "\n".join([f"- Purpose: {b.get('purpose', 'Headline')}" for b in text_boxes])
+        prompt_for_copy = f"""We are generating text copy for a social media post graphic on the topic: '{topic_hint or post_text}'.
+Context/Post text: {post_text}
+We need to fill the following text boxes in our template:
+{boxes_desc}
+
+For each text box, write a very short, catchy copy suitable for the purpose.
+Return a raw JSON object mapping each box's exact Purpose to the written text string. Do not wrap in markdown block, just return raw JSON."""
+
+        copy_resp = generate_text_for_user(
+            user_id=user_id,
+            task_category="post_generation",
+            prompt=prompt_for_copy,
+            system_prompt="You are a social media copywriter. Respond ONLY with a raw JSON mapping.",
+            db=db,
+            temperature=0.6,
+            max_tokens=400,
+        )
+        if copy_resp:
+            raw_cr = copy_resp.strip()
+            if raw_cr.startswith("```"):
+                lines = raw_cr.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                raw_cr = "\n".join(lines).strip()
+            try:
+                copy_map = json.loads(raw_cr)
+            except Exception:
+                pass
+
+    # 4. Fetch logo
+    logo_img = None
+    logo_pos = layers_json.get("logo_position")
+    if logo_pos:
+        # Try persona-specific logo first, then global logo
+        logo_url = persona.template_logo_url or settings.template_logo_url
+        user = db.get(models.User, user_id)
+        if not logo_url and user:
+            logo_url = user.brand_logo_url
+
+        if logo_url:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.get(logo_url)
+                    if resp.status_code == 200:
+                        logo_img = Image.open(io.BytesIO(resp.content))
+            except Exception as e:
+                print(f"Error fetching logo URL: {e}")
+
+        # Fallback to local logo.png
+        if not logo_img:
+            try:
+                logo_img = Image.open("logo.png")
+            except Exception as e:
+                print(f"Error loading fallback logo.png: {e}")
+
+    # 5. Compose with Pillow
+    try:
+        bg_image = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
+        W, H = bg_image.size
+
+        # Overlay Logo
+        if logo_img and logo_pos:
+            logo_img = logo_img.convert("RGBA")
+            target_w = int(W * (float(logo_pos.get("width_pct", 15)) / 100.0))
+            if target_w > 0:
+                aspect = logo_img.height / logo_img.width
+                target_h = int(target_w * aspect)
+                logo_resized = logo_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+                logo_x = int(W * (float(logo_pos.get("x_pct", 5)) / 100.0))
+                logo_y = int(H * (float(logo_pos.get("y_pct", 5)) / 100.0))
+
+                logo_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                logo_layer.paste(logo_resized, (logo_x, logo_y))
+                bg_image = Image.alpha_composite(bg_image, logo_layer)
+
+        # Draw Text Boxes
+        draw = ImageDraw.Draw(bg_image)
+        for box in text_boxes:
+            purpose = box.get("purpose", "")
+            text_str = copy_map.get(purpose) or copy_map.get(purpose.lower()) or copy_map.get(purpose.replace(" ", ""))
+            if not text_str:
+                text_str = topic_hint if "headline" in purpose.lower() else "Learn More"
+
+            x_pct = float(box.get("x_pct", 50))
+            y_pct = float(box.get("y_pct", 50))
+            font_size_pct = float(box.get("font_size_pct", 5))
+            color_hex = box.get("color_hex", "#FFFFFF")
+            alignment = box.get("alignment", "center")
+
+            fs = max(12, int(H * (font_size_pct / 100.0)))
+            font = get_pillow_font(fs)
+
+            if not color_hex.startswith("#"):
+                color_hex = f"#{color_hex}"
+
+            try:
+                bbox = draw.textbbox((0, 0), text_str, font=font)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+            except AttributeError:
+                tw, th = draw.textsize(text_str, font=font)
+
+            tx = int(W * (x_pct / 100.0))
+            ty = int(H * (y_pct / 100.0))
+
+            if alignment == "center":
+                tx -= int(tw / 2)
+            elif alignment == "right":
+                tx -= tw
+
+            draw.text((tx + 1, ty + 1), text_str, font=font, fill="#000000")
+            draw.text((tx, ty), text_str, font=font, fill=color_hex)
+
+        final_image = bg_image.convert("RGB")
+        out_io = io.BytesIO()
+        final_image.save(out_io, format="PNG")
+        final_bytes = out_io.getvalue()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Pillow Compositor failed: {str(e)}")
+
+    # 6. Upload to Supabase
+    job_id = str(uuid.uuid4())
+    filename = f"{user_id}/template_{job_id}.png"
+    try:
+        public_url = await async_upload_to_supabase(filename, final_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload finished image: {str(e)}")
+
+    # 7. Create Media Library Entry
+    media = models.MediaLibrary(
+        user_id=user_id,
+        persona_id=persona_id,
+        image_url=public_url,
+        storage_path=filename,
+        generation_prompt=bg_prompt,
+        provider="compositor",
+        model_name="layered"
+    )
+    db.add(media)
+    db.commit()
+    db.refresh(media)
+
+    return str(media.id), public_url
+
+
+@router.post("/test-template-generation")
+async def test_template_generation(
+    req: TestTemplateRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Test template-based image generation without publishing."""
+    # Verify persona belongs to user
+    persona = db.query(models.AIPersona).filter(
+        models.AIPersona.id == req.persona_id,
+        models.AIPersona.user_id == current_user.id
+    ).first()
+    if not persona:
+        raise HTTPException(status_code=404, detail="Persona not found")
+
+    # Generate post text if not provided
+    post_text = req.post_text
+    if not post_text:
+        from app.posts import generate_persona_post_with_user_model
+        post_text = generate_persona_post_with_user_model(
+            db=db,
+            settings=persona,
+            topic_hint=req.topic_hint
+        )
+
+    # Check if template is enabled and analyzed
+    if not persona.template_image_generation_enabled:
+        return {
+            "success": True,
+            "template_enabled": False,
+            "post_text": post_text,
+            "message": "Template generation is not enabled for this persona"
+        }
+
+    settings = db.query(models.ImagePromptSettings).filter(
+        models.ImagePromptSettings.persona_id == req.persona_id
+    ).first()
+
+    if not settings or not settings.template_layers_json:
+        return {
+            "success": True,
+            "template_enabled": True,
+            "template_analyzed": False,
+            "post_text": post_text,
+            "message": "Template not analyzed. Please analyze a reference image first."
+        }
+
+    # Generate layered image
+    try:
+        media_id, image_url = await generate_template_layered_image(
+            persona_id=req.persona_id,
+            post_text=post_text,
+            topic_hint=req.topic_hint,
+            db=db,
+            user_id=current_user.id
+        )
+        return {
+            "success": True,
+            "template_enabled": True,
+            "template_analyzed": True,
+            "post_text": post_text,
+            "media_library_id": media_id,
+            "image_url": image_url
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "post_text": post_text,
+            "error": str(e)
+        }
+
+
+@router.post("/publish-template-post")
+async def publish_template_post(
+    req: PublishTemplateRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Publish a post with optional template-based image."""
+    # Verify persona belongs to user
+    persona = db.query(models.AIPersona).filter(
+        models.AIPersona.id == req.persona_id,
+        models.AIPersona.user_id == current_user.id
+    ).first()
+    if not persona:
+        raise HTTPException(status_code=404, detail="Persona not found")
+
+    # Get Facebook connection
+    connection = db.query(models.FacebookConnection).filter(
+        models.FacebookConnection.id == persona.page_connection_id
+    ).first()
+    if not connection:
+        raise HTTPException(status_code=400, detail="Facebook connection not found")
+
+    # Generate image if requested and template enabled
+    media_library_id = None
+    if req.include_image and persona.template_image_generation_enabled:
+        settings = db.query(models.ImagePromptSettings).filter(
+            models.ImagePromptSettings.persona_id == req.persona_id
+        ).first()
+
+        if settings and settings.template_layers_json:
+            try:
+                media_library_id, _ = await generate_template_layered_image(
+                    persona_id=req.persona_id,
+                    post_text=req.post_text,
+                    topic_hint=None,
+                    db=db,
+                    user_id=current_user.id
+                )
+            except Exception as e:
+                # Apply fallback policy
+                if persona.image_fallback_policy == "skip_post":
+                    raise HTTPException(status_code=400, detail=f"Image generation failed and fallback policy is skip_post: {str(e)}")
+                elif persona.image_fallback_policy == "use_library":
+                    any_unused = db.query(models.MediaLibrary).filter(
+                        models.MediaLibrary.user_id == current_user.id,
+                        models.MediaLibrary.is_used == False
+                    ).order_by(models.MediaLibrary.created_at.asc()).first()
+                    if any_unused:
+                        media_library_id = str(any_unused.id)
+                # text_only: continue without image
+
+    # Create PostLog
+    post_log = models.PostLog(
+        user_id=current_user.id,
+        facebook_connection_id=connection.id,
+        ai_persona_id=persona.id,
+        content=req.post_text,
+        status="draft",
+        media_library_id=media_library_id,
+        ai_generated=True,
+        auto_generated=False
+    )
+    db.add(post_log)
+    db.flush()
+
+    # Publish to Facebook
+    from app.posts import publish_post_to_facebook
+    success = await publish_post_to_facebook(db, post_log, connection)
+
+    if success:
+        return {
+            "success": True,
+            "post_log_id": post_log.id,
+            "facebook_post_id": post_log.facebook_post_id,
+            "media_library_id": media_library_id
+        }
+    else:
+        raise HTTPException(status_code=500, detail="Failed to publish to Facebook")
+
+
 @router.post("/generate-layered")
 async def generate_layered_image(
     req: GenerateLayeredRequest,

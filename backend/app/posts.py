@@ -829,9 +829,11 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
             # Optional: Image Generation Layer
             if settings.include_image:
                 import time
-                from app.routers.images import async_upload_to_supabase
+                import asyncio
+                import uuid
+                from app.routers.images import async_upload_to_supabase, generate_template_layered_image
                 from app.providers.image_providers import get_image_provider_for_user
-                
+
                 # Check frequency
                 total_posts = settings.total_posts_published
                 should_generate = False
@@ -848,34 +850,52 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
                     should_generate = True
 
                 if should_generate:
-                    image_prompt = None
-                    if settings.image_prompt_source == "persona_prompt":
-                        psettings = db.query(models.ImagePromptSettings).filter(models.ImagePromptSettings.persona_id == settings.id).first()
-                        if psettings and psettings.assembled_prompt:
-                            image_prompt = psettings.assembled_prompt
-                    elif settings.image_prompt_source == "generate_from_post":
-                        from app.providers.llm_providers import generate_text_for_user
-                        sys_p = "You are an expert at writing prompts for AI image generation. Given a social media post text, write a detailed image generation prompt that would create the perfect visual to accompany that post. The image should enhance the post's message without containing any text. Return only the image generation prompt, nothing else, maximum 150 words."
-                        image_prompt = generate_text_for_user(
-                            user_id=settings.user_id,
-                            task_category="image_prompt_generation",
-                            prompt=content,
-                            system_prompt=sys_p,
-                            db=db,
-                            temperature=0.7,
-                            max_tokens=200,
-                        )
-                        if image_prompt:
-                            image_prompt = image_prompt.strip()
-                    elif settings.image_prompt_source == "library_image":
-                        oldest_unused = db.query(models.MediaLibrary).filter(
-                            models.MediaLibrary.persona_id == settings.id,
-                            models.MediaLibrary.is_used == False
-                        ).order_by(models.MediaLibrary.created_at.asc()).first()
-                        if oldest_unused:
-                            post_log.media_library_id = str(oldest_unused.id)
+                    # Check if template-based generation is enabled
+                    if settings.template_image_generation_enabled:
+                        # Use template-based layered image generation
+                        template_settings = db.query(models.ImagePromptSettings).filter(
+                            models.ImagePromptSettings.persona_id == settings.id
+                        ).first()
+
+                        if template_settings and template_settings.template_layers_json:
+                            try:
+                                media_id, image_url = await generate_template_layered_image(
+                                    persona_id=settings.id,
+                                    post_text=content,
+                                    topic_hint=topic,
+                                    db=db,
+                                    user_id=settings.user_id
+                                )
+                                post_log.media_library_id = media_id
+                                print(f"Template image generation for persona {settings.persona_name}: status=success")
+                            except Exception as e:
+                                print(f"Template image generation for persona {settings.persona_name}: status=failed error={str(e)}")
+                                # Apply fallback policy
+                                if settings.image_fallback_policy == "skip_post":
+                                    post_log.status = "missed"
+                                    post_log.error_message = f"template_image_generation_failed: {str(e)}"
+                                    db.commit()
+                                    continue
+                                elif settings.image_fallback_policy == "use_library":
+                                    any_unused = db.query(models.MediaLibrary).filter(
+                                        models.MediaLibrary.user_id == settings.user_id,
+                                        models.MediaLibrary.is_used == False
+                                    ).order_by(models.MediaLibrary.created_at.asc()).first()
+                                    if any_unused:
+                                        post_log.media_library_id = str(any_unused.id)
+                                # text_only: continue without image
                         else:
-                            # Fallback to generate_from_post
+                            # Template not analyzed, fall back to simple generation
+                            print(f"Template not analyzed for persona {settings.persona_name}, falling back to simple generation")
+                            # Continue to simple generation below
+                    else:
+                        # Simple image generation (existing logic)
+                        image_prompt = None
+                        if settings.image_prompt_source == "persona_prompt":
+                            psettings = db.query(models.ImagePromptSettings).filter(models.ImagePromptSettings.persona_id == settings.id).first()
+                            if psettings and psettings.assembled_prompt:
+                                image_prompt = psettings.assembled_prompt
+                        elif settings.image_prompt_source == "generate_from_post":
                             from app.providers.llm_providers import generate_text_for_user
                             sys_p = "You are an expert at writing prompts for AI image generation. Given a social media post text, write a detailed image generation prompt that would create the perfect visual to accompany that post. The image should enhance the post's message without containing any text. Return only the image generation prompt, nothing else, maximum 150 words."
                             image_prompt = generate_text_for_user(
@@ -889,75 +909,97 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
                             )
                             if image_prompt:
                                 image_prompt = image_prompt.strip()
-
-                    if image_prompt and not post_log.media_library_id:
-                        provider_inst, model_name, api_key = get_image_provider_for_user(settings.user_id, db)
-                        provider_name = provider_inst.__class__.__name__.replace('Provider', '').lower()
-                        start_img_t = time.time()
-                        try:
-                            import asyncio
-                            import uuid
-                            async def _gen():
-                                return await asyncio.to_thread(
-                                    provider_inst.generate,
-                                    prompt=image_prompt,
-                                    negative_prompt="",
-                                    aspect_ratio="1:1",
-                                    model_name=model_name,
-                                    api_key=api_key,
+                        elif settings.image_prompt_source == "library_image":
+                            oldest_unused = db.query(models.MediaLibrary).filter(
+                                models.MediaLibrary.persona_id == settings.id,
+                                models.MediaLibrary.is_used == False
+                            ).order_by(models.MediaLibrary.created_at.asc()).first()
+                            if oldest_unused:
+                                post_log.media_library_id = str(oldest_unused.id)
+                            else:
+                                # Fallback to generate_from_post
+                                from app.providers.llm_providers import generate_text_for_user
+                                sys_p = "You are an expert at writing prompts for AI image generation. Given a social media post text, write a detailed image generation prompt that would create the perfect visual to accompany that post. The image should enhance the post's message without containing any text. Return only the image generation prompt, nothing else, maximum 150 words."
+                                image_prompt = generate_text_for_user(
+                                    user_id=settings.user_id,
+                                    task_category="image_prompt_generation",
+                                    prompt=content,
+                                    system_prompt=sys_p,
+                                    db=db,
+                                    temperature=0.7,
+                                    max_tokens=200,
                                 )
-                            img_bytes = await asyncio.wait_for(
-                                _gen(),
-                                timeout=max(10, min(settings.image_max_wait_seconds or 120, 180)),
-                            )
-                            job_id_str = str(uuid.uuid4())
-                            filename = f"{settings.user_id}/{job_id_str}.png"
-                            pub_url = await async_upload_to_supabase(filename, img_bytes)
-                            
-                            media = models.MediaLibrary(
-                                user_id=settings.user_id,
-                                persona_id=settings.id,
-                                image_url=pub_url,
-                                storage_path=filename,
-                                generation_prompt=image_prompt,
-                                provider=provider_name,
-                                model_name=model_name,
-                            )
-                            db.add(media)
-                            db.flush()
-                            post_log.media_library_id = str(media.id)
-                            elapsed = int(time.time() - start_img_t)
-                            print(f"Auto image generation for persona {settings.persona_name}: provider={provider_name} status=success seconds={elapsed}")
-                        except asyncio.TimeoutError:
-                            elapsed = int(time.time() - start_img_t)
-                            print(f"Auto image generation for persona {settings.persona_name}: provider={provider_name} status=timeout seconds={elapsed}")
-                            if settings.image_fallback_policy == "skip_post":
-                                post_log.status = "missed"
-                                post_log.error_message = "image_generation_failed (timeout)"
-                                db.commit()
-                                continue
-                            elif settings.image_fallback_policy == "use_library":
-                                any_unused = db.query(models.MediaLibrary).filter(
-                                    models.MediaLibrary.user_id == settings.user_id,
-                                    models.MediaLibrary.is_used == False
-                                ).order_by(models.MediaLibrary.created_at.asc()).first()
-                                if any_unused:
-                                    post_log.media_library_id = str(any_unused.id)
-                        except Exception as e:
-                            elapsed = int(time.time() - start_img_t)
-                            print(f"Auto image generation for persona {settings.persona_name}: provider={provider_name} status=failed seconds={elapsed}")
-                            if settings.image_fallback_policy == "skip_post":
-                                post_log.status = "missed"
-                                post_log.error_message = "image_generation_failed (error)"
-                                db.commit()
-                                continue
-                            elif settings.image_fallback_policy == "use_library":
-                                any_unused = db.query(models.MediaLibrary).filter(
-                                    models.MediaLibrary.user_id == settings.user_id,
-                                    models.MediaLibrary.is_used == False
-                                ).order_by(models.MediaLibrary.created_at.asc()).first()
-                                if any_unused:
-                                    post_log.media_library_id = str(any_unused.id)
+                                if image_prompt:
+                                    image_prompt = image_prompt.strip
+
+                        if image_prompt and not post_log.media_library_id:
+                            provider_inst, model_name, api_key = get_image_provider_for_user(settings.user_id, db)
+                            provider_name = provider_inst.__class__.__name__.replace('Provider', '').lower()
+                            start_img_t = time.time()
+                            try:
+                                import asyncio
+                                import uuid
+                                async def _gen():
+                                    return await asyncio.to_thread(
+                                        provider_inst.generate,
+                                        prompt=image_prompt,
+                                        negative_prompt="",
+                                        aspect_ratio="1:1",
+                                        model_name=model_name,
+                                        api_key=api_key,
+                                    )
+                                img_bytes = await asyncio.wait_for(
+                                    _gen(),
+                                    timeout=max(10, min(settings.image_max_wait_seconds or 120, 180)),
+                                )
+                                job_id_str = str(uuid.uuid4())
+                                filename = f"{settings.user_id}/{job_id_str}.png"
+                                pub_url = await async_upload_to_supabase(filename, img_bytes)
+
+                                media = models.MediaLibrary(
+                                    user_id=settings.user_id,
+                                    persona_id=settings.id,
+                                    image_url=pub_url,
+                                    storage_path=filename,
+                                    generation_prompt=image_prompt,
+                                    provider=provider_name,
+                                    model_name=model_name,
+                                )
+                                db.add(media)
+                                db.flush()
+                                post_log.media_library_id = str(media.id)
+                                elapsed = int(time.time() - start_img_t)
+                                print(f"Auto image generation for persona {settings.persona_name}: provider={provider_name} status=success seconds={elapsed}")
+                            except asyncio.TimeoutError:
+                                elapsed = int(time.time() - start_img_t)
+                                print(f"Auto image generation for persona {settings.persona_name}: provider={provider_name} status=timeout seconds={elapsed}")
+                                if settings.image_fallback_policy == "skip_post":
+                                    post_log.status = "missed"
+                                    post_log.error_message = "image_generation_failed (timeout)"
+                                    db.commit()
+                                    continue
+                                elif settings.image_fallback_policy == "use_library":
+                                    any_unused = db.query(models.MediaLibrary).filter(
+                                        models.MediaLibrary.user_id == settings.user_id,
+                                        models.MediaLibrary.is_used == False
+                                    ).order_by(models.MediaLibrary.created_at.asc()).first()
+                                    if any_unused:
+                                        post_log.media_library_id = str(any_unused.id)
+                            except Exception as e:
+                                elapsed = int(time.time() - start_img_t)
+                                print(f"Auto image generation for persona {settings.persona_name}: provider={provider_name} status=failed seconds={elapsed}")
+                                if settings.image_fallback_policy == "skip_post":
+                                    post_log.status = "missed"
+                                    post_log.error_message = "image_generation_failed (error)"
+                                    db.commit()
+                                    continue
+                                elif settings.image_fallback_policy == "use_library":
+                                    any_unused = db.query(models.MediaLibrary).filter(
+                                        models.MediaLibrary.user_id == settings.user_id,
+                                        models.MediaLibrary.is_used == False
+                                    ).order_by(models.MediaLibrary.created_at.asc()).first()
+                                    if any_unused:
+                                        post_log.media_library_id = str(any_unused.id)
 
             success = await publish_post_to_facebook(db, post_log, connection, local_now.date())
             settings.last_auto_post_at = now_utc

@@ -98,6 +98,8 @@ type AIPersona = {
   learning_mode_enabled: boolean
   minimum_engagement_threshold: number
   performance_score?: number
+  template_image_generation_enabled?: boolean
+  template_logo_url?: string | null
   total_posts_published?: number
   learned_patterns_summary?: string | null
 }
@@ -1221,6 +1223,63 @@ function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab,
   onStrategyDecision: (action: string, prompt?: string) => void
 }) {
   const [typedPrompt, setTypedPrompt] = React.useState("")
+  const [analyzing, setAnalyzing] = React.useState(false)
+  const [testingImage, setTestingImage] = React.useState(false)
+  const [testResult, setTestResult] = React.useState<any>(null)
+  const [referenceImageFile, setReferenceImageFile] = React.useState<File | null>(null)
+  const [logoImageFile, setLogoImageFile] = React.useState<File | null>(null)
+
+  async function analyzeReferenceImage() {
+    if (!draft.id || !referenceImageFile) {
+      toast.error("Please save the persona first and select a reference image.")
+      return
+    }
+    setAnalyzing(true)
+    try {
+      const formData = new FormData()
+      formData.append("persona_id", String(draft.id))
+      formData.append("reference_image", referenceImageFile)
+      if (logoImageFile) {
+        formData.append("logo", logoImageFile)
+      }
+      const response = await api.post("/api/images/analyze-template-reference", formData, {
+        headers: { "Content-Type": "multipart/form-data" }
+      })
+      toast.success("Reference image analyzed successfully!")
+      setTestResult(response.data)
+      setReferenceImageFile(null)
+      setLogoImageFile(null)
+    } catch (error: any) {
+      toast.error(error?.response?.data?.detail || "Failed to analyze reference image.")
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
+  async function testTemplateGeneration() {
+    if (!draft.id) {
+      toast.error("Please save the persona first.")
+      return
+    }
+    setTestingImage(true)
+    try {
+      const response = await api.post("/api/images/test-template-generation", {
+        persona_id: draft.id,
+        topic_hint: "test topic"
+      })
+      setTestResult(response.data)
+      if (response.data.success) {
+        toast.success("Template generation test successful!")
+      } else {
+        toast.error("Template generation test failed.")
+      }
+    } catch (error: any) {
+      toast.error(error?.response?.data?.detail || "Failed to test template generation.")
+    } finally {
+      setTestingImage(false)
+    }
+  }
+
   React.useEffect(() => {
     const text = previewTab === "simple" ? simplePrompt : rawPrompt
     setTypedPrompt("")
@@ -1243,6 +1302,7 @@ function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab,
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '300ms' }}><h2 className="font-semibold">Content Rules</h2><TagInput label="What topics should the AI always write about?" values={config.always_topics} onAdd={(value) => onAddTag("always_topics", value)} onRemove={(value) => onConfig({ always_topics: config.always_topics.filter((item) => item !== value) })} /><TagInput label="What topics should the AI NEVER write about?" values={config.never_topics} onAdd={(value) => onAddTag("never_topics", value)} onRemove={(value) => onConfig({ never_topics: config.never_topics.filter((item) => item !== value) })} /><div className="grid gap-2"><Label>What should every post include?</Label><div className="flex flex-wrap gap-2">{includeOptions.map((item) => <Button key={item} type="button" variant={config.every_post_includes.includes(item) ? "default" : "outline"} onClick={() => onToggleConfigList("every_post_includes", item)}>{item}</Button>)}</div></div><div className="grid gap-2"><Label>What should posts NEVER do?</Label><div className="flex flex-wrap gap-2">{neverOptions.map((item) => <Button key={item} type="button" variant={config.never_do.includes(item) ? "default" : "outline"} onClick={() => onToggleConfigList("never_do", item)}>{item}</Button>)}</div></div><div className="grid gap-2"><Label>How long should posts be?</Label><input type="range" min={0} max={2} value={["Short", "Medium", "Long"].indexOf(config.length)} onChange={(event) => onConfig({ length: (["Short", "Medium", "Long"] as const)[Number(event.target.value)] })} /><div className="flex justify-between text-xs text-slate-500"><span>Short</span><span>Medium</span><span>Long</span></div><div className="flex items-center justify-between rounded-md border p-3"><Label>Vary the length automatically</Label><Switch checked={config.vary_length} onCheckedChange={(checked) => onConfig({ vary_length: checked })} /></div></div></div>
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '450ms' }}><h2 className="font-semibold">Format and Style Rules</h2><div className="grid gap-2"><Label>How should posts be structured?</Label><Select value={config.structure} onChange={(event) => onConfig({ structure: event.target.value })}>{structureOptions.map((item) => <option key={item}>{item}</option>)}</Select></div><div className="grid gap-2"><Label>What writing style examples do you love?</Label><Textarea className="min-h-28" value={config.examples} onChange={(event) => onConfig({ examples: event.target.value })} placeholder="Paste example posts that feel like what you want. The AI will study these." /></div><div className="grid gap-2"><Label>What language should posts be written in?</Label><Select value={draft.language} onChange={(event) => onChange({ ...draft, language: event.target.value })}>{languages.map((language) => <option key={language}>{language}</option>)}</Select></div></div>
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '600ms' }}><h2 className="font-semibold">Advanced Control</h2><div className="grid gap-2"><Label>Write any additional instructions in your own words</Label><Textarea className="min-h-28" value={draft.custom_instructions || ""} onChange={(event) => onChange({ ...draft, custom_instructions: event.target.value })} /></div><div className="grid gap-2"><Label>Rate how creative vs safe you want the AI to be: {draft.creativity_level}/10</Label><input type="range" min={1} max={10} value={draft.creativity_level} onChange={(event) => onChange({ ...draft, creativity_level: Number(event.target.value) })} /><div className="flex justify-between text-xs text-slate-500"><span>Very safe, predictable, consistent.</span><span>Very creative, experimental, surprising.</span></div></div><div className="grid gap-3 md:grid-cols-2"><div className="grid gap-2"><Label>Assigned Days</Label><div className="flex flex-wrap gap-2">{dayOptions.map((day) => <Button key={day} type="button" variant={draft.assigned_days.includes(day) ? "default" : "outline"} onClick={() => onToggleDay(day)}>{day}</Button>)}</div></div><div className="grid gap-2"><Label>Posting Times</Label>{draft.posting_time_slots.map((slot, index) => <Input key={`${slot}-${index}`} type="time" value={slot} onChange={(event) => onChange({ ...draft, posting_time_slots: draft.posting_time_slots.map((item, itemIndex) => itemIndex === index ? event.target.value : item) })} />)}</div></div><div className="flex items-center justify-between rounded-md border p-3"><Label>Learning Mode</Label><Switch checked={draft.learning_mode_enabled} onCheckedChange={(checked) => onChange({ ...draft, learning_mode_enabled: checked })} /></div>{draft.learned_patterns_summary ? <p className="text-sm text-slate-500">{draft.learned_patterns_summary}</p> : null}</div>
+      <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '750ms' }}><h2 className="font-semibold flex items-center gap-2"><LayoutTemplate className="size-4" /> Advanced Template Image Generation</h2><div className="flex items-center justify-between rounded-md border p-3 bg-slate-50"><Label className="cursor-pointer">Enable Template-Based Image Generation (Advanced Mode)</Label><Switch checked={draft.template_image_generation_enabled || false} onCheckedChange={(checked) => onChange({ ...draft, template_image_generation_enabled: checked })} /></div>{draft.template_image_generation_enabled ? <div className="grid gap-3 mt-3"><div className="grid gap-2"><Label>Reference Image (Upload to analyze template structure)</Label><Input type="file" accept="image/*" onChange={(event) => setReferenceImageFile(event.target.files?.[0] || null)} /></div><div className="grid gap-2"><Label>Logo Image (Optional - will use global logo if not provided)</Label><Input type="file" accept="image/*" onChange={(event) => setLogoImageFile(event.target.files?.[0] || null)} /></div><Button className="w-fit" onClick={analyzeReferenceImage} disabled={analyzing || !referenceImageFile}>{analyzing ? <><Loader2 className="size-4 animate-spin mr-2" /> Analyzing...</> : <><Sparkles className="size-4 mr-2" /> Analyze Reference Image</>}</Button>{testResult?.layers_json ? <div className="rounded-md border p-3 bg-slate-50"><h3 className="font-semibold text-sm mb-2">Template Structure Extracted:</h3><div className="text-xs text-slate-600"><p><strong>Background:</strong> {testResult.layers_json.background?.type || "N/A"} - {testResult.layers_json.background?.description || "N/A"}</p><p><strong>Text Boxes:</strong> {testResult.layers_json.text_boxes?.length || 0} found</p>{testResult.layers_json.text_boxes?.map((box: any, i: number) => <p key={i} className="ml-2">• {box.purpose} at ({box.x_pct}%, {box.y_pct}%)</p>)}</div></div> : null}<Button className="w-fit" onClick={testTemplateGeneration} disabled={testingImage}>{testingImage ? <><Loader2 className="size-4 animate-spin mr-2" /> Testing...</> : <><RefreshCw className="size-4 mr-2" /> Test Image Generation</>}</Button>{testResult?.image_url ? <div className="rounded-md border p-3 bg-slate-50"><h3 className="font-semibold text-sm mb-2">Generated Image Preview:</h3><img src={testResult.image_url} alt="Generated" className="max-w-full h-auto rounded-md" /></div> : null}</div> : <div className="rounded-md border border-dashed p-3 text-center text-sm text-slate-500"><p>Template generation is disabled. Enable the toggle above to access advanced multi-layer image generation features.</p></div>}</div>
     </div>
     <aside className="grid h-fit gap-3 rounded-md border bg-slate-50 p-4 lg:sticky lg:top-4 overflow-y-auto max-h-[85vh]">
       {strategy && !strategy.applied_to_prompt && strategy.suggested_prompt ? (

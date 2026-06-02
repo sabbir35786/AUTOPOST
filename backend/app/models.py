@@ -346,6 +346,8 @@ class AIPersona(Base):
     image_prompt_source: Mapped[str] = mapped_column(String, default="persona_prompt", nullable=False)
     image_fallback_policy: Mapped[str] = mapped_column(String, default="text_only", nullable=False)
     image_max_wait_seconds: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
+    template_image_generation_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    template_logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -427,6 +429,10 @@ class ImagePromptSettings(Base):
     text_overlay_style: Mapped[str | None] = mapped_column(String, nullable=True)
     reference_image_descriptors: Mapped[str | None] = mapped_column(Text, nullable=True)
     assembled_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reference_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    template_layers_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    template_analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    template_logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
