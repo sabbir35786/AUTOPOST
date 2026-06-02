@@ -146,7 +146,15 @@ def _generate_mistral(
         raise RuntimeError(f"Mistral request failed ({response.status_code}): {response.text[:200]}")
 
     data = response.json()
-    content = data.get("choices", [{}])[0].get("message", {}).get("content")
+    
+    # Check for safety filtering in Mistral response
+    choice = data.get("choices", [{}])[0]
+    finish_reason = choice.get("finish_reason")
+    if finish_reason == "stop_sequence" or (finish_reason and "stop" not in finish_reason.lower()):
+        # Mistral may block content with finish_reason other than "stop"
+        pass  # We'll still try to return content, but log it if needed
+    
+    content = choice.get("message", {}).get("content")
     if isinstance(content, list):
         return "".join(
             item.get("text", "") if isinstance(item, dict) else str(item)
@@ -201,6 +209,13 @@ def _generate_openai(
 
     response = client.chat.completions.create(**kwargs)
     choice = response.choices[0] if response.choices else None
+    
+    # Check if OpenAI blocked the response
+    if choice:
+        finish_reason = getattr(choice, "finish_reason", None)
+        if finish_reason == "content_filter":
+            raise RuntimeError(f"OpenAI blocked the response: Content was filtered due to safety policies.")
+    
     return choice.message.content if choice else None
 
 
@@ -257,6 +272,12 @@ def _generate_anthropic(
         kwargs["system"] = system_prompt
 
     message = client.messages.create(**kwargs)
+    
+    # Check if Anthropic blocked the response due to safety policies
+    stop_reason = getattr(message, "stop_reason", None)
+    if stop_reason == "content_filter":
+        raise RuntimeError(f"Anthropic blocked the response: Content was filtered due to safety policies.")
+    
     if message.content:
         return message.content[0].text
     return None
@@ -365,13 +386,20 @@ def _generate_gemini(
     if block_reason:
         raise RuntimeError(f"Gemini blocked the request: {block_reason}")
 
+    # Check for content filtering on the response (finish_reason indicates if response was blocked)
+    finish_reason = None
+    if getattr(response, "candidates", None):
+        finish_reason = getattr(response.candidates[0], "finish_reason", None)
+    
+    # finish_reason values: STOP (ok), MAX_TOKENS (ok but truncated), SAFETY (blocked), RECITATION (blocked), OTHER (unknown)
+    blocked_reasons = ("SAFETY", "RECITATION")
+    if finish_reason and str(finish_reason).upper() in blocked_reasons:
+        raise RuntimeError(f"Gemini blocked the response: {finish_reason}. The content violated safety policies.")
+
     text = _extract_gemini_text(response)
     if text:
         return text
 
-    finish_reason = None
-    if getattr(response, "candidates", None):
-        finish_reason = getattr(response.candidates[0], "finish_reason", None)
     raise RuntimeError(
         f"Gemini returned an empty response (model={resolved_model}, finish_reason={finish_reason})."
     )
