@@ -33,53 +33,7 @@ def build_post_prompt(niche: str) -> str:
     )
 
 
-def _get_dynamic_length_instruction(
-    settings: models.AIPersona,
-    db: Session,
-) -> str:
-    """Generate dynamic length instruction based on previous post character count."""
-    # Fetch the most recent post for this persona
-    last_post = (
-        db.query(models.PostLog)
-        .filter(models.PostLog.ai_persona_id == settings.id)
-        .order_by(models.PostLog.created_at.desc())
-        .first()
-    )
 
-    # Edge case: No previous posts (first post for this persona)
-    if not last_post or not last_post.content:
-        return "For this new post, deliberately make it a Medium post (aim for approximately 300-400 characters)."
-
-    # Calculate character count of previous post
-    last_post_char_count = len(last_post.content)
-
-    # Determine target size based on previous post length
-    # Logic: If last post was long (>600), make it short or medium
-    # If last post was short (<200), make it medium or long
-    # Otherwise, vary based on the last length
-    if last_post_char_count > 600:
-        # Last post was long, make it short or medium
-        target_size = "Short"
-        target_chars = "100-200"
-    elif last_post_char_count < 200:
-        # Last post was short, make it medium or long
-        target_size = "Long"
-        target_chars = "500-700"
-    else:
-        # Last post was medium, make it short or long (alternate)
-        # Use a simple alternating logic based on even/odd character count
-        if last_post_char_count % 2 == 0:
-            target_size = "Short"
-            target_chars = "100-200"
-        else:
-            target_size = "Long"
-            target_chars = "500-700"
-
-    return (
-        f"The previous post you generated was {last_post_char_count} characters long. "
-        f"To keep our content strategy fresh and varied, do not repeat that length. "
-        f"For this new post, deliberately make it a {target_size} post (aim for approximately {target_chars} characters)."
-    )
 
 
 def _persona_post_prompt(
@@ -150,17 +104,11 @@ def _persona_post_prompt(
     instructions.append(f"Length preference: creativity level {settings.creativity_level}/10.")
     
     # Add post length instructions directly to user prompt (not system prompt) to ensure they're applied
-    # Extract length and vary_length settings from persona's prompt_config if available
+    # Extract length settings from persona's prompt_config if available
     if hasattr(settings, 'prompt_config') and settings.prompt_config:
         length = settings.prompt_config.get("length")
-        vary_length = settings.prompt_config.get("vary_length", True)
         if length and str(length).strip():
-            if vary_length:
-                # Use dynamic length variation based on previous post history
-                dynamic_instruction = _get_dynamic_length_instruction(settings, db)
-                instructions.append(dynamic_instruction)
-            else:
-                instructions.append(f"Aim for {str(length).strip().lower()} length posts.")
+            instructions.append(f"Aim for {str(length).strip().lower()} length posts.")
     
     if settings.hashtags_enabled:
         instructions.append(f"Include {max(1, min(settings.hashtag_count, 5))} relevant hashtags.")

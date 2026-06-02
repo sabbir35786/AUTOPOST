@@ -527,36 +527,35 @@ Return these keys:
 - "logo_position": { "x_pct": 0-100, "y_pct": 0-100, "width_pct": 0-100, "height_pct": 0-100 } or null
 
 Return ONLY raw JSON. Do not include markdown or explanations."""
-
     try:
+        from app.providers.llm_providers import _resolve_user_llm_choice
+        provider_name, model_name = _resolve_user_llm_choice(current_user.id, "post_analysis", db)
+
+        if provider_name == "openai":
+            from app.config import OPENAI_API_KEY
+            key = (OPENAI_API_KEY or "").strip()
+            if not key or any(p in key.lower() for p in ["your-real-key", "placeholder", "your-real", "your_real", "your-key-here", "********"]):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid OpenAI API Key detected. Please update your AI Model Settings with a valid token."
+                )
+
         try:
             response_text = generate_text(
                 prompt=prompt,
                 system_prompt=system_prompt,
-                model_name="gemini-2.0-flash",
-                provider_name="gemini",
+                model_name=model_name,
+                provider_name=provider_name,
                 api_key="",
                 temperature=0.2,
                 max_tokens=1000,
                 images=[base64_image],
             )
-        except Exception as gemini_error:
-            try:
-                response_text = generate_text(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                    model_name="gpt-4o",
-                    provider_name="openai",
-                    api_key="",
-                    temperature=0.2,
-                    max_tokens=1000,
-                    images=[base64_image],
-                )
-            except Exception as openai_error:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Missing API Key for the selected provider. Please verify your settings. ({gemini_error}; {openai_error})",
-                )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Vision LLM analysis failed: {str(exc)}",
+            )
 
         if not response_text:
             raise HTTPException(status_code=500, detail="Vision LLM returned empty response")
@@ -698,34 +697,34 @@ async def analyze_template(
 
 Important: Return ONLY a raw JSON string. Do not wrap it in markdown code blocks like ```json. Do not include any explanations.
 """
+    from app.providers.llm_providers import _resolve_user_llm_choice
+    provider_name, model_name = _resolve_user_llm_choice(current_user.id, "post_analysis", db)
+
+    if provider_name == "openai":
+        from app.config import OPENAI_API_KEY
+        key = (OPENAI_API_KEY or "").strip()
+        if not key or any(p in key.lower() for p in ["your-real-key", "placeholder", "your-real", "your_real", "your-key-here", "********"]):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid OpenAI API Key detected. Please update your AI Model Settings with a valid token."
+            )
+
     try:
-        # Use gemini directly (we set model_name to gemini-2.0-flash by default if using gemini provider)
-        # We can pass images directly to generate_text
         response_text = generate_text(
             prompt=prompt,
             system_prompt=system_prompt,
-            model_name="gemini-2.0-flash",
-            provider_name="gemini",
+            model_name=model_name,
+            provider_name=provider_name,
             api_key="",
             temperature=0.2,
             max_tokens=1000,
-            images=[base64_image]
+            images=[base64_image],
         )
-    except Exception as e:
-        # Fallback to OpenAI if Gemini fails or is not configured
-        try:
-            response_text = generate_text(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                model_name="gpt-4o",
-                provider_name="openai",
-                api_key="",
-                temperature=0.2,
-                max_tokens=1000,
-                images=[base64_image]
-            )
-        except Exception as oe:
-            raise HTTPException(status_code=500, detail=f"LLM Vision analysis failed: {str(e)} / {str(oe)}")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Vision LLM analysis failed: {str(exc)}",
+        )
 
     if not response_text:
         raise HTTPException(status_code=500, detail="Vision LLM returned empty response")
@@ -818,33 +817,34 @@ async def analyze_template_reference(
 Important: Return ONLY a raw JSON string. Do not wrap it in markdown code blocks like ```json. Do not include any explanations.
 """
 
+    from app.providers.llm_providers import _resolve_user_llm_choice
+    provider_name, model_name = _resolve_user_llm_choice(current_user.id, "post_analysis", db)
+
+    if provider_name == "openai":
+        from app.config import OPENAI_API_KEY
+        key = (OPENAI_API_KEY or "").strip()
+        if not key or any(p in key.lower() for p in ["your-real-key", "placeholder", "your-real", "your_real", "your-key-here", "********"]):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid OpenAI API Key detected. Please update your AI Model Settings with a valid token."
+            )
+
     try:
-        # Try Gemini first
         response_text = generate_text(
             prompt=prompt,
             system_prompt=system_prompt,
-            model_name="gemini-2.0-flash",
-            provider_name="gemini",
+            model_name=model_name,
+            provider_name=provider_name,
             api_key="",
             temperature=0.2,
             max_tokens=1000,
-            images=[base64_image]
+            images=[base64_image],
         )
-    except Exception as e:
-        # Fallback to OpenAI if Gemini fails
-        try:
-            response_text = generate_text(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                model_name="gpt-4o",
-                provider_name="openai",
-                api_key="",
-                temperature=0.2,
-                max_tokens=1000,
-                images=[base64_image]
-            )
-        except Exception as oe:
-            raise HTTPException(status_code=500, detail=f"Vision LLM analysis failed: {str(e)} / {str(oe)}")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Vision LLM analysis failed: {str(exc)}",
+        )
 
     if not response_text:
         raise HTTPException(status_code=500, detail="Vision LLM returned empty response")

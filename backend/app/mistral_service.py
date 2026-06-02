@@ -308,7 +308,6 @@ def generate_persona_from_posts(posts: list[str], model: str = "mistral-small-la
         '    "every_post_includes": ["<items from: A question at the end | A call to action | Emojis | A personal story angle | A surprising fact | A numbered list | A relatable struggle>"],\n'
         '    "never_do": ["<items from: Use formal language | Use slang | Make promises | Use more than 5 hashtags | Start with the word I | Use exclamation marks excessively>"],\n'
         '    "length": "<Short or Medium or Long based on typical post length>",\n'
-        '    "vary_length": <true or false>,\n'
         '    "structure": "<one of: No fixed structure let AI decide | Hook then value then CTA | Story then lesson then question | Fact then explanation then opinion | List format | Single powerful statement>",\n'
         '    "examples": "<paste the single best representative example post from the provided posts here>"\n'
         "  }\n"

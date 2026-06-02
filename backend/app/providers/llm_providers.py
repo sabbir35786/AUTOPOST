@@ -37,12 +37,18 @@ def _gemini_model_options() -> list[str]:
 AVAILABLE_LLM_MODELS: dict[str, list[str]] = {
     "mistral": ["mistral-large-latest", "mistral-small-latest"],
     "gemini": _gemini_model_options(),
+    "openai": ["gpt-4o", "gpt-4o-mini"],
+    "anthropic": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
 }
+
+
 _LEGACY_GEMINI_MODELS = {
     "gemini-1.5-pro": "gemini-2.0-flash",
     "gemini-1.5-flash": "gemini-2.0-flash",
     "gemini-pro": "gemini-2.0-flash",
 }
+
+
 DEFAULT_LLM_PROVIDER = "mistral"
 DEFAULT_LLM_MODEL = MISTRAL_MODEL or "mistral-small-latest"
 TEXT_LLM_TASK_CATEGORIES = [
