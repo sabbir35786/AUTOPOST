@@ -1572,9 +1572,9 @@ function SettingsView({ pages, timezone, onChanged }: { pages: PageConnection[];
 }
 
 type GlobalModelSettings = {
-  post_generation_provider: "openai" | "gemini" | "anthropic"
+  post_generation_provider: "openai" | "gemini" | "anthropic" | "mistral"
   post_generation_model: string
-  image_generation_provider: "gemini" | "openai" | "stability"
+  image_generation_provider: "gemini" | "openai" | "stability" | "mistral"
   image_generation_model: string
 }
 
@@ -1582,18 +1582,21 @@ const postModelOptions: Record<GlobalModelSettings["post_generation_provider"], 
   openai: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
   gemini: ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash"],
   anthropic: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
+  mistral: ["mistral-large-latest", "mistral-small-latest"],
 }
 
 const imageModelOptions: Record<GlobalModelSettings["image_generation_provider"], string[]> = {
   gemini: ["imagen-3.0-generate-001", "imagen-2.0"],
   openai: ["dall-e-3", "dall-e-2"],
   stability: ["stable-diffusion-3", "stable-diffusion-xl"],
+  mistral: ["mistral-not-supported"],
 }
 
 function providerLabel(provider: string) {
   if (provider === "openai") return "OpenAI"
   if (provider === "gemini") return "Gemini"
   if (provider === "anthropic") return "Anthropic"
+  if (provider === "mistral") return "Mistral"
   if (provider === "stability") return "Stability AI"
   return provider
 }
@@ -1662,6 +1665,7 @@ function AIModelsSettingsCard() {
             <li><span className="font-medium">Gemini</span>: Used for Post Generation, Image Generation, Image Analysis</li>
             <li><span className="font-medium">Anthropic</span>: Used for Post Generation</li>
             <li><span className="font-medium">Stability AI</span>: Used for Image Generation</li>
+            <li><span className="font-medium">Mistral</span>: Used for Post Generation (image generation not supported here)</li>
           </ul>
         </div>
         {loading ? <p className="text-sm text-slate-500">Loading...</p> : null}

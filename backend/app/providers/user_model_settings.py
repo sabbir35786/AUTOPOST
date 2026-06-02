@@ -9,6 +9,7 @@ POST_ALLOWED: dict[str, list[str]] = {
     "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
     "gemini": ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash"],
     "anthropic": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
+    "mistral": ["mistral-large-latest", "mistral-small-latest"],
 }
 
 
@@ -50,7 +51,7 @@ def resolve_user_post_model_choice(user_id: int | None, db) -> UserPostModelChoi
 
 
 def _ensure_provider_key(provider: str) -> None:
-    from app.config import ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY
+    from app.config import ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, MISTRAL_API_KEY
 
     if provider == "openai" and not (OPENAI_API_KEY or "").strip():
         raise MissingProviderKeyError("openai")
@@ -58,6 +59,8 @@ def _ensure_provider_key(provider: str) -> None:
         raise MissingProviderKeyError("gemini")
     if provider == "anthropic" and not (ANTHROPIC_API_KEY or "").strip():
         raise MissingProviderKeyError("anthropic")
+    if provider == "mistral" and not (MISTRAL_API_KEY or "").strip():
+        raise MissingProviderKeyError("mistral")
 
 
 def generate_post_text_for_user(
