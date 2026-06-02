@@ -70,6 +70,8 @@ from app.mistral_service import (
     generate_ai_recommendations,
 )
 from app.routers import images, models as models_router
+from app.routers.persona_image_templates import router as persona_image_templates_router
+from app.routers.brand_automation import router as brand_automation_router
 from app.mistral_service import (
     suggest_prompt_improvement,
     synthesize_learned_strategy,
@@ -133,7 +135,7 @@ async def _ensure_supabase_storage_bucket() -> None:
         print("  [SKIP] Supabase storage setup skipped — SUPABASE_URL or SUPABASE_SERVICE_KEY not set.")
         return
 
-    bucket_name = "generated-images"
+    bucket_names = ["generated-images", "image-templates"]
     headers = {
         "apikey": SUPABASE_SERVICE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
@@ -146,25 +148,28 @@ async def _ensure_supabase_storage_bucket() -> None:
         list_resp = await client.get(f"{storage_url}/bucket", headers=headers)
         if list_resp.status_code == 200:
             existing = [b.get("name") for b in list_resp.json()]
-            if bucket_name in existing:
-                print(f"  [OK] Supabase bucket '{bucket_name}' already exists.")
+            if all(name in existing for name in bucket_names):
+                for name in bucket_names:
+                    print(f"  [OK] Supabase bucket '{name}' already exists.")
                 return
 
-        # Create the bucket with public read access
-        create_resp = await client.post(
-            f"{storage_url}/bucket",
-            headers=headers,
-            json={"id": bucket_name, "name": bucket_name, "public": True},
-        )
-        if create_resp.status_code in (200, 201):
-            print(f"  [OK] Supabase bucket '{bucket_name}' created with public read access.")
-        elif create_resp.status_code == 409:
-            print(f"  [OK] Supabase bucket '{bucket_name}' already exists (conflict).")
-        else:
-            print(
-                f"  [WARN] Could not create Supabase bucket '{bucket_name}': "
-                f"{create_resp.status_code} {create_resp.text[:200]}"
+        for bucket_name in bucket_names:
+            if list_resp.status_code == 200 and bucket_name in (existing or []):
+                continue
+            create_resp = await client.post(
+                f"{storage_url}/bucket",
+                headers=headers,
+                json={"id": bucket_name, "name": bucket_name, "public": True},
             )
+            if create_resp.status_code in (200, 201):
+                print(f"  [OK] Supabase bucket '{bucket_name}' created with public read access.")
+            elif create_resp.status_code == 409:
+                print(f"  [OK] Supabase bucket '{bucket_name}' already exists (conflict).")
+            else:
+                print(
+                    f"  [WARN] Could not create Supabase bucket '{bucket_name}': "
+                    f"{create_resp.status_code} {create_resp.text[:200]}"
+                )
 
 
 @asynccontextmanager
@@ -185,6 +190,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Auto Poster API", lifespan=lifespan)
 app.include_router(images.router)
 app.include_router(models_router.router)
+app.include_router(persona_image_templates_router)
+app.include_router(brand_automation_router)
 
 _allowed_origins = [
     FRONTEND_URL,

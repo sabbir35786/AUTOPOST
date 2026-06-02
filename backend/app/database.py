@@ -236,6 +236,7 @@ def _ensure_product_blueprint_columns() -> None:
         "post_logs",
         {
             "media_library_id": "uuid",
+            "image_url": "text",
         },
     )
     _add_missing_columns(

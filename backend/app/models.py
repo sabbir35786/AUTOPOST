@@ -122,6 +122,7 @@ class PostLog(Base):
     facebook_post_id: Mapped[str | None] = mapped_column(String, nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     topic: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_generated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     auto_generated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -455,6 +456,65 @@ class ImageTemplate(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     reference_image_url: Mapped[str] = mapped_column(Text, nullable=False)
     layers_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class PersonaImageTemplate(Base):
+    __tablename__ = "persona_image_templates"
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    persona_id: Mapped[int] = mapped_column(
+        ForeignKey("ai_personas.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    reference_image_url: Mapped[str] = mapped_column(Text, nullable=False)
+    template_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class BrandProfile(Base):
+    __tablename__ = "brand_profiles"
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True, nullable=False)
+    brand_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    primary_color_hex: Mapped[str | None] = mapped_column(String, nullable=True)
+    secondary_color_hex: Mapped[str | None] = mapped_column(String, nullable=True)
+    tone: Mapped[str | None] = mapped_column(String, nullable=True)
+    logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    brand_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class BrandDNA(Base):
+    __tablename__ = "brand_dna"
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True, nullable=False)
+    source_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    dna_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class PostImageAssets(Base):
+    __tablename__ = "post_image_assets"
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    post_id: Mapped[int] = mapped_column(ForeignKey("post_logs.id", ondelete="CASCADE"), unique=True, index=True, nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    persona_id: Mapped[int | None] = mapped_column(ForeignKey("ai_personas.id", ondelete="SET NULL"), nullable=True)
+    background_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subject_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    assets_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
