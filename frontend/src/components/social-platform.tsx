@@ -469,6 +469,7 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
   const [aiSettingsReady, setAiSettingsReady] = React.useState(false)
   const [topicHint, setTopicHint] = React.useState("")
   const [generating, setGenerating] = React.useState(false)
+  const [generatingImage, setGeneratingImage] = React.useState(false)
   const [hasAiDraft, setHasAiDraft] = React.useState(false)
   const remaining = 63206 - content.length
   const selectedPage = publishablePages.find((page) => page.id === selectedPageId) || publishablePages[0]
@@ -505,6 +506,46 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
       toast.error(error?.response?.data?.detail || "AI generation failed.")
     } finally {
       setGenerating(false)
+    }
+  }
+
+  async function generateImageWithAI() {
+    if (!content.trim()) return toast.error("Write post content first.")
+    setGeneratingImage(true)
+    try {
+      const promptResp = await api.post<{ generated_prompt: string }>("/api/images/prompt/generate-from-text", {
+        post_text: content,
+      })
+      const generatedPrompt = (promptResp.data.generated_prompt || "").trim()
+      if (!generatedPrompt) throw new Error("Image prompt generation returned empty content.")
+
+      const jobResp = await api.post<{ job_id: string }>("/api/images/generate", {
+        custom_prompt: generatedPrompt,
+        aspect_ratio: "1:1",
+        max_wait_seconds: 120,
+      })
+
+      const jobId = jobResp.data.job_id
+      if (!jobId) throw new Error("Image generation did not return a job id.")
+
+      const deadline = Date.now() + 120_000
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 1500))
+        const statusResp = await api.get<{ status: string; image_url?: string; error_message?: string }>(`/api/images/job/${jobId}`)
+        if (statusResp.data.status === "completed" && statusResp.data.image_url) {
+          setMedia(statusResp.data.image_url)
+          toast.success("AI image generated.")
+          return
+        }
+        if (statusResp.data.status === "failed") {
+          throw new Error(statusResp.data.error_message || "Image generation failed.")
+        }
+      }
+      toast.warning("Image generation is taking longer than expected. Check Media Library in a minute.")
+    } catch (error: any) {
+      toast.error(getApiErrorMessage(error, error?.message || "AI image generation failed."))
+    } finally {
+      setGeneratingImage(false)
     }
   }
 
@@ -568,6 +609,10 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
               <Button className="bg-purple-700 text-white hover:bg-purple-800" onClick={generateWithAI} disabled={generating}>
                 {generating ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
                 {generating ? "Generating..." : hasAiDraft ? "Regenerate" : "Generate with AI"}
+              </Button>
+              <Button className="bg-slate-900 text-white hover:bg-slate-800" onClick={generateImageWithAI} disabled={generatingImage || !content.trim()}>
+                {generatingImage ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+                {generatingImage ? "Generating image..." : "Generate image with AI"}
               </Button>
             </> : <Button asChild variant="outline"><Link href="/dashboard/ai-settings">Set up an AI persona</Link></Button>}
           </div>

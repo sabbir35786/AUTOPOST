@@ -150,7 +150,7 @@ def generate_persona_post_with_user_model(
             prompt=prompt,
             system_prompt=system_prompt,
             temperature=temperature,
-            max_tokens=1600,
+            max_tokens=4096,
             db=db,
         )
     except MissingUserKeyError as e:
@@ -163,7 +163,7 @@ def generate_persona_post_with_user_model(
             prompt=prompt,
             system_prompt=system_prompt,
             temperature=temperature,
-            max_tokens=1600,
+            max_tokens=4096,
             db=db,
         )
     if not content or not content.strip():
@@ -203,7 +203,7 @@ def generate_post_content(niche: str, db: Session | None = None, user_id: int | 
                 prompt=build_post_prompt(niche),
                 system_prompt=system_prompt,
                 temperature=0.8,
-                max_tokens=1600,
+                max_tokens=4096,
                 db=db,
             )
         except MissingUserKeyError as e:
@@ -216,7 +216,7 @@ def generate_post_content(niche: str, db: Session | None = None, user_id: int | 
                 prompt=build_post_prompt(niche),
                 system_prompt=system_prompt,
                 temperature=0.8,
-                max_tokens=1600,
+                max_tokens=4096,
                 db=db,
             )
         if not content or not content.strip():
