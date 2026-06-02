@@ -196,6 +196,10 @@ class AIPersonaBase(BaseModel):
     is_active: bool = True
     learning_mode_enabled: bool = True
     minimum_engagement_threshold: float = 0
+    include_image: bool = False
+    image_fallback_policy: str = "text_only"
+    template_image_generation_enabled: bool = False
+    template_logo_url: str | None = None
 
 
 class AIPersonaCreate(AIPersonaBase):
@@ -219,6 +223,10 @@ class AIPersonaRead(AIPersonaBase):
     last_performance_update_at: datetime | None = None
     last_auto_post_at: datetime | None = None
     learned_patterns_summary: str | None = None
+    include_image: bool = False
+    image_fallback_policy: str = "text_only"
+    template_image_generation_enabled: bool = False
+    template_logo_url: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -396,4 +404,3 @@ class ImageTemplateRead(ImageTemplateBase):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
-

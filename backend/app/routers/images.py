@@ -877,7 +877,7 @@ class TestTemplateRequest(BaseModel):
 
 class PublishTemplateRequest(BaseModel):
     persona_id: int
-    post_text: str
+    post_text: str | None = None
     include_image: bool = True
 
 
@@ -1182,6 +1182,16 @@ async def publish_template_post(
     if not persona:
         raise HTTPException(status_code=404, detail="Persona not found")
 
+    post_text = req.post_text
+    if not post_text or not post_text.strip():
+        from app.posts import generate_persona_post_with_user_model
+
+        post_text = generate_persona_post_with_user_model(
+            db=db,
+            settings=persona,
+            topic_hint=None,
+        )
+
     # Get Facebook connection
     connection = db.query(models.FacebookConnection).filter(
         models.FacebookConnection.id == persona.page_connection_id
@@ -1200,7 +1210,7 @@ async def publish_template_post(
             try:
                 media_library_id, _ = await generate_template_layered_image(
                     persona_id=req.persona_id,
-                    post_text=req.post_text,
+                    post_text=post_text,
                     topic_hint=None,
                     db=db,
                     user_id=current_user.id
@@ -1223,7 +1233,7 @@ async def publish_template_post(
         user_id=current_user.id,
         facebook_connection_id=connection.id,
         ai_persona_id=persona.id,
-        content=req.post_text,
+        content=post_text,
         status="draft",
         media_library_id=media_library_id,
         ai_generated=True,
@@ -1455,4 +1465,3 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
         "copy_map": copy_map,
         "bg_prompt": bg_prompt
     }
-

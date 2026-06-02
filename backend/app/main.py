@@ -620,6 +620,10 @@ def _serialize_ai_persona(persona: models.AIPersona) -> dict:
         "last_performance_update_at": persona.last_performance_update_at,
         "last_auto_post_at": persona.last_auto_post_at,
         "learned_patterns_summary": persona.learned_patterns_summary,
+        "include_image": persona.include_image,
+        "image_fallback_policy": persona.image_fallback_policy,
+        "template_image_generation_enabled": persona.template_image_generation_enabled,
+        "template_logo_url": persona.template_logo_url,
     }
 
 
@@ -1124,6 +1128,10 @@ def create_ai_persona(
     persona.is_active = payload.is_active
     persona.learning_mode_enabled = payload.learning_mode_enabled
     persona.minimum_engagement_threshold = max(0, payload.minimum_engagement_threshold)
+    persona.include_image = payload.template_image_generation_enabled or payload.include_image
+    persona.image_fallback_policy = payload.image_fallback_policy
+    persona.template_image_generation_enabled = payload.template_image_generation_enabled
+    persona.template_logo_url = payload.template_logo_url
     db.flush()
     _save_prompt_template_snapshot(db, persona)
     db.commit()
@@ -1160,6 +1168,10 @@ def update_ai_persona(
     persona.is_active = payload.is_active
     persona.learning_mode_enabled = payload.learning_mode_enabled
     persona.minimum_engagement_threshold = max(0, payload.minimum_engagement_threshold)
+    persona.include_image = payload.template_image_generation_enabled or payload.include_image
+    persona.image_fallback_policy = payload.image_fallback_policy
+    persona.template_image_generation_enabled = payload.template_image_generation_enabled
+    persona.template_logo_url = payload.template_logo_url
     persona.updated_at = datetime.now(timezone.utc)
     _save_prompt_template_snapshot(db, persona)
     db.commit()
@@ -1847,6 +1859,48 @@ async def generate_and_publish_ai_post(
         )
         db.add(post_log)
         db.flush()
+        if settings.template_image_generation_enabled:
+            template_settings = (
+                db.query(models.ImagePromptSettings)
+                .filter(models.ImagePromptSettings.persona_id == settings.id)
+                .first()
+            )
+            if template_settings and template_settings.template_layers_json:
+                try:
+                    from app.routers.images import generate_template_layered_image
+
+                    media_id, _ = await generate_template_layered_image(
+                        persona_id=settings.id,
+                        post_text=content,
+                        topic_hint=payload.topic_hint,
+                        db=db,
+                        user_id=current_user.id,
+                    )
+                    post_log.media_library_id = media_id
+                except Exception as exc:
+                    if settings.image_fallback_policy == "skip_post":
+                        post_log.status = "failed"
+                        post_log.error_message = f"template_image_generation_failed: {exc}"
+                        db.commit()
+                        return {
+                            "success": False,
+                            "id": post_log.id,
+                            "status": post_log.status,
+                            "error_message": post_log.error_message,
+                        }
+                    if settings.image_fallback_policy == "use_library":
+                        any_unused = (
+                            db.query(models.MediaLibrary)
+                            .filter(
+                                models.MediaLibrary.user_id == current_user.id,
+                                models.MediaLibrary.is_used.is_(False),
+                            )
+                            .order_by(models.MediaLibrary.created_at.asc())
+                            .first()
+                        )
+                        if any_unused:
+                            post_log.media_library_id = str(any_unused.id)
+                    # text_only falls through and publishes the caption alone.
         success = await publish_post_to_facebook(db, post_log, connection)
         return {"success": success, "id": post_log.id, "status": post_log.status, "error_message": post_log.error_message}
     except RuntimeError as exc:
