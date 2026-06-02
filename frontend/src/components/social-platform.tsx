@@ -1909,8 +1909,8 @@ function TemplateLibraryView() {
                     const key = String(layer?.type || "unknown")
                     acc[key] = (acc[key] || 0) + 1
                     return acc
-                  }, {})
-                  const entries = Object.entries(counts)
+                  }, {} as Record<string, number>)
+                  const entries = Object.entries(counts) as [string, number][]
                   if (!entries.length) return <p>No layers found.</p>
                   return entries.map(([type, count]) => <p key={type}>{count} {type.replaceAll("_", " ")} layer{count > 1 ? "s" : ""}</p>)
                 })()}
