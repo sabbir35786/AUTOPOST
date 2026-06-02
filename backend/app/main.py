@@ -1128,7 +1128,7 @@ def create_ai_persona(
     persona.is_active = payload.is_active
     persona.learning_mode_enabled = payload.learning_mode_enabled
     persona.minimum_engagement_threshold = max(0, payload.minimum_engagement_threshold)
-    persona.include_image = payload.template_image_generation_enabled or payload.include_image
+    persona.include_image = payload.template_image_generation_enabled
     persona.image_fallback_policy = payload.image_fallback_policy
     persona.template_image_generation_enabled = payload.template_image_generation_enabled
     persona.template_logo_url = payload.template_logo_url
@@ -1168,7 +1168,7 @@ def update_ai_persona(
     persona.is_active = payload.is_active
     persona.learning_mode_enabled = payload.learning_mode_enabled
     persona.minimum_engagement_threshold = max(0, payload.minimum_engagement_threshold)
-    persona.include_image = payload.template_image_generation_enabled or payload.include_image
+    persona.include_image = payload.template_image_generation_enabled
     persona.image_fallback_policy = payload.image_fallback_policy
     persona.template_image_generation_enabled = payload.template_image_generation_enabled
     persona.template_logo_url = payload.template_logo_url
