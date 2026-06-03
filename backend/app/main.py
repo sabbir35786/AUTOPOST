@@ -1,12 +1,14 @@
 from contextlib import asynccontextmanager
 import asyncio
 import logging
+import os
 import secrets
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode, urlparse
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, status
+from sqlalchemy import text
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
@@ -91,6 +93,50 @@ from app.qstash import schedule_scheduler_endpoint, _print_qstash_config_status
 pending_facebook_credentials: dict[int, dict] = {}
 last_scheduler_run_at: datetime | None = None
 logger = logging.getLogger(__name__)
+
+
+def _run_database_migrations() -> None:
+    """Run pending database migrations on startup."""
+    try:
+        from app.database import engine
+        
+        migration_dir = os.path.join(os.path.dirname(__file__), '..', 'migrations')
+        
+        # Migration files to run in order (priority order)
+        MIGRATIONS = [
+            'fix_image_templates_schema.sql',  # Critical fix for schema issues
+            'add_image_generation_tables.sql',
+            'add_template_image_generation.sql',
+            'add_user_settings_models.sql',
+            'add_sessions_table.sql',
+            'add_media_library_id_to_post_logs.sql',
+            'fix_facebook_connections_flow.sql',
+            'rebuild_image_templates_system.sql',
+        ]
+        
+        for migration_file in MIGRATIONS:
+            migration_path = os.path.join(migration_dir, migration_file)
+            
+            if not os.path.exists(migration_path):
+                continue
+            
+            try:
+                with open(migration_path, 'r') as f:
+                    sql_script = f.read()
+                
+                with engine.begin() as conn:
+                    for statement in sql_script.split(';'):
+                        if statement.strip():
+                            conn.execute(text(statement))
+                logger.info(f"✅ Migration {migration_file} completed")
+            except Exception as e:
+                logger.warning(f"⚠️ Migration {migration_file} skipped or had non-critical error: {e}")
+                continue
+        
+        logger.info("🎉 All migrations completed successfully")
+    except Exception as e:
+        logger.warning(f"⚠️ Database migrations could not be run: {e}")
+
 
 
 def _print_startup_config_status() -> None:
@@ -178,6 +224,7 @@ async def lifespan(app: FastAPI):
     _print_startup_config_status()
     _print_qstash_config_status()
     create_database_tables()
+    _run_database_migrations()  # Run pending migrations after creating tables
     clear_all_user_posting_locks()
     asyncio.create_task(_ensure_supabase_storage_bucket())
     if QSTASH_TOKEN:
