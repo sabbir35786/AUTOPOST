@@ -51,6 +51,13 @@ def create_database_tables() -> None:
         _migrate_ai_page_settings_to_personas()
     except OperationalError as exc:
         message = str(exc.orig).lower() if getattr(exc, "orig", None) else str(exc).lower()
+        
+        # Check for statement timeout - these are non-critical schema updates, allow startup
+        if "statement timeout" in message or "canceling statement" in message:
+            print(f"[MIGRATION WARNING] Database statement timeout during startup (non-critical): {message}")
+            print("[MIGRATION WARNING] App will start, but some schema migrations may be pending.")
+            return
+        
         if "failed to resolve host" in message and "supabase.co" in message:
             raise RuntimeError(
                 "Could not resolve the Supabase direct database host. "
@@ -146,56 +153,89 @@ def _ensure_facebook_connection_flow() -> None:
     )
 
     is_postgres = SQLALCHEMY_DATABASE_URL.startswith("postgresql")
-    with engine.begin() as connection:
-        if is_postgres:
-            connection.execute(
-                text("ALTER TABLE facebook_connections ALTER COLUMN page_access_token DROP NOT NULL")
-            )
-            connection.execute(
-                text("ALTER TABLE facebook_connections DROP CONSTRAINT IF EXISTS facebook_connections_user_id_key")
-            )
-            connection.execute(
-                text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_connections_user_page "
-                    "ON facebook_connections(user_id, page_id)"
+    try:
+        with engine.begin() as connection:
+            if is_postgres:
+                # These constraint operations may timeout on large tables in production.
+                # We execute them with error handling to allow app startup even if they timeout.
+                try:
+                    connection.execute(
+                        text("ALTER TABLE facebook_connections ALTER COLUMN page_access_token DROP NOT NULL")
+                    )
+                except Exception as e:
+                    print(f"[MIGRATION WARNING] Could not alter facebook_connections column: {e}")
+                
+                try:
+                    connection.execute(
+                        text("ALTER TABLE facebook_connections DROP CONSTRAINT IF EXISTS facebook_connections_user_id_key")
+                    )
+                except Exception as e:
+                    print(f"[MIGRATION WARNING] Could not drop facebook_connections constraint: {e}")
+                
+                try:
+                    connection.execute(
+                        text(
+                            "CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_connections_user_page "
+                            "ON facebook_connections(user_id, page_id)"
+                        )
+                    )
+                except Exception as e:
+                    print(f"[MIGRATION WARNING] Could not create index on facebook_connections: {e}")
+                
+                try:
+                    connection.execute(
+                        text("ALTER TABLE post_logs DROP CONSTRAINT IF EXISTS post_logs_facebook_connection_id_fkey")
+                    )
+                except Exception as e:
+                    print(f"[MIGRATION WARNING] Could not drop post_logs constraint: {e}")
+                
+                try:
+                    connection.execute(
+                        text(
+                            """
+                            ALTER TABLE post_logs
+                            ADD CONSTRAINT post_logs_facebook_connection_id_fkey
+                            FOREIGN KEY (facebook_connection_id)
+                            REFERENCES facebook_connections(id)
+                            ON DELETE SET NULL
+                            """
+                        )
+                    )
+                except Exception as e:
+                    print(f"[MIGRATION WARNING] Could not add post_logs constraint: {e}")
+                
+                try:
+                    connection.execute(
+                        text("ALTER TABLE ai_personas DROP CONSTRAINT IF EXISTS ai_personas_page_connection_id_fkey")
+                    )
+                except Exception as e:
+                    print(f"[MIGRATION WARNING] Could not drop ai_personas constraint: {e}")
+                
+                try:
+                    connection.execute(
+                        text(
+                            """
+                            ALTER TABLE ai_personas
+                            ADD CONSTRAINT ai_personas_page_connection_id_fkey
+                            FOREIGN KEY (page_connection_id)
+                            REFERENCES facebook_connections(id)
+                            ON DELETE SET NULL
+                            """
+                        )
+                    )
+                except Exception as e:
+                    print(f"[MIGRATION WARNING] Could not add ai_personas constraint: {e}")
+            elif SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+                # SQLite cannot drop NOT NULL or recreate FK constraints easily at runtime.
+                connection.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_connections_user_page "
+                        "ON facebook_connections(user_id, page_id)"
+                    )
                 )
-            )
-            connection.execute(
-                text("ALTER TABLE post_logs DROP CONSTRAINT IF EXISTS post_logs_facebook_connection_id_fkey")
-            )
-            connection.execute(
-                text(
-                    """
-                    ALTER TABLE post_logs
-                    ADD CONSTRAINT post_logs_facebook_connection_id_fkey
-                    FOREIGN KEY (facebook_connection_id)
-                    REFERENCES facebook_connections(id)
-                    ON DELETE SET NULL
-                    """
-                )
-            )
-            connection.execute(
-                text("ALTER TABLE ai_personas DROP CONSTRAINT IF EXISTS ai_personas_page_connection_id_fkey")
-            )
-            connection.execute(
-                text(
-                    """
-                    ALTER TABLE ai_personas
-                    ADD CONSTRAINT ai_personas_page_connection_id_fkey
-                    FOREIGN KEY (page_connection_id)
-                    REFERENCES facebook_connections(id)
-                    ON DELETE SET NULL
-                    """
-                )
-            )
-        elif SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
-            # SQLite cannot drop NOT NULL or recreate FK constraints easily at runtime.
-            connection.execute(
-                text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_facebook_connections_user_page "
-                    "ON facebook_connections(user_id, page_id)"
-                )
-            )
+    except Exception as e:
+        # Log migration errors but don't fail startup - these are non-critical schema updates
+        print(f"[MIGRATION WARNING] Skipping facebook_connection_flow migrations: {e}")
 
 
 def _ensure_product_blueprint_columns() -> None:
