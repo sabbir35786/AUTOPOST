@@ -414,7 +414,7 @@ async def _load_background_asset_image(
         blob = await _download_bytes(str(image_url))
         if blob:
             return Image.open(io.BytesIO(blob)).convert("RGBA").resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
-    return Image.new("RGBA", (canvas_w, canvas_h), _parse_hex_color(str(value.get("color_hex") or ""), default=(40, 40, 40, 255))
+    return Image.new("RGBA", (canvas_w, canvas_h), _parse_hex_color(str(value.get("color_hex") or ""), default=(40, 40, 40, 255)))
 
 
 def _assemble_manual_template_preview(

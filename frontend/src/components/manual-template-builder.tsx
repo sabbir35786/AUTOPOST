@@ -710,6 +710,13 @@ export function ManualTemplateBuilder({ onCancel, onSaved }: ManualTemplateBuild
   )
 }
 
+type LayerLayoutKey =
+  | "position_x_percent"
+  | "position_y_percent"
+  | "width_percent"
+  | "height_percent"
+  | "z_index"
+
 function LayerEditor({
   layer,
   fontAssets,
@@ -721,7 +728,7 @@ function LayerEditor({
   onChange: (patch: Partial<LayerDraft>) => void
   onClose: () => void
 }) {
-  const num = (label: string, key: keyof LayerDraft, min = 0, max = 100) => (
+  const num = (label: string, key: LayerLayoutKey, min = 0, max = 100) => (
     <div className="grid gap-1">
       <Label className="text-xs">{label}</Label>
       <Input
@@ -729,7 +736,7 @@ function LayerEditor({
         min={min}
         max={max}
         step={0.1}
-        value={Number(layer[key as keyof LayerDraft])}
+        value={Number(layer[key])}
         onChange={(e) => onChange({ [key]: Number(e.target.value) } as Partial<LayerDraft>)}
       />
     </div>
@@ -796,8 +803,28 @@ function LayerEditor({
             onChange={(color_options) => onChange({ color_options })}
           />
           <div className="grid grid-cols-2 gap-3">
-            {num("Font size min %", "font_size_min_percent", 0.5, 50)}
-            {num("Font size max %", "font_size_max_percent", 0.5, 50)}
+            <div className="grid gap-1">
+              <Label className="text-xs">Font size min %</Label>
+              <Input
+                type="number"
+                min={0.5}
+                max={50}
+                step={0.1}
+                value={layer.font_size_min_percent}
+                onChange={(e) => onChange({ font_size_min_percent: Number(e.target.value) })}
+              />
+            </div>
+            <div className="grid gap-1">
+              <Label className="text-xs">Font size max %</Label>
+              <Input
+                type="number"
+                min={0.5}
+                max={50}
+                step={0.1}
+                value={layer.font_size_max_percent}
+                onChange={(e) => onChange({ font_size_max_percent: Number(e.target.value) })}
+              />
+            </div>
           </div>
           <div className="grid gap-2">
             <Label>Text align options</Label>
