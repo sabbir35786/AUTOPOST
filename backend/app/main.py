@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode, urlparse
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
@@ -1233,6 +1233,19 @@ def update_ai_persona(
     db.refresh(persona)
     return _serialize_ai_persona(persona)
 
+@app.delete("/api/ai/personas/{persona_id}", response_model=dict)
+def delete_ai_persona(
+    persona_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    persona = db.query(models.AIPersona).filter(models.AIPersona.id == persona_id, models.AIPersona.user_id == current_user.id).first()
+    if not persona:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persona not found")
+    db.delete(persona)
+    db.commit()
+    return {"detail": "Persona deleted"}
+
 
 @app.get("/api/ai/personas/{persona_id}/strategy", response_model=schemas.LearnedStrategyRead | None)
 def get_persona_strategy(
@@ -2017,6 +2030,7 @@ def test_ai_prompt(
 @app.post("/api/ai/generate-and-publish", response_model=schemas.PostPublishResponse)
 async def generate_and_publish_ai_post(
     payload: schemas.AIGenerateRequest,
+    background_tasks: BackgroundTasks,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -2067,48 +2081,21 @@ async def generate_and_publish_ai_post(
         )
         db.add(post_log)
         db.flush()
-        if settings.template_image_generation_enabled:
-            template_settings = (
-                db.query(models.ImagePromptSettings)
-                .filter(models.ImagePromptSettings.persona_id == settings.id)
-                .first()
-            )
-            if template_settings and template_settings.template_layers_json:
-                try:
-                    from app.routers.images import generate_template_layered_image
+        assignment = (
+            db.query(models.PersonaImageTemplateAssignment)
+            .filter(models.PersonaImageTemplateAssignment.persona_id == settings.id)
+            .first()
+        )
+        if assignment:
+            from app.routers.persona_image_templates import generate_post_image_background
 
-                    media_id, _ = await generate_template_layered_image(
-                        persona_id=settings.id,
-                        post_text=content,
-                        topic_hint=payload.topic_hint,
-                        db=db,
-                        user_id=current_user.id,
-                    )
-                    post_log.media_library_id = media_id
-                except Exception as exc:
-                    if settings.image_fallback_policy == "skip_post":
-                        post_log.status = "failed"
-                        post_log.error_message = f"template_image_generation_failed: {exc}"
-                        db.commit()
-                        return {
-                            "success": False,
-                            "id": post_log.id,
-                            "status": post_log.status,
-                            "error_message": post_log.error_message,
-                        }
-                    if settings.image_fallback_policy == "use_library":
-                        any_unused = (
-                            db.query(models.MediaLibrary)
-                            .filter(
-                                models.MediaLibrary.user_id == current_user.id,
-                                models.MediaLibrary.is_used.is_(False),
-                            )
-                            .order_by(models.MediaLibrary.created_at.asc())
-                            .first()
-                        )
-                        if any_unused:
-                            post_log.media_library_id = str(any_unused.id)
-                    # text_only falls through and publishes the caption alone.
+            post_log.image_url = None
+            background_tasks.add_task(
+                generate_post_image_background,
+                post_log.id,
+                current_user.id,
+                assignment.image_template_id,
+            )
         success = await publish_post_to_facebook(db, post_log, connection)
         return {"success": success, "id": post_log.id, "status": post_log.status, "error_message": post_log.error_message}
     except ProviderConfigurationError as exc:
@@ -2556,8 +2543,8 @@ def post_history(
 def _serialize_post(post: models.PostLog, connection: models.FacebookConnection | None = None):
     latest_snapshot = None
     threshold = 0
+    db = object_session(post)
     if post.id:
-        db = object_session(post)
         if db is not None:
             latest_snapshot = (
                 db.query(models.PostEngagementSnapshot)
@@ -2569,6 +2556,13 @@ def _serialize_post(post: models.PostLog, connection: models.FacebookConnection 
                 persona = db.get(models.AIPersona, post.ai_persona_id)
                 threshold = float(persona.minimum_engagement_threshold or 0) if persona else 0
     score = float(latest_snapshot.engagement_score or 0) if latest_snapshot else 0
+    image_generation = None
+    if post.id and db is not None:
+        image_generation = (
+            db.query(models.PostImageGeneration)
+            .filter(models.PostImageGeneration.post_id == post.id)
+            .first()
+        )
     return {
         "id": post.id,
         "content": post.content,
@@ -2576,6 +2570,8 @@ def _serialize_post(post: models.PostLog, connection: models.FacebookConnection 
         "posted_at": post.posted_at,
         "scheduled_at": post.scheduled_at,
         "media_urls": post.media_urls or [],
+        "image_url": post.image_url,
+        "image_status": image_generation.status if image_generation else None,
         "link_url": post.link_url,
         "link_preview_data": post.link_preview_data,
         "page_name": connection.page_name if connection else None,

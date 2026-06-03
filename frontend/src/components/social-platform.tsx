@@ -63,6 +63,8 @@ type Post = {
   posted_at?: string | null
   scheduled_at?: string | null
   media_urls: string[]
+  image_url?: string | null
+  image_status?: string | null
   link_url?: string | null
   page_name?: string | null
   page_picture_url?: string | null
@@ -1228,6 +1230,17 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
     await loadPersonas()
   }
 
+  async function deletePersona(personaId: number) {
+    if (!window.confirm("Delete this persona?")) return;
+    try {
+      await api.delete(`/api/ai/personas/${personaId}`);
+      toast.success("Persona deleted.");
+      await loadPersonas();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err.message || "Could not delete persona.");
+    }
+  }
+
   async function handleStrategyDecision(action: string, promptOverride?: string) {
     if (!draft.id) return
     try {
@@ -1248,7 +1261,8 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
       const index = owner ? Math.max(0, personas.findIndex((persona) => persona.id === owner.id)) : 0
       return <button key={day} className={cn("min-h-24 rounded-md border p-3 text-left", owner ? personaColors[index % personaColors.length] : "border-dashed bg-white text-slate-500")} onClick={() => setEditing(owner || emptyPersona())}><div className="flex items-center justify-between"><span className="font-medium">{day}</span>{!owner ? <Plus className="size-4" /> : null}</div><p className="mt-3 text-xs">{owner?.persona_name || "Unassigned"}</p></button>
     })}</div>
-    <div className="grid gap-4 md:grid-cols-2">{personas.map((persona, index) => <Card key={persona.id}><CardContent className="grid gap-3 p-5"><div className="flex items-start justify-between gap-3"><div><h2 className="font-semibold">{persona.persona_name}</h2><p className="text-sm text-slate-500">{persona.assigned_days.join(", ") || "No days assigned"}</p></div><span className={cn("rounded-full px-2 py-1 text-xs font-medium", persona.is_active ? "bg-green-50 text-green-700" : "bg-slate-100 text-slate-600")}>{persona.is_active ? "Active" : "Paused"}</span></div><div className="flex flex-wrap gap-2">{persona.tone_tags.map((tag) => <span key={tag} className={cn("rounded-full border px-2 py-1 text-xs", personaColors[index % personaColors.length])}>{tag}</span>)}</div><div className="flex items-center justify-between text-sm text-slate-500"><span>{persona.posting_time_slots.join(", ")}</span><span>Score {Number(persona.performance_score || 0.5).toFixed(2)}</span></div><Button variant="outline" onClick={() => setEditing(persona)}>Edit</Button></CardContent></Card>)}{personas.length < 5 ? <Button variant="outline" className="min-h-36 border-dashed" onClick={() => setEditing({ ...emptyPersona(), persona_name: `Persona ${personas.length + 1}` })}><Plus className="size-4" /> Add New Persona</Button> : null}</div>
+    <div className="grid gap-4 md:grid-cols-2">{personas.map((persona, index) => <Card key={persona.id}><CardContent className="grid gap-3 p-5"><div className="flex items-start justify-between gap-3"><div><h2 className="font-semibold">{persona.persona_name}</h2><p className="text-sm text-slate-500">{persona.assigned_days.join(", ") || "No days assigned"}</p></div><span className={cn("rounded-full px-2 py-1 text-xs font-medium", persona.is_active ? "bg-green-50 text-green-700" : "bg-slate-100 text-slate-600")}>{persona.is_active ? "Active" : "Paused"}</span></div><div className="flex flex-wrap gap-2">{persona.tone_tags.map((tag) => <span key={tag} className={cn("rounded-full border px-2 py-1 text-xs", personaColors[index % personaColors.length])}>{tag}</span>)}</div><div className="flex items-center justify-between text-sm text-slate-500"><span>{persona.posting_time_slots.join(", ")}</span><span>Score {Number(persona.performance_score || 0.5).toFixed(2)}</span></div><Button variant="outline" onClick={() => setEditing(persona)}>Edit</Button>
+        <Button variant="destructive" onClick={() => deletePersona(persona.id)}>Delete</Button></CardContent></Card>)}{personas.length < 5 ? <Button variant="outline" className="min-h-36 border-dashed" onClick={() => setEditing({ ...emptyPersona(), persona_name: `Persona ${personas.length + 1}` })}><Plus className="size-4" /> Add New Persona</Button> : null}</div>
     <PerformanceInsightsPanel insights={insights} personas={personas} timezone={Intl.DateTimeFormat().resolvedOptions().timeZone} />
   </div>}{editing ? <PromptStudioModal draft={draft} config={config} simplePrompt={simplePrompt} rawPrompt={rawPrompt} previewTab={previewTab} saving={saving} strategy={strategy} fromStyleAnalyzer={prefilled} onStrategyDecision={handleStrategyDecision} onPreviewTab={setPreviewTab} onChange={setEditing} onConfig={updateConfig} onToggleTone={toggleTone} onToggleDay={toggleDay} onToggleConfigList={toggleConfigList} onAddTag={addTag} onSave={saveSettings} onTest={testSample} onResetLearning={resetLearning} onClose={() => { setEditing(null); setPrefilled(false) }} /> : null}{sample ? <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4"><Card className="max-w-xl"><CardHeader><CardTitle>Sample AI Post</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="whitespace-pre-wrap text-sm text-slate-700">{sample}</p><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={() => setSample("")}>Close</Button></CardContent></Card></div> : null}</>
 }
@@ -1922,7 +1936,8 @@ function Stat({ label, value, tone = "blue" }: { label: string; value: number; t
 }
 
 function PostRow({ post, timezone }: { post: Post; timezone: string }) {
-  return <div className="grid gap-2 rounded-md border p-3"><div className="flex items-center justify-between gap-2"><div className="flex flex-wrap gap-2"><span className={cn("rounded-full px-2 py-1 text-xs font-medium", badgeClass(post.status))}>{post.status}</span>{post.ai_generated ? <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2 py-1 text-xs font-medium text-purple-700"><Sparkles className="size-3" /> AI Generated</span> : null}</div><span className="text-xs text-slate-500">{formatDate(post.posted_at || post.scheduled_at || null, timezone)}</span></div><p className="text-sm text-slate-600 whitespace-pre-wrap break-words overflow-visible">{post.content}</p>{post.media_urls?.[0] ? <img alt="" className="h-24 w-32 rounded-md object-cover" src={post.media_urls[0]} /> : null}</div>
+  const imageUrl = post.image_url || post.media_urls?.[0]
+  return <div className="grid gap-2 rounded-md border p-3"><div className="flex items-center justify-between gap-2"><div className="flex flex-wrap gap-2"><span className={cn("rounded-full px-2 py-1 text-xs font-medium", badgeClass(post.status))}>{post.status}</span>{post.ai_generated ? <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2 py-1 text-xs font-medium text-purple-700"><Sparkles className="size-3" /> AI Generated</span> : null}{post.image_status && post.image_status !== "completed" ? <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700">{post.image_status}</span> : null}</div><span className="text-xs text-slate-500">{formatDate(post.posted_at || post.scheduled_at || null, timezone)}</span></div><p className="text-sm text-slate-600 whitespace-pre-wrap break-words overflow-visible">{post.content}</p>{imageUrl ? <img alt="" className="h-24 w-32 rounded-md object-cover" src={imageUrl} /> : null}</div>
 }
 
 function Empty({ text, action }: { text: string; action: string }) {

@@ -160,6 +160,8 @@ class PostHistoryItem(BaseModel):
     posted_at: datetime | None = None
     scheduled_at: datetime | None = None
     media_urls: list[str] = Field(default_factory=list)
+    image_url: str | None = None
+    image_status: str | None = None
     link_url: str | None = None
     link_preview_data: dict | None = None
     page_name: str | None = None

@@ -471,6 +471,9 @@ class ImageTemplate(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     reference_image_url: Mapped[str] = mapped_column(Text, nullable=False)
     template_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    canvas_width: Mapped[int] = mapped_column(Integer, default=1024, nullable=False)
+    canvas_height: Mapped[int] = mapped_column(Integer, default=1024, nullable=False)
+    aspect_ratio: Mapped[str] = mapped_column(String, default="1:1", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 class PersonaImageTemplateAssignment(Base):
@@ -493,6 +496,24 @@ class PersonaImageTemplateAssignment(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+
+class PostImageGeneration(Base):
+    __tablename__ = "post_image_generations"
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    post_id: Mapped[int] = mapped_column(ForeignKey("post_logs.id", ondelete="CASCADE"), unique=True, index=True, nullable=False)
+    template_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("image_templates.id", ondelete="CASCADE"), nullable=False)
+    background_generation_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    overlay_texts: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
+    background_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    layer_overrides: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="pending", index=True, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class BrandProfile(Base):
@@ -533,4 +554,3 @@ class PostImageAssets(Base):
     assets_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
-

@@ -14,9 +14,10 @@ from sqlalchemy.orm import Session
 from app import models
 from app.auth import get_current_user
 from app.config import CRON_SECRET, GEMINI_API_KEY, SUPABASE_SERVICE_KEY, SUPABASE_URL
-from app.database import get_db
-from app.providers.image_providers import GeminiProvider
+from app.database import SessionLocal, get_db
+from app.providers.image_providers import GeminiProvider, get_image_provider_for_user
 from app.providers.llm_providers import generate_text
+from app.providers.user_model_settings import generate_post_text_for_user
 
 router = APIRouter(tags=["image-templates"])
 
@@ -32,6 +33,20 @@ _VISION_SYSTEM_INSTRUCTION = (
     "size as percent of canvas height), font_weight (string, only for text layers: bold/regular/light), text_color_hex "
     "(string, only for text layers), text_align (string, only for text layers: left/center/right), z_index (int, draw "
     "order starting from 0). Return only the raw JSON."
+)
+
+_VISION_SYSTEM_INSTRUCTION = (
+    "Analyze this image and return only a raw JSON object with these exact keys: canvas_width (int), "
+    "canvas_height (int), aspect_ratio (string like 1:1 or 4:5 or 9:16), background_type (one of: "
+    "solid_color, gradient, photo, illustration), background_color_hex (string or null), "
+    "background_style_description (string - describe the visual mood, colors, subject, style of the background "
+    "so it can be reproduced by an image generation API), layers (array). Each layer object: type (one of: "
+    "background_image, text, logo, overlay), z_index (int, 0 is bottom), position_x_percent (float 0-100), "
+    "position_y_percent (float 0-100), width_percent (float 0-100), height_percent (float 0-100), "
+    "font_size_percent (float, text layers only - as percent of canvas height), font_weight (text layers only: "
+    "bold or regular), text_color_hex (text layers only), text_align (text layers only: left center right), "
+    "overlay_color_hex (overlay layers only), overlay_opacity (overlay layers only, float 0-1). "
+    "Return only raw JSON."
 )
 
 
@@ -139,12 +154,18 @@ async def analyze_template(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to analyze reference image: {str(exc)}")
 
+    canvas_width = int(template_json.get("canvas_width") or 1024)
+    canvas_height = int(template_json.get("canvas_height") or 1024)
+    aspect_ratio = str(template_json.get("aspect_ratio") or "1:1")
     row = models.ImageTemplate(
         id=str(uuid.uuid4()),
         user_id=current_user.id,
         name=name.strip(),
         reference_image_url=reference_public_url,
         template_json=template_json,
+        canvas_width=canvas_width,
+        canvas_height=canvas_height,
+        aspect_ratio=aspect_ratio,
         created_at=datetime.now(timezone.utc),
     )
     db.add(row)
@@ -156,6 +177,9 @@ async def analyze_template(
         "name": row.name,
         "reference_image_url": row.reference_image_url,
         "template_json": row.template_json,
+        "canvas_width": row.canvas_width,
+        "canvas_height": row.canvas_height,
+        "aspect_ratio": row.aspect_ratio,
         "created_at": row.created_at,
     }
 
@@ -171,7 +195,18 @@ def list_templates(
         .order_by(models.ImageTemplate.created_at.desc())
         .all()
     )
-    return [{"id": r.id, "name": r.name, "reference_image_url": r.reference_image_url, "created_at": r.created_at} for r in rows]
+    return [
+        {
+            "id": r.id,
+            "name": r.name,
+            "reference_image_url": r.reference_image_url,
+            "aspect_ratio": r.aspect_ratio,
+            "canvas_width": r.canvas_width,
+            "canvas_height": r.canvas_height,
+            "created_at": r.created_at,
+        }
+        for r in rows
+    ]
 
 
 @router.get("/api/image-templates/{template_id}")
@@ -191,6 +226,9 @@ def get_template(
         "name": row.name,
         "reference_image_url": row.reference_image_url,
         "template_json": row.template_json,
+        "canvas_width": row.canvas_width,
+        "canvas_height": row.canvas_height,
+        "aspect_ratio": row.aspect_ratio,
         "created_at": row.created_at,
     }
 
@@ -306,6 +344,41 @@ def get_assigned_template(
     return {"image_template_id": template.id, "name": template.name}
 
 
+@router.get("/api/personas/{persona_id}/image-template")
+def get_persona_image_template(
+    persona_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    persona = db.query(models.AIPersona).filter(
+        models.AIPersona.id == persona_id,
+        models.AIPersona.user_id == current_user.id,
+    ).first()
+    if not persona:
+        raise HTTPException(status_code=404, detail="Persona not found")
+    assignment = db.query(models.PersonaImageTemplateAssignment).filter(
+        models.PersonaImageTemplateAssignment.persona_id == persona_id
+    ).first()
+    if not assignment:
+        return None
+    template = db.query(models.ImageTemplate).filter(
+        models.ImageTemplate.id == assignment.image_template_id,
+        models.ImageTemplate.user_id == current_user.id,
+    ).first()
+    if not template:
+        return None
+    return {
+        "id": template.id,
+        "name": template.name,
+        "reference_image_url": template.reference_image_url,
+        "template_json": template.template_json,
+        "canvas_width": template.canvas_width,
+        "canvas_height": template.canvas_height,
+        "aspect_ratio": template.aspect_ratio,
+        "assigned_at": assignment.assigned_at,
+    }
+
+
 def _pct(value: float, total: int) -> int:
     return int(round((float(value) / 100.0) * total))
 
@@ -383,123 +456,242 @@ async def _generate_imagen_rgba(prompt: str, aspect_ratio: str, canvas_w: int, c
         return Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
 
 
-@router.post("/api/posts/{post_id}/generate-image")
-async def generate_post_image(
-    post_id: int,
-    logo: UploadFile | None = File(None),
-    db: Session = Depends(get_db),
-):
-    post = db.query(models.PostLog).filter(models.PostLog.id == post_id).first()
-    if not post:
-        raise HTTPException(status_code=404, detail="Post not found")
-    if not post.ai_persona_id:
-        raise HTTPException(status_code=400, detail="Post has no persona_id")
+def _template_payload(row: models.ImageTemplate) -> dict:
+    tpl = dict(row.template_json or {})
+    tpl["canvas_width"] = int(row.canvas_width or tpl.get("canvas_width") or 1024)
+    tpl["canvas_height"] = int(row.canvas_height or tpl.get("canvas_height") or 1024)
+    tpl["aspect_ratio"] = row.aspect_ratio or str(tpl.get("aspect_ratio") or "1:1")
+    return tpl
 
-    assignment = db.query(models.PersonaImageTemplateAssignment).filter(
-        models.PersonaImageTemplateAssignment.persona_id == post.ai_persona_id
-    ).first()
-    if not assignment:
-        raise HTTPException(
-            status_code=400,
-            detail="No image template assigned to this persona. Please assign one in the Templates page.",
+
+def _text_layers(template_json: dict) -> list[tuple[int, dict]]:
+    return [
+        (idx, layer)
+        for idx, layer in enumerate(template_json.get("layers") or [])
+        if str(layer.get("type") or "").lower() == "text"
+    ]
+
+
+def _generation_payload(row: models.PostImageGeneration | None) -> dict:
+    if not row:
+        return {"status": "not_started", "final_image_url": None, "error_message": None}
+    return {
+        "id": row.id,
+        "post_id": row.post_id,
+        "template_id": row.template_id,
+        "status": row.status,
+        "background_generation_prompt": row.background_generation_prompt,
+        "overlay_texts": row.overlay_texts or [],
+        "background_image_url": row.background_image_url,
+        "logo_url": row.logo_url,
+        "final_image_url": row.final_image_url,
+        "image_url": row.final_image_url,
+        "layer_overrides": row.layer_overrides or [],
+        "error_message": row.error_message,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+async def _download_bytes(url: str | None) -> bytes | None:
+    if not url:
+        return None
+    async with httpx.AsyncClient(timeout=45) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.content
+
+
+def _resolve_template_for_post(
+    db: Session,
+    post: models.PostLog,
+    user_id: int,
+    template_id: str | None = None,
+) -> models.ImageTemplate:
+    template = None
+    if template_id:
+        template = (
+            db.query(models.ImageTemplate)
+            .filter(models.ImageTemplate.id == template_id, models.ImageTemplate.user_id == user_id)
+            .first()
         )
-    template_row = db.query(models.ImageTemplate).filter(models.ImageTemplate.id == assignment.image_template_id).first()
-    if not template_row:
-        raise HTTPException(
-            status_code=400,
-            detail="No image template assigned to this persona. Please assign one in the Templates page.",
+    elif post.ai_persona_id:
+        assignment = (
+            db.query(models.PersonaImageTemplateAssignment)
+            .filter(models.PersonaImageTemplateAssignment.persona_id == post.ai_persona_id)
+            .first()
         )
+        if assignment:
+            template = (
+                db.query(models.ImageTemplate)
+                .filter(models.ImageTemplate.id == assignment.image_template_id, models.ImageTemplate.user_id == user_id)
+                .first()
+            )
+    if not template:
+        raise HTTPException(status_code=400, detail="No image template found. Please assign a template to this persona.")
+    return template
 
-    tpl = template_row.template_json or {}
-    canvas_w = int(tpl.get("canvas_width") or 1024)
-    canvas_h = int(tpl.get("canvas_height") or 1024)
-    aspect_ratio = str(tpl.get("aspect_ratio") or "1:1")
-    layers = sorted(list(tpl.get("layers") or []), key=lambda x: int(x.get("z_index") or 0))
 
-    post_text = post.content or ""
-    lines = [ln.strip() for ln in post_text.splitlines() if ln.strip()]
-    headline = lines[0] if lines else ""
-    body = "\n".join(lines[1:]) if len(lines) > 1 else ""
-    topic_hint = (post_text[:100] or "").strip()
+def _generate_background_prompt(db: Session, post: models.PostLog, persona: models.AIPersona, template_json: dict) -> str:
+    tone_tags = persona.tone_tags or "clear, useful"
+    prompt = (
+        "Write an image generation prompt for a social media post background. "
+        f"The post is about: {(post.content or '')[:200]}. "
+        f"The persona niche is: {persona.niche}. "
+        "The background style should match this description: "
+        f"{template_json.get('background_style_description') or template_json.get('background_description') or 'clean social media background'}. "
+        f"The tone is: {tone_tags}. Return only the image generation prompt text, nothing else. "
+        "No explanation. Max 200 words."
+    )
+    result = generate_post_text_for_user(
+        user_id=post.user_id,
+        prompt=prompt,
+        system_prompt="You are an expert at writing prompts for AI image generation. You write vivid, detailed, professional image generation prompts.",
+        temperature=0.7,
+        max_tokens=360,
+        db=db,
+    )
+    if result is None:
+        result = generate_text(
+            prompt=prompt,
+            system_prompt="You are an expert at writing prompts for AI image generation. You write vivid, detailed, professional image generation prompts.",
+            model_name="gemini-2.0-flash",
+            provider_name="gemini",
+            api_key="",
+            temperature=0.7,
+            max_tokens=360,
+        )
+    return (result or "").strip() or "clean professional social media background, no text, no logos"
 
-    logo_img: Image.Image | None = None
-    if logo is not None:
-        try:
-            logo_bytes = await logo.read()
-            if logo_bytes:
-                logo_img = Image.open(io.BytesIO(logo_bytes)).convert("RGBA")
-        except Exception:
-            logo_img = None
 
-    base = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-    bg_type = str(tpl.get("background_type") or "").strip().lower()
+def _generate_overlay_texts(db: Session, post: models.PostLog, persona: models.AIPersona, template_json: dict) -> list[dict]:
+    layers = _text_layers(template_json)
+    if not layers:
+        return []
+    prompt = (
+        "Based on this post content, generate overlay text for a social media image. "
+        f"The post content is: {post.content}. The persona tone is: {persona.tone_tags}. "
+        f"The language must be: {persona.language}. I need exactly {len(layers)} text strings where N is the number of text layers. "
+        "The first text should be a short headline (max 8 words). If there are more text layers, each should be a supporting line "
+        '(max 12 words each). Return only a JSON array of strings like: ["headline here", "supporting text here"]. Nothing else.'
+    )
+    result = generate_post_text_for_user(
+        user_id=post.user_id,
+        prompt=prompt,
+        system_prompt="You are an expert social media copywriter. You write short, punchy, high-impact text for social media image overlays.",
+        temperature=0.6,
+        max_tokens=400,
+        db=db,
+    )
+    if result is None:
+        result = generate_text(
+            prompt=prompt,
+            system_prompt="You are an expert social media copywriter. You write short, punchy, high-impact text for social media image overlays.",
+            model_name="gemini-2.0-flash",
+            provider_name="gemini",
+            api_key="",
+            temperature=0.6,
+            max_tokens=400,
+        )
+    try:
+        values = json.loads(_clean_json_response(result or "[]"))
+    except Exception:
+        values = []
+    if not isinstance(values, list):
+        values = []
+    values = [str(item).strip() for item in values if str(item).strip()]
+    while len(values) < len(layers):
+        values.append((post.content or "Learn more").strip().splitlines()[0][:80])
+    return [{"layer_index": layer_index, "text": values[index]} for index, (layer_index, _) in enumerate(layers)]
+
+
+def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        trial = f"{current} {word}".strip()
+        bbox = draw.textbbox((0, 0), trial, font=font)
+        if bbox[2] - bbox[0] <= max_width or not current:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [text]
+
+
+def _assemble_template_image(
+    template_json: dict,
+    background_bytes: bytes | None,
+    logo_bytes: bytes | None,
+    overlay_texts: list[dict],
+    layer_overrides: list[dict] | None = None,
+) -> bytes:
+    canvas_w = int(template_json.get("canvas_width") or 1024)
+    canvas_h = int(template_json.get("canvas_height") or 1024)
+    base = Image.new("RGBA", (canvas_w, canvas_h), (255, 255, 255, 255))
+    bg_type = str(template_json.get("background_type") or "").lower()
     if bg_type == "solid_color":
-        base = Image.new("RGBA", (canvas_w, canvas_h), _parse_hex_color(tpl.get("background_color_hex"), default=(255, 255, 255, 255)))
-    else:
-        desc = str(tpl.get("background_description") or "").strip()
-        if desc:
-            base = Image.alpha_composite(base, await _generate_imagen_rgba(desc, aspect_ratio, canvas_w, canvas_h))
+        base = Image.new("RGBA", (canvas_w, canvas_h), _parse_hex_color(template_json.get("background_color_hex"), default=(255, 255, 255, 255)))
 
-    text_layer_seen = 0
-    for layer in layers:
-        layer_type = str(layer.get("type") or "").strip().lower()
+    text_map = {int(item.get("layer_index")): str(item.get("text") or "") for item in overlay_texts or [] if item.get("layer_index") is not None}
+    for item in layer_overrides or []:
+        if item.get("layer_index") is not None:
+            text_map[int(item.get("layer_index"))] = str(item.get("new_text") or item.get("text") or "")
+
+    background_img = None
+    if background_bytes:
+        background_img = Image.open(io.BytesIO(background_bytes)).convert("RGBA").resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
+    logo_img = Image.open(io.BytesIO(logo_bytes)).convert("RGBA") if logo_bytes else None
+
+    indexed_layers = list(enumerate(template_json.get("layers") or []))
+    indexed_layers.sort(key=lambda item: int(item[1].get("z_index") or 0))
+    for layer_index, layer in indexed_layers:
+        layer_type = str(layer.get("type") or "").lower()
         x = _pct(float(layer.get("position_x_percent") or 0), canvas_w)
         y = _pct(float(layer.get("position_y_percent") or 0), canvas_h)
-        w = _pct(float(layer.get("width_percent") or 0), canvas_w)
-        h = _pct(float(layer.get("height_percent") or 0), canvas_h)
-        content = str(layer.get("content") or "").strip()
+        w = _pct(float(layer.get("width_percent") or 100), canvas_w)
+        h = _pct(float(layer.get("height_percent") or 100), canvas_h)
         if w <= 0 or h <= 0:
             continue
-
-        if layer_type == "background_image":
-            base = Image.alpha_composite(base, await _generate_imagen_rgba(content or str(tpl.get("background_description") or ""), aspect_ratio, canvas_w, canvas_h))
-            continue
-        if layer_type == "subject_image":
-            img = await _generate_imagen_rgba(f"{content}. Topic: {topic_hint}", aspect_ratio, canvas_w, canvas_h)
-            img_box = _fit_within(img, w, h)
-            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-            layer_canvas.paste(img_box, (x, y), img_box)
-            base = Image.alpha_composite(base, layer_canvas)
-            continue
-        if layer_type == "overlay":
-            r, g, b, _ = _parse_hex_color(content, default=(0, 0, 0, 255))
-            overlay = Image.new("RGBA", (w, h), (r, g, b, int(round(255 * 0.4))))
+        if layer_type == "background_image" and background_img is not None:
+            base = Image.alpha_composite(base, background_img)
+        elif layer_type == "overlay":
+            r, g, b, _ = _parse_hex_color(layer.get("overlay_color_hex"), default=(0, 0, 0, 255))
+            opacity = max(0.0, min(1.0, float(layer.get("overlay_opacity") if layer.get("overlay_opacity") is not None else 0.35)))
+            overlay = Image.new("RGBA", (w, h), (r, g, b, int(round(opacity * 255))))
             layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
             layer_canvas.paste(overlay, (x, y), overlay)
             base = Image.alpha_composite(base, layer_canvas)
-            continue
-        if layer_type == "logo" and logo_img is not None:
+        elif layer_type == "logo" and logo_img is not None:
             img_box = _fit_within(logo_img, w, h)
             layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
             layer_canvas.paste(img_box, (x, y), img_box)
             base = Image.alpha_composite(base, layer_canvas)
-            continue
-        if layer_type == "text":
-            text_str = headline if text_layer_seen == 0 else body
-            text_layer_seen += 1
+        elif layer_type == "text":
+            text_str = text_map.get(layer_index, "")
             if not text_str:
                 continue
-            font_px = max(10, int(round((float(layer.get("font_size_percent") or 5.0) / 100.0) * canvas_h)))
+            font_px = max(10, int(round(float(layer.get("font_size_percent") or 5.0) * canvas_h / 100.0)))
             font = _get_font(str(layer.get("font_weight") or "regular"), font_px)
             color = _parse_hex_color(str(layer.get("text_color_hex") or ""), default=(255, 255, 255, 255))
             align = str(layer.get("text_align") or "left").strip().lower()
             text_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
             draw = ImageDraw.Draw(text_layer)
             cursor_y = 0
-            for part in text_str.split("\n"):
-                if not part:
-                    cursor_y += int(round(font_px * 0.4))
-                    continue
-                try:
-                    bbox = draw.textbbox((0, 0), part, font=font)
+            for paragraph in text_str.splitlines() or [text_str]:
+                for line in _wrap_text(draw, paragraph, font, w):
+                    bbox = draw.textbbox((0, 0), line, font=font)
                     tw = bbox[2] - bbox[0]
                     th = bbox[3] - bbox[1]
-                except Exception:
-                    tw, th = draw.textsize(part, font=font)
-                tx = max(0, (w - tw) // 2) if align == "center" else max(0, w - tw) if align == "right" else 0
-                draw.text((tx + 1, cursor_y + 1), part, font=font, fill=(0, 0, 0, 160))
-                draw.text((tx, cursor_y), part, font=font, fill=color)
-                cursor_y += th + int(round(font_px * 0.25))
+                    tx = max(0, (w - tw) // 2) if align == "center" else max(0, w - tw) if align == "right" else 0
+                    draw.text((tx + 1, cursor_y + 1), line, font=font, fill=(0, 0, 0, 140))
+                    draw.text((tx, cursor_y), line, font=font, fill=color)
+                    cursor_y += th + max(3, int(font_px * 0.22))
+                    if cursor_y > h:
+                        break
                 if cursor_y > h:
                     break
             layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
@@ -508,17 +700,199 @@ async def generate_post_image(
 
     out = io.BytesIO()
     base.convert("RGB").save(out, format="PNG")
-    final_bytes = out.getvalue()
-    try:
-        object_path = f"{post_id}/final.png"
-        public_url = await _upload_to_supabase("generated-images", object_path, final_bytes, content_type="image/png")
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to upload generated image: {str(exc)}")
+    return out.getvalue()
 
-    post.image_url = public_url
-    post.updated_at = datetime.now(timezone.utc)
+
+async def _run_post_image_generation(
+    db: Session,
+    post_id: int,
+    user_id: int,
+    template_id: str | None = None,
+    logo_bytes: bytes | None = None,
+    raise_errors: bool = True,
+) -> models.PostImageGeneration:
+    generation = None
+    try:
+        post = db.query(models.PostLog).filter(models.PostLog.id == post_id, models.PostLog.user_id == user_id).first()
+        if not post:
+            raise HTTPException(status_code=404, detail="Post not found")
+        if not post.ai_persona_id:
+            raise HTTPException(status_code=400, detail="Post has no persona_id")
+        persona = db.query(models.AIPersona).filter(models.AIPersona.id == post.ai_persona_id, models.AIPersona.user_id == user_id).first()
+        if not persona:
+            raise HTTPException(status_code=404, detail="Persona not found")
+        template = _resolve_template_for_post(db, post, user_id, template_id)
+        template_json = _template_payload(template)
+
+        generation = db.query(models.PostImageGeneration).filter(models.PostImageGeneration.post_id == post.id).first()
+        if generation is None:
+            generation = models.PostImageGeneration(post_id=post.id, template_id=template.id, status="pending")
+            db.add(generation)
+            db.flush()
+        generation.template_id = template.id
+        generation.status = "generating_background"
+        generation.error_message = None
+        generation.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+        bg_prompt = _generate_background_prompt(db, post, persona, template_json)
+        generation.background_generation_prompt = bg_prompt
+        db.commit()
+
+        provider_instance, model_name, api_key = get_image_provider_for_user(user_id, db)
+        import asyncio
+
+        bg_bytes = await asyncio.to_thread(
+            provider_instance.generate,
+            prompt=bg_prompt,
+            negative_prompt="text, letters, words, logo, watermark, signature",
+            aspect_ratio=template_json.get("aspect_ratio") or "1:1",
+            model_name=model_name,
+            api_key=api_key,
+        )
+        background_url = await _upload_to_supabase("generated-images", f"post-images/{post.id}/background.png", bg_bytes, "image/png")
+        generation.background_image_url = background_url
+        generation.status = "generating_text"
+        generation.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+        generation.overlay_texts = _generate_overlay_texts(db, post, persona, template_json)
+        if logo_bytes:
+            generation.logo_url = await _upload_to_supabase("generated-images", f"logos/{user_id}/logo.png", logo_bytes, "image/png")
+        elif not generation.logo_url:
+            previous = (
+                db.query(models.PostImageGeneration)
+                .join(models.PostLog, models.PostLog.id == models.PostImageGeneration.post_id)
+                .filter(
+                    models.PostLog.ai_persona_id == persona.id,
+                    models.PostImageGeneration.logo_url.isnot(None),
+                    models.PostImageGeneration.post_id != post.id,
+                )
+                .order_by(models.PostImageGeneration.created_at.desc())
+                .first()
+            )
+            if previous:
+                generation.logo_url = previous.logo_url
+        generation.status = "assembling"
+        generation.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+        logo_blob = logo_bytes or await _download_bytes(generation.logo_url)
+        final_bytes = _assemble_template_image(template_json, bg_bytes, logo_blob, generation.overlay_texts, generation.layer_overrides)
+        final_url = await _upload_to_supabase("generated-images", f"post-images/{post.id}/final.png", final_bytes, "image/png")
+        generation.final_image_url = final_url
+        generation.status = "completed"
+        generation.updated_at = datetime.now(timezone.utc)
+        post.image_url = final_url
+        post.media_urls = [final_url]
+        post.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(generation)
+        return generation
+    except Exception as exc:
+        if generation is not None:
+            generation.status = "failed"
+            generation.error_message = str(getattr(exc, "detail", None) or exc)
+            generation.updated_at = datetime.now(timezone.utc)
+            db.commit()
+        if raise_errors:
+            if isinstance(exc, HTTPException):
+                raise exc
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return generation
+
+
+async def generate_post_image_background(post_id: int, user_id: int, template_id: str | None = None) -> None:
+    db = SessionLocal()
+    try:
+        await _run_post_image_generation(db, post_id, user_id, template_id=template_id, raise_errors=False)
+    finally:
+        db.close()
+
+
+@router.post("/api/posts/{post_id}/generate-image")
+async def generate_post_image(
+    post_id: int,
+    template_id: str | None = Form(default=None),
+    logo: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    logo_bytes = await logo.read() if logo else None
+    generation = await _run_post_image_generation(
+        db,
+        post_id,
+        current_user.id,
+        template_id=template_id,
+        logo_bytes=logo_bytes,
+        raise_errors=True,
+    )
+    return _generation_payload(generation)
+
+
+@router.patch("/api/posts/{post_id}/image")
+async def edit_post_image(
+    post_id: int,
+    text_overrides: str | None = Form(default=None),
+    logo: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    post = db.query(models.PostLog).filter(models.PostLog.id == post_id, models.PostLog.user_id == current_user.id).first()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    generation = db.query(models.PostImageGeneration).filter(models.PostImageGeneration.post_id == post_id).first()
+    if not generation:
+        raise HTTPException(status_code=404, detail="No generated image found for this post.")
+    template = db.query(models.ImageTemplate).filter(models.ImageTemplate.id == generation.template_id, models.ImageTemplate.user_id == current_user.id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    new_logo_bytes = await logo.read() if logo else None
+    if new_logo_bytes:
+        generation.logo_url = await _upload_to_supabase("generated-images", f"logos/{current_user.id}/logo.png", new_logo_bytes, "image/png")
+    if text_overrides:
+        try:
+            incoming = json.loads(text_overrides)
+            if not isinstance(incoming, list):
+                raise ValueError("text_overrides must be an array")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid text_overrides JSON: {exc}")
+        merged = {int(item.get("layer_index")): item for item in generation.layer_overrides or [] if item.get("layer_index") is not None}
+        for item in incoming:
+            if item.get("layer_index") is not None:
+                merged[int(item["layer_index"])] = item
+        generation.layer_overrides = list(merged.values())
+
+    generation.status = "assembling"
+    generation.updated_at = datetime.now(timezone.utc)
     db.commit()
-    return {"image_url": public_url}
+
+    background_bytes = await _download_bytes(generation.background_image_url)
+    logo_bytes = new_logo_bytes or await _download_bytes(generation.logo_url)
+    final_bytes = _assemble_template_image(_template_payload(template), background_bytes, logo_bytes, generation.overlay_texts, generation.layer_overrides)
+    final_url = await _upload_to_supabase("generated-images", f"post-images/{post.id}/final.png", final_bytes, "image/png")
+    generation.final_image_url = final_url
+    generation.status = "completed"
+    generation.updated_at = datetime.now(timezone.utc)
+    post.image_url = final_url
+    post.media_urls = [final_url]
+    db.commit()
+    db.refresh(generation)
+    return _generation_payload(generation)
+
+
+@router.get("/api/posts/{post_id}/image-status")
+def get_post_image_status(
+    post_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    post = db.query(models.PostLog).filter(models.PostLog.id == post_id, models.PostLog.user_id == current_user.id).first()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    generation = db.query(models.PostImageGeneration).filter(models.PostImageGeneration.post_id == post_id).first()
+    return _generation_payload(generation)
 
 
 @router.get("/api/internal/debug-template/{persona_id}")
