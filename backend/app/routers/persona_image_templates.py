@@ -417,6 +417,55 @@ async def _load_background_asset_image(
     return Image.new("RGBA", (canvas_w, canvas_h), _parse_hex_color(str(value.get("color_hex") or ""), default=(40, 40, 40, 255)))
 
 
+_ASPECT_DIMENSIONS: dict[str, tuple[int, int]] = {
+    "1:1": (1080, 1080),
+    "4:5": (1080, 1350),
+    "9:16": (1080, 1920),
+    "16:9": (1920, 1080),
+}
+
+
+def _layer_rotation_degrees(layer: dict) -> float | None:
+    raw = layer.get("rotation_degrees")
+    if raw is None:
+        return None
+    try:
+        deg = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if abs(deg) < 0.01:
+        return None
+    return deg
+
+
+def _composite_layer_onto_base(
+    base: Image.Image,
+    layer_img: Image.Image,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    rotation_degrees: float | None,
+) -> Image.Image:
+    """Paste layer content onto base, optionally rotating around the layer box center."""
+    canvas_w, canvas_h = base.size
+    content = layer_img
+    if content.size != (w, h) and w > 0 and h > 0:
+        content = content.resize((w, h), Image.Resampling.LANCZOS)
+
+    layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    if rotation_degrees is not None:
+        rotated = content.rotate(-rotation_degrees, resample=Image.Resampling.BICUBIC, expand=True)
+        cx = x + w // 2
+        cy = y + h // 2
+        paste_x = cx - rotated.width // 2
+        paste_y = cy - rotated.height // 2
+        layer_canvas.paste(rotated, (paste_x, paste_y), rotated)
+    else:
+        layer_canvas.paste(content, (x, y), content)
+    return Image.alpha_composite(base, layer_canvas)
+
+
 def _assemble_manual_template_preview(
     template_json: dict,
     background: Image.Image,
@@ -438,6 +487,8 @@ def _assemble_manual_template_preview(
         if w <= 0 or h <= 0:
             continue
 
+        rotation = _layer_rotation_degrees(layer)
+
         if layer_type == "overlay":
             color_opts = layer.get("color_options") or []
             if not color_opts:
@@ -446,14 +497,10 @@ def _assemble_manual_template_preview(
             r, g, b, _ = _parse_hex_color(str(opt.get("color_hex") or ""), default=(0, 0, 0, 255))
             opacity = max(0.0, min(1.0, float(opt.get("opacity") if opt.get("opacity") is not None else 0.35)))
             overlay = Image.new("RGBA", (w, h), (r, g, b, int(round(opacity * 255))))
-            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-            layer_canvas.paste(overlay, (x, y), overlay)
-            base = Image.alpha_composite(base, layer_canvas)
+            base = _composite_layer_onto_base(base, overlay, x, y, w, h, rotation)
         elif layer_type == "logo" and logo_img is not None:
             img_box = _fit_within(logo_img, w, h)
-            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-            layer_canvas.paste(img_box, (x, y), img_box)
-            base = Image.alpha_composite(base, layer_canvas)
+            base = _composite_layer_onto_base(base, img_box, x, y, w, h, rotation)
         elif layer_type == "text":
             role = str(layer.get("role") or "body").lower()
             text_str = _PLACEHOLDER_BY_ROLE.get(role, _PLACEHOLDER_BY_ROLE["body"])
@@ -486,13 +533,155 @@ def _assemble_manual_template_preview(
                         break
                 if cursor_y > h:
                     break
-            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-            layer_canvas.paste(text_layer, (x, y), text_layer)
-            base = Image.alpha_composite(base, layer_canvas)
+            base = _composite_layer_onto_base(base, text_layer, x, y, w, h, rotation)
 
     out = io.BytesIO()
     base.convert("RGB").save(out, format="PNG")
     return out.getvalue()
+
+
+_MANUAL_TEMPLATE_JSON_REFERENCE = """{
+  "canvas_width": 1080,
+  "canvas_height": 1080,
+  "aspect_ratio": "1:1",
+  "background_options": [{"asset_id": "uuid", "label": "string"}],
+  "layers": [
+    {
+      "id": "layer_1",
+      "type": "text",
+      "role": "headline|subheadline|body",
+      "z_index": 1,
+      "position_x_percent": 10,
+      "position_y_percent": 38,
+      "width_percent": 80,
+      "height_percent": 20,
+      "rotation_degrees": 0,
+      "font_options": [{"font_asset_id": "uuid", "label": "string"}],
+      "color_options": [{"color_hex": "#ffffff", "label": "string"}],
+      "font_size_min_percent": 4,
+      "font_size_max_percent": 7,
+      "text_align_options": ["center"],
+      "font_weight": "bold|regular"
+    },
+    {
+      "id": "layer_2",
+      "type": "overlay",
+      "z_index": 0,
+      "position_x_percent": 0,
+      "position_y_percent": 0,
+      "width_percent": 100,
+      "height_percent": 100,
+      "rotation_degrees": 0,
+      "color_options": [{"color_hex": "#000000", "opacity": 0.4, "label": "string"}]
+    },
+    {
+      "id": "layer_3",
+      "type": "logo",
+      "z_index": 2,
+      "position_x_percent": 78,
+      "position_y_percent": 4,
+      "width_percent": 18,
+      "height_percent": 12,
+      "rotation_degrees": 0
+    }
+  ]
+}"""
+
+
+@router.post("/api/image-templates/generate-from-description")
+async def generate_template_from_description(
+    payload: schemas.GenerateTemplateFromDescriptionRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    description = (payload.description or "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="description is required.")
+
+    aspect = (payload.canvas_aspect_ratio or "1:1").strip()
+    canvas_w, canvas_h = _ASPECT_DIMENSIONS.get(aspect, _ASPECT_DIMENSIONS["1:1"])
+
+    _ensure_default_template_assets(db, current_user.id)
+
+    bg_ids = [str(i).strip() for i in payload.available_background_asset_ids if str(i).strip()]
+    bg_assets: list[models.TemplateBackgroundAsset] = []
+    if bg_ids:
+        bg_assets = (
+            db.query(models.TemplateBackgroundAsset)
+            .filter(
+                models.TemplateBackgroundAsset.user_id == current_user.id,
+                models.TemplateBackgroundAsset.id.in_(bg_ids),
+            )
+            .all()
+        )
+
+    font_rows = (
+        db.query(models.TemplateFontAsset)
+        .filter(models.TemplateFontAsset.user_id == current_user.id)
+        .all()
+    )
+
+    bg_lines = [
+        f"asset_id: {a.id}, label: {a.label or a.asset_type}, type: {a.asset_type}"
+        for a in bg_assets
+    ] or ["(none — use empty background_options array)"]
+    font_lines = [f"asset_id: {f.id}, name: {f.display_name}" for f in font_rows] or ["(none)"]
+
+    system_prompt = (
+        "You are a JSON template generator for a photocard design system. "
+        "The user will describe a design and you must output a valid template JSON object and nothing else. "
+        "No explanation. No markdown. No backticks. Raw JSON only.\n"
+        f"The canvas is {canvas_w}x{canvas_h} pixels ({aspect}).\n"
+        "Available background asset IDs the user has selected (use these as background_options):\n"
+        + "\n".join(bg_lines)
+        + "\nIf none provided, use an empty background_options array.\n"
+        "Available font asset IDs:\n"
+        + "\n".join(font_lines)
+        + "\nThe template JSON must follow this exact structure:\n"
+        + _MANUAL_TEMPLATE_JSON_REFERENCE
+        + "\nRules:\n"
+        "- position values are percentages 0-100\n"
+        "- font_size_min_percent and font_size_max_percent must be realistic "
+        "(headline: 4-8%, subheadline: 2-4%, body: 1.5-3%)\n"
+        "- z_index starts at 0 (background overlay) and increases\n"
+        "- logo layer position must be in a corner or edge\n"
+        "- every text layer must have at least 2 color_options and 1 font_option\n"
+        "- every background_options entry must use one of the provided asset IDs\n"
+        f"\nUSER DESCRIPTION: {description}\n"
+        "Return only the raw JSON object."
+    )
+
+    response_text = generate_text(
+        prompt=description,
+        system_prompt=system_prompt,
+        model_name="gemini-2.0-flash",
+        provider_name="gemini",
+        api_key="",
+        temperature=0.2,
+        max_tokens=4096,
+    )
+    if not response_text:
+        raise HTTPException(status_code=500, detail="LLM returned empty response")
+
+    try:
+        parsed = _parse_json_with_fallback(response_text)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to parse LLM JSON: {exc}") from exc
+
+    parsed["canvas_width"] = int(parsed.get("canvas_width") or canvas_w)
+    parsed["canvas_height"] = int(parsed.get("canvas_height") or canvas_h)
+    parsed["aspect_ratio"] = str(parsed.get("aspect_ratio") or aspect)
+
+    try:
+        validated = schemas.ManualTemplateJson.model_validate(parsed)
+        template_json = validated.model_dump(mode="json")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Generated JSON failed validation: {exc}") from exc
+
+    _validate_manual_layer_constraints(template_json)
+    _validate_manual_template_assets(db, current_user.id, template_json)
+
+    return {"template_json": template_json}
 
 
 @router.post("/api/image-templates/preview")
@@ -1455,6 +1644,7 @@ def _assemble_from_llm_instructions(
         if w <= 0 or h <= 0:
             continue
 
+        rotation = _layer_rotation_degrees(layer)
         instr = layer_map.get(layer_id, {})
         if layer_type == "overlay":
             color_hex = str(instr.get("color_hex") or _first_option(layer.get("color_options") or [], "color_hex") or "#000000")
@@ -1469,14 +1659,10 @@ def _assemble_from_llm_instructions(
             r, g, b, _ = _parse_hex_color(color_hex, default=(0, 0, 0, 255))
             opacity = max(0.0, min(1.0, opacity))
             overlay = Image.new("RGBA", (w, h), (r, g, b, int(round(opacity * 255))))
-            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-            layer_canvas.paste(overlay, (x, y), overlay)
-            base = Image.alpha_composite(base, layer_canvas)
+            base = _composite_layer_onto_base(base, overlay, x, y, w, h, rotation)
         elif layer_type == "logo" and logo_img is not None:
             img_box = _fit_within(logo_img, w, h)
-            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-            layer_canvas.paste(img_box, (x, y), img_box)
-            base = Image.alpha_composite(base, layer_canvas)
+            base = _composite_layer_onto_base(base, img_box, x, y, w, h, rotation)
         elif layer_type == "text":
             text_str = str(instr.get("text") or "").strip()
             if not text_str:
@@ -1509,9 +1695,7 @@ def _assemble_from_llm_instructions(
                         break
                 if cursor_y > h:
                     break
-            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-            layer_canvas.paste(text_layer, (x, y), text_layer)
-            base = Image.alpha_composite(base, layer_canvas)
+            base = _composite_layer_onto_base(base, text_layer, x, y, w, h, rotation)
 
     return _image_to_png_bytes(base)
 

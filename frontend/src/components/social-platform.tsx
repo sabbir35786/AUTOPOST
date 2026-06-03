@@ -39,7 +39,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { useAuth } from "@/contexts/auth-context"
 import { API_BASE_URL, BACKEND_ORIGIN, api, getApiErrorMessage } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { ManualTemplateBuilder } from "@/components/manual-template-builder"
+import { TemplateBuilder } from "@/components/template-builder/template-builder"
 import { PostPhotocardEditor } from "@/components/post-photocard-editor"
 
 type PageConnection = {
@@ -2135,9 +2135,9 @@ function TemplateLibraryView() {
 
   return (
     <>
-      <PageTitle title="Templates" subtitle="Extract layouts from reference images or build templates manually with fixed structure and styling options." />
+      <PageTitle title="Templates" subtitle="Extract layouts from reference images or build templates with visual, form, JSON, or AI-assisted editors." />
       {createMode === "manual" ? (
-        <ManualTemplateBuilder
+        <TemplateBuilder
           onCancel={() => setCreateMode("choose")}
           onSaved={() => {
             setCreateMode("choose")
@@ -2164,7 +2164,7 @@ function TemplateLibraryView() {
                 </Button>
                 <Button type="button" variant="outline" className="w-full" onClick={() => setCreateMode("manual")}>
                   <LayoutTemplate className="size-4 mr-2" />
-                  Build Manually
+                  New Template (4 builders)
                 </Button>
               </>
             ) : (

@@ -424,6 +424,7 @@ class TemplateLayerBase(BaseModel):
     position_y_percent: float = Field(ge=0, le=100)
     width_percent: float = Field(ge=0, le=100)
     height_percent: float = Field(ge=0, le=100)
+    rotation_degrees: float | None = Field(default=None, ge=-360, le=360)
 
 
 class TextTemplateLayer(TemplateLayerBase):
@@ -489,6 +490,12 @@ class ManualImageTemplateUpdate(BaseModel):
 class ImageTemplatePreviewRequest(BaseModel):
     template_json: ManualTemplateJson
     persona_id: int | None = None
+
+
+class GenerateTemplateFromDescriptionRequest(BaseModel):
+    description: str
+    canvas_aspect_ratio: str = "1:1"
+    available_background_asset_ids: list[str] = Field(default_factory=list)
 
 
 class ImageTemplateBase(BaseModel):
