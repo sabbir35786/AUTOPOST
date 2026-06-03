@@ -19,7 +19,7 @@ BEGIN
         FROM information_schema.columns
         WHERE table_name = 'image_templates' AND column_name = 'layers_json'
     ) THEN
-        EXECUTE 'UPDATE image_templates SET template_json = COALESCE(template_json, layers_json, ''{}''::jsonb)';
+        EXECUTE 'UPDATE image_templates SET template_json = COALESCE(template_json, layers_json::jsonb, ''{}''::jsonb)';
     END IF;
 END $$;
 

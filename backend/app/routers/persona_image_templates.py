@@ -17,7 +17,7 @@ from app.auth import get_current_user
 from app.config import CRON_SECRET, GEMINI_API_KEY, SUPABASE_SERVICE_KEY, SUPABASE_URL
 from app.database import SessionLocal, get_db
 from app.providers.image_providers import GeminiProvider, get_image_provider_for_user
-from app.providers.llm_providers import generate_text
+from app.providers.llm_providers import ProviderConfigurationError, generate_text, generate_text_for_user
 from app.providers.user_model_settings import generate_post_text_for_user
 
 router = APIRouter(tags=["image-templates"])
@@ -588,7 +588,299 @@ _MANUAL_TEMPLATE_JSON_REFERENCE = """{
 }"""
 
 
-@router.post("/api/image-templates/generate-from-description")
+def _infer_aspect_ratio_from_description(description: str, fallback: str = "1:1") -> str:
+    text = description.lower()
+    if any(k in text for k in ("16:9", "wide-angle", "wide angle", "widescreen", "landscape", "cinematic wide")):
+        return "16:9"
+    if any(k in text for k in ("9:16", "vertical", "story", "reel", "tiktok", "portrait full")):
+        return "9:16"
+    if any(k in text for k in ("4:5", "instagram portrait", "4x5")):
+        return "4:5"
+    if "square" in text or "1:1" in text:
+        return "1:1"
+    if any(k in text for k in ("wide", "cinematic", "banner", "youtube")):
+        return "16:9"
+    return fallback if fallback in _ASPECT_DIMENSIONS else "1:1"
+
+
+def _suggested_template_name_from_description(description: str) -> str:
+    line = (description.strip().split("\n")[0] or "AI Template").strip()
+    if len(line) > 72:
+        line = line[:69].rstrip() + "..."
+    return line or "AI Template"
+
+
+def _score_background_for_description(asset: models.TemplateBackgroundAsset, description: str) -> int:
+    desc = description.lower()
+    label = (asset.label or "").lower()
+    value = asset.value_json or {}
+    hex_color = str(value.get("color_hex") or "").lower()
+    score = 0
+
+    dark_terms = ("black", "dark", "space", "void", "navy", "charcoal", "night", "cinematic", "documentary")
+    light_terms = ("white", "cream", "light", "bright", "warm")
+    blue_terms = ("blue", "ocean", "earth", "atmosphere", "horizon")
+
+    if any(t in desc for t in dark_terms):
+        if any(t in label for t in ("dark", "black", "navy", "charcoal")):
+            score += 12
+        if hex_color in ("#000000", "#222222", "#1a1a2e", "#2d1b69"):
+            score += 10
+        if asset.asset_type == "gradient" and any(t in label for t in ("ocean", "blue")):
+            score += 8
+    if any(t in desc for t in light_terms):
+        if "cream" in label or "warm" in label:
+            score += 10
+    if any(t in desc for t in blue_terms):
+        if "ocean" in label or "blue" in label:
+            score += 10
+        if asset.asset_type == "gradient":
+            score += 4
+    if score == 0:
+        score = 1
+    return score
+
+
+def _pick_backgrounds_for_description(
+    description: str,
+    assets: list[models.TemplateBackgroundAsset],
+    *,
+    max_count: int = 3,
+) -> list[models.TemplateBackgroundAsset]:
+    if not assets:
+        return []
+    ranked = sorted(assets, key=lambda a: _score_background_for_description(a, description), reverse=True)
+    return ranked[:max_count]
+
+
+def _normalize_generated_template_json(
+    raw: dict,
+    *,
+    description: str,
+    aspect: str,
+    canvas_w: int,
+    canvas_h: int,
+    bg_assets: list[models.TemplateBackgroundAsset],
+    font_rows: list[models.TemplateFontAsset],
+) -> dict:
+    """Fill gaps the LLM often misses so manual-template validation passes."""
+    parsed = dict(raw)
+    parsed["canvas_width"] = int(parsed.get("canvas_width") or canvas_w)
+    parsed["canvas_height"] = int(parsed.get("canvas_height") or canvas_h)
+    parsed["aspect_ratio"] = str(parsed.get("aspect_ratio") or aspect)
+
+    valid_bg_ids = {a.id for a in bg_assets}
+    bg_opts = parsed.get("background_options") or []
+    cleaned_bg: list[dict] = []
+    if isinstance(bg_opts, list):
+        for item in bg_opts:
+            if not isinstance(item, dict):
+                continue
+            aid = str(item.get("asset_id") or "").strip()
+            if aid in valid_bg_ids:
+                label = str(item.get("label") or "").strip() or "Background"
+                cleaned_bg.append({"asset_id": aid, "label": label})
+    if not cleaned_bg:
+        for asset in _pick_backgrounds_for_description(description, bg_assets, max_count=3):
+            cleaned_bg.append({"asset_id": asset.id, "label": asset.label or asset.asset_type or "Background"})
+    parsed["background_options"] = cleaned_bg[:6]
+
+    font_map = {f.id: f for f in font_rows}
+    default_font = font_rows[0] if font_rows else None
+    layers = parsed.get("layers") or []
+    if not isinstance(layers, list):
+        layers = []
+
+    normalized_layers: list[dict] = []
+    layer_num = 0
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        layer_num += 1
+        layer_type = str(layer.get("type") or "").lower()
+        if layer_type not in ("text", "logo", "overlay"):
+            continue
+        layer_id = str(layer.get("id") or f"layer_{layer_num}").strip() or f"layer_{layer_num}"
+        try:
+            z_index = int(layer.get("z_index") if layer.get("z_index") is not None else layer_num)
+        except (TypeError, ValueError):
+            z_index = layer_num
+
+        base = {
+            "id": layer_id,
+            "type": layer_type,
+            "z_index": z_index,
+            "position_x_percent": float(layer.get("position_x_percent") or 0),
+            "position_y_percent": float(layer.get("position_y_percent") or 0),
+            "width_percent": float(layer.get("width_percent") or 100),
+            "height_percent": float(layer.get("height_percent") or 100),
+        }
+        rot = layer.get("rotation_degrees")
+        if rot is not None:
+            try:
+                base["rotation_degrees"] = float(rot)
+            except (TypeError, ValueError):
+                pass
+
+        if layer_type == "text":
+            role = str(layer.get("role") or "headline").lower()
+            if role not in ("headline", "subheadline", "body"):
+                role = "headline"
+            font_opts = []
+            for fo in layer.get("font_options") or []:
+                if not isinstance(fo, dict):
+                    continue
+                fid = str(fo.get("font_asset_id") or "").strip()
+                if fid in font_map:
+                    font_opts.append(
+                        {"font_asset_id": fid, "label": str(fo.get("label") or font_map[fid].display_name)}
+                    )
+            if not font_opts and default_font:
+                font_opts = [{"font_asset_id": default_font.id, "label": default_font.display_name}]
+            colors = []
+            for co in layer.get("color_options") or []:
+                if isinstance(co, dict) and co.get("color_hex"):
+                    colors.append(
+                        {
+                            "color_hex": str(co.get("color_hex")),
+                            "label": str(co.get("label") or "Color"),
+                        }
+                    )
+            default_colors = [
+                {"color_hex": "#ffffff", "label": "White"},
+                {"color_hex": "#facc15", "label": "Yellow"},
+            ]
+            while len(colors) < 2 and default_colors:
+                colors.append(default_colors[len(colors)])
+            aligns = layer.get("text_align_options") or ["center"]
+            if not isinstance(aligns, list) or not aligns:
+                aligns = ["center"]
+            aligns = [a for a in aligns if str(a).lower() in ("left", "center", "right")] or ["center"]
+            weight = str(layer.get("font_weight") or "bold").lower()
+            if weight not in ("bold", "regular"):
+                weight = "bold"
+            normalized_layers.append(
+                {
+                    **base,
+                    "role": role,
+                    "font_options": font_opts,
+                    "color_options": colors,
+                    "font_size_min_percent": float(layer.get("font_size_min_percent") or 4),
+                    "font_size_max_percent": float(layer.get("font_size_max_percent") or 7),
+                    "text_align_options": aligns,
+                    "font_weight": weight,
+                }
+            )
+        elif layer_type == "overlay":
+            colors = []
+            for co in layer.get("color_options") or []:
+                if isinstance(co, dict) and co.get("color_hex") is not None:
+                    try:
+                        opacity = float(co.get("opacity") if co.get("opacity") is not None else 0.35)
+                    except (TypeError, ValueError):
+                        opacity = 0.35
+                    colors.append(
+                        {
+                            "color_hex": str(co.get("color_hex")),
+                            "opacity": max(0.0, min(1.0, opacity)),
+                            "label": str(co.get("label") or "Overlay"),
+                        }
+                    )
+            if not colors:
+                colors = [{"color_hex": "#000000", "opacity": 0.4, "label": "Dark overlay"}]
+            normalized_layers.append({**base, "color_options": colors})
+        else:
+            normalized_layers.append(base)
+
+    if not any(str(l.get("type")) == "text" for l in normalized_layers) and default_font:
+        normalized_layers.append(
+            {
+                "id": f"layer_{layer_num + 1}",
+                "type": "text",
+                "role": "headline",
+                "z_index": max((int(l.get("z_index") or 0) for l in normalized_layers), default=0) + 1,
+                "position_x_percent": 8,
+                "position_y_percent": 62,
+                "width_percent": 84,
+                "height_percent": 28,
+                "font_options": [{"font_asset_id": default_font.id, "label": default_font.display_name}],
+                "color_options": [
+                    {"color_hex": "#ffffff", "label": "White"},
+                    {"color_hex": "#facc15", "label": "Yellow"},
+                ],
+                "font_size_min_percent": 5,
+                "font_size_max_percent": 8,
+                "text_align_options": ["center"],
+                "font_weight": "bold",
+            }
+        )
+    if not any(str(l.get("type")) == "logo" for l in normalized_layers):
+        normalized_layers.append(
+            {
+                "id": f"layer_{layer_num + 2}",
+                "type": "logo",
+                "z_index": max((int(l.get("z_index") or 0) for l in normalized_layers), default=0) + 1,
+                "position_x_percent": 78,
+                "position_y_percent": 82,
+                "width_percent": 16,
+                "height_percent": 12,
+            }
+        )
+
+    parsed["layers"] = sorted(normalized_layers, key=lambda l: int(l.get("z_index") or 0))
+    return parsed
+
+
+def _call_llm_for_template_json(
+    *,
+    user_id: int,
+    db: Session,
+    description: str,
+    system_prompt: str,
+) -> str:
+    try:
+        response_text = generate_text_for_user(
+            user_id=user_id,
+            task_category="template_generation",
+            prompt=description,
+            system_prompt=system_prompt,
+            temperature=0.2,
+            max_tokens=4096,
+            db=db,
+        )
+    except ProviderConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if response_text:
+        return response_text
+
+    from app.providers.llm_providers import _get_first_configured_provider
+
+    fallback = _get_first_configured_provider()
+    if not fallback:
+        raise HTTPException(
+            status_code=503,
+            detail="No LLM provider is configured. Add an API key (Mistral, OpenAI, etc.) in server settings.",
+        )
+    provider_name, model_name = fallback
+    response_text = generate_text(
+        prompt=description,
+        system_prompt=system_prompt,
+        model_name=model_name,
+        provider_name=provider_name,
+        api_key="",
+        temperature=0.2,
+        max_tokens=4096,
+    )
+    if not response_text:
+        raise HTTPException(status_code=500, detail="LLM returned empty response")
+    return response_text
+
+
+@router.post(
+    "/api/image-templates/generate-from-description",
+    response_model=schemas.GenerateTemplateFromDescriptionResponse,
+)
 async def generate_template_from_description(
     payload: schemas.GenerateTemplateFromDescriptionRequest,
     db: Session = Depends(get_db),
@@ -598,22 +890,20 @@ async def generate_template_from_description(
     if not description:
         raise HTTPException(status_code=400, detail="description is required.")
 
-    aspect = (payload.canvas_aspect_ratio or "1:1").strip()
-    canvas_w, canvas_h = _ASPECT_DIMENSIONS.get(aspect, _ASPECT_DIMENSIONS["1:1"])
-
     _ensure_default_template_assets(db, current_user.id)
 
+    requested_aspect = (payload.canvas_aspect_ratio or "1:1").strip()
+    aspect = _infer_aspect_ratio_from_description(description, requested_aspect)
+    canvas_w, canvas_h = _ASPECT_DIMENSIONS.get(aspect, _ASPECT_DIMENSIONS["1:1"])
+
     bg_ids = [str(i).strip() for i in payload.available_background_asset_ids if str(i).strip()]
-    bg_assets: list[models.TemplateBackgroundAsset] = []
+    bg_query = db.query(models.TemplateBackgroundAsset).filter(
+        models.TemplateBackgroundAsset.user_id == current_user.id,
+    )
     if bg_ids:
-        bg_assets = (
-            db.query(models.TemplateBackgroundAsset)
-            .filter(
-                models.TemplateBackgroundAsset.user_id == current_user.id,
-                models.TemplateBackgroundAsset.id.in_(bg_ids),
-            )
-            .all()
-        )
+        bg_assets = bg_query.filter(models.TemplateBackgroundAsset.id.in_(bg_ids)).all()
+    else:
+        bg_assets = bg_query.all()
 
     font_rows = (
         db.query(models.TemplateFontAsset)
@@ -624,19 +914,18 @@ async def generate_template_from_description(
     bg_lines = [
         f"asset_id: {a.id}, label: {a.label or a.asset_type}, type: {a.asset_type}"
         for a in bg_assets
-    ] or ["(none — use empty background_options array)"]
-    font_lines = [f"asset_id: {f.id}, name: {f.display_name}" for f in font_rows] or ["(none)"]
+    ]
+    font_lines = [f"asset_id: {f.id}, name: {f.display_name}" for f in font_rows]
 
     system_prompt = (
         "You are a JSON template generator for a photocard design system. "
         "The user will describe a design and you must output a valid template JSON object and nothing else. "
         "No explanation. No markdown. No backticks. Raw JSON only.\n"
         f"The canvas is {canvas_w}x{canvas_h} pixels ({aspect}).\n"
-        "Available background asset IDs the user has selected (use these as background_options):\n"
-        + "\n".join(bg_lines)
-        + "\nIf none provided, use an empty background_options array.\n"
-        "Available font asset IDs:\n"
-        + "\n".join(font_lines)
+        "Available background assets (you MUST pick 1-3 for background_options using exact asset_id values):\n"
+        + ("\n".join(bg_lines) if bg_lines else "(none — omit background_options)")
+        + "\nAvailable font assets (use exact font_asset_id in font_options):\n"
+        + ("\n".join(font_lines) if font_lines else "(none)")
         + "\nThe template JSON must follow this exact structure:\n"
         + _MANUAL_TEMPLATE_JSON_REFERENCE
         + "\nRules:\n"
@@ -644,36 +933,44 @@ async def generate_template_from_description(
         "- font_size_min_percent and font_size_max_percent must be realistic "
         "(headline: 4-8%, subheadline: 2-4%, body: 1.5-3%)\n"
         "- z_index starts at 0 (background overlay) and increases\n"
-        "- logo layer position must be in a corner or edge\n"
+        "- logo layer position must be in a corner or edge (e.g. bottom-right for corporate logo)\n"
         "- every text layer must have at least 2 color_options and 1 font_option\n"
-        "- every background_options entry must use one of the provided asset IDs\n"
-        f"\nUSER DESCRIPTION: {description}\n"
+        "- use only asset_id / font_asset_id values from the lists above\n"
+        "- for multi-color text (e.g. white and yellow), list both in color_options\n"
+        "- place main headline text in the lower third when the design has a top image and bottom text area\n"
+        f"\nUSER DESCRIPTION:\n{description}\n"
         "Return only the raw JSON object."
     )
 
-    response_text = generate_text(
-        prompt=description,
-        system_prompt=system_prompt,
-        model_name="gemini-2.0-flash",
-        provider_name="gemini",
-        api_key="",
-        temperature=0.2,
-        max_tokens=4096,
-    )
-    if not response_text:
-        raise HTTPException(status_code=500, detail="LLM returned empty response")
+    try:
+        response_text = _call_llm_for_template_json(
+            user_id=current_user.id,
+            db=db,
+            description=description,
+            system_prompt=system_prompt,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"LLM request failed: {exc}") from exc
 
     try:
         parsed = _parse_json_with_fallback(response_text)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to parse LLM JSON: {exc}") from exc
 
-    parsed["canvas_width"] = int(parsed.get("canvas_width") or canvas_w)
-    parsed["canvas_height"] = int(parsed.get("canvas_height") or canvas_h)
-    parsed["aspect_ratio"] = str(parsed.get("aspect_ratio") or aspect)
+    normalized = _normalize_generated_template_json(
+        parsed,
+        description=description,
+        aspect=aspect,
+        canvas_w=canvas_w,
+        canvas_h=canvas_h,
+        bg_assets=bg_assets,
+        font_rows=font_rows,
+    )
 
     try:
-        validated = schemas.ManualTemplateJson.model_validate(parsed)
+        validated = schemas.ManualTemplateJson.model_validate(normalized)
         template_json = validated.model_dump(mode="json")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Generated JSON failed validation: {exc}") from exc
@@ -681,7 +978,15 @@ async def generate_template_from_description(
     _validate_manual_layer_constraints(template_json)
     _validate_manual_template_assets(db, current_user.id, template_json)
 
-    return {"template_json": template_json}
+    suggested_name = _suggested_template_name_from_description(description)
+
+    return schemas.GenerateTemplateFromDescriptionResponse(
+        template_json=template_json,
+        suggested_name=suggested_name,
+        aspect_ratio=aspect,
+        canvas_width=canvas_w,
+        canvas_height=canvas_h,
+    )
 
 
 @router.post("/api/image-templates/preview")

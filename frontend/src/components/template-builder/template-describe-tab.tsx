@@ -11,11 +11,19 @@ import { backgroundSwatchStyle } from "@/lib/template-state"
 import type { AspectKey, BackgroundAsset, ManualTemplateJson } from "@/lib/template-types"
 import { cn } from "@/lib/utils"
 
+export type DescribeGenerateResult = {
+  template_json: ManualTemplateJson
+  suggested_name: string
+  aspect_ratio: string
+  canvas_width: number
+  canvas_height: number
+}
+
 type Props = {
   aspectRatio: AspectKey
   backgrounds: BackgroundAsset[]
   loadingAssets: boolean
-  onGenerated: (json: ManualTemplateJson) => void
+  onGenerated: (result: DescribeGenerateResult) => void
 }
 
 export function TemplateDescribeTab({
@@ -46,7 +54,7 @@ export function TemplateDescribeTab({
     }
     setGenerating(true)
     try {
-      const res = await api.post<{ template_json: ManualTemplateJson }>(
+      const res = await api.post<DescribeGenerateResult>(
         "/api/image-templates/generate-from-description",
         {
           description: description.trim(),
@@ -54,9 +62,9 @@ export function TemplateDescribeTab({
           available_background_asset_ids: selectedBgIds,
         },
       )
-      onGenerated(res.data.template_json)
+      onGenerated(res.data)
       toast.success(
-        "Template generated. Review it in the JSON Editor or Visual Builder, then save.",
+        "Template generated and applied. Review in Visual Builder or JSON Editor, then save.",
       )
     } catch (err) {
       toast.error(getApiErrorMessage(err, "Generation failed."))
@@ -80,7 +88,9 @@ export function TemplateDescribeTab({
       <div className="grid gap-2">
         <Label>Background mood (optional, 1–3)</Label>
         <p className="text-xs text-slate-500">
-          Pick backgrounds to tell the LLM which assets are available.
+          Optional. If you skip this, the backend picks matching backgrounds from your library
+          (e.g. dark/space → navy/black). Wide cinematic layouts auto-use 16:9 when detected in
+          your description.
         </p>
         {loadingAssets ? (
           <Loader2 className="size-6 animate-spin text-slate-400" />

@@ -4,7 +4,10 @@ import * as React from "react"
 import { Loader2, X } from "lucide-react"
 import { toast } from "sonner"
 
-import { TemplateDescribeTab } from "@/components/template-builder/template-describe-tab"
+import {
+  TemplateDescribeTab,
+  type DescribeGenerateResult,
+} from "@/components/template-builder/template-describe-tab"
 import { TemplateJsonEditor } from "@/components/template-builder/template-json-editor"
 import { TemplateOptionBuilder } from "@/components/template-builder/template-option-builder"
 import { TemplateVisualBuilder } from "@/components/template-builder/template-visual-builder"
@@ -59,10 +62,23 @@ export function TemplateBuilder({ onCancel, onSaved }: Props) {
     setState((s) => applyTemplateJsonToState(s, json))
   }
 
-  function handleGenerated(json: ManualTemplateJson) {
-    setState((s) => applyTemplateJsonToState(s, json))
+  function handleGenerated(result: DescribeGenerateResult) {
+    const aspect = (
+      result.aspect_ratio in ASPECT_PRESETS ? result.aspect_ratio : "1:1"
+    ) as AspectKey
+    setState((s) => {
+      const next = applyTemplateJsonToState(s, result.template_json, result.suggested_name)
+      return {
+        ...next,
+        aspectRatio: aspect,
+        canvasWidth: result.canvas_width,
+        canvasHeight: result.canvas_height,
+        previewBackgroundAssetId:
+          result.template_json.background_options[0]?.asset_id ?? s.previewBackgroundAssetId,
+      }
+    })
     setJsonValid(true)
-    setActiveTab("json")
+    setActiveTab("visual")
   }
 
   function handleAspectChange(ratio: AspectKey) {

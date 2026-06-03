@@ -498,6 +498,14 @@ class GenerateTemplateFromDescriptionRequest(BaseModel):
     available_background_asset_ids: list[str] = Field(default_factory=list)
 
 
+class GenerateTemplateFromDescriptionResponse(BaseModel):
+    template_json: ManualTemplateJson
+    suggested_name: str
+    aspect_ratio: str
+    canvas_width: int
+    canvas_height: int
+
+
 class ImageTemplateBase(BaseModel):
     name: str
     reference_image_url: str
