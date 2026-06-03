@@ -474,7 +474,32 @@ class ImageTemplate(Base):
     canvas_width: Mapped[int] = mapped_column(Integer, default=1024, nullable=False)
     canvas_height: Mapped[int] = mapped_column(Integer, default=1024, nullable=False)
     aspect_ratio: Mapped[str] = mapped_column(String, default="1:1", nullable=False)
+    creation_method: Mapped[str] = mapped_column(String, default="extracted", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class TemplateBackgroundAsset(Base):
+    __tablename__ = "template_background_assets"
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    asset_type: Mapped[str] = mapped_column(String, nullable=False)
+    label: Mapped[str | None] = mapped_column(String, nullable=True)
+    preview_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    value_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class TemplateFontAsset(Base):
+    __tablename__ = "template_font_assets"
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    font_file_url: Mapped[str] = mapped_column(Text, nullable=False)
+    weight: Mapped[str] = mapped_column(String, default="regular", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
 
 class PersonaImageTemplateAssignment(Base):
     __tablename__ = "persona_image_template_assignments"
@@ -506,6 +531,7 @@ class PostImageGeneration(Base):
     template_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("image_templates.id", ondelete="CASCADE"), nullable=False)
     background_generation_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     overlay_texts: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
+    llm_instructions: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     background_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     final_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)

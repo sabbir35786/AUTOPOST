@@ -288,6 +288,18 @@ def _ensure_product_blueprint_columns() -> None:
             "last_checked_at": "timestamp",
         },
     )
+    _add_missing_columns(
+        "image_templates",
+        {
+            "creation_method": "varchar default 'extracted' not null",
+        },
+    )
+    _add_missing_columns(
+        "post_image_generations",
+        {
+            "llm_instructions": "json default '{}' not null",
+        },
+    )
 
 
 def _ensure_user_settings_table() -> None:

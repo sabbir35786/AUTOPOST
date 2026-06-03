@@ -112,6 +112,9 @@ def _run_database_migrations() -> None:
             'add_media_library_id_to_post_logs.sql',
             'fix_facebook_connections_flow.sql',
             'rebuild_image_templates_system.sql',
+            'add_manual_template_builder_step1.sql',
+            'add_manual_template_builder_step2.sql',
+            'add_manual_template_builder_step5.sql',
         ]
         
         for migration_file in MIGRATIONS:

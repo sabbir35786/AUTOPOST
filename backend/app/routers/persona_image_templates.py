@@ -3,15 +3,16 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Response, UploadFile
 from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy.orm import Session
 
-from app import models
+from app import models, schemas
 from app.auth import get_current_user
 from app.config import CRON_SECRET, GEMINI_API_KEY, SUPABASE_SERVICE_KEY, SUPABASE_URL
 from app.database import SessionLocal, get_db
@@ -116,6 +117,514 @@ async def _delete_from_supabase(bucket: str, object_path: str) -> None:
         await client.delete(storage_url, headers=headers)
 
 
+def _serialize_manual_template_json(payload: schemas.ManualImageTemplateCreate | schemas.ManualImageTemplateUpdate) -> dict:
+    return payload.template_json.model_dump(mode="json")
+
+
+def _validate_manual_template_assets(
+    db: Session,
+    user_id: int,
+    template_json: dict,
+) -> None:
+    background_ids = {
+        str(item.get("asset_id") or "").strip()
+        for item in template_json.get("background_options") or []
+    }
+    background_ids.discard("")
+    if not background_ids:
+        raise HTTPException(status_code=400, detail="At least one background option is required.")
+
+    font_ids: set[str] = set()
+    for layer in template_json.get("layers") or []:
+        if str(layer.get("type") or "").lower() != "text":
+            continue
+        for font_opt in layer.get("font_options") or []:
+            fid = str(font_opt.get("font_asset_id") or "").strip()
+            if fid:
+                font_ids.add(fid)
+
+    if background_ids:
+        found_bg = {
+            asset.id
+            for asset in db.query(models.TemplateBackgroundAsset).filter(
+                models.TemplateBackgroundAsset.user_id == user_id,
+                models.TemplateBackgroundAsset.id.in_(background_ids),
+            ).all()
+        }
+        missing_bg = background_ids - found_bg
+        if missing_bg:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown background asset_id(s): {', '.join(sorted(missing_bg))}",
+            )
+
+    if font_ids:
+        found_fonts = {
+            asset.id
+            for asset in db.query(models.TemplateFontAsset).filter(
+                models.TemplateFontAsset.user_id == user_id,
+                models.TemplateFontAsset.id.in_(font_ids),
+            ).all()
+        }
+        missing_fonts = font_ids - found_fonts
+        if missing_fonts:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown font_asset_id(s): {', '.join(sorted(missing_fonts))}",
+            )
+
+
+def _validate_manual_layer_constraints(template_json: dict) -> None:
+    layer_ids: list[str] = []
+    for layer in template_json.get("layers") or []:
+        layer_id = str(layer.get("id") or "").strip()
+        if not layer_id:
+            raise HTTPException(status_code=400, detail="Each layer must have a non-empty id.")
+        layer_ids.append(layer_id)
+        if str(layer.get("type") or "").lower() == "text":
+            min_pct = float(layer.get("font_size_min_percent") or 0)
+            max_pct = float(layer.get("font_size_max_percent") or 0)
+            if min_pct > max_pct:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Layer {layer_id}: font_size_min_percent cannot exceed font_size_max_percent.",
+                )
+    if len(layer_ids) != len(set(layer_ids)):
+        raise HTTPException(status_code=400, detail="Layer ids must be unique.")
+
+
+_DEFAULT_BACKGROUND_ASSETS = [
+    ("Dark Navy", "solid_color", {"color_hex": "#1a1a2e"}),
+    ("Deep Purple", "solid_color", {"color_hex": "#2d1b69"}),
+    ("Charcoal Black", "solid_color", {"color_hex": "#222222"}),
+    ("Warm Cream", "solid_color", {"color_hex": "#f5f0e8"}),
+    ("Ocean Blue", "gradient", {"stops": ["#0f2027", "#203a43", "#2c5364"]}),
+    ("Sunset Glow", "gradient", {"stops": ["#ff6b6b", "#feca57", "#ff9ff3"]}),
+]
+
+_DEFAULT_FONT_ASSETS = [
+    ("Roboto Bold", "bold", "backend/assets/fonts/Roboto-Bold.ttf"),
+    ("Roboto Regular", "regular", "backend/assets/fonts/Roboto-Regular.ttf"),
+]
+
+
+def _ensure_default_template_assets(db: Session, user_id: int) -> None:
+    bg_count = (
+        db.query(models.TemplateBackgroundAsset)
+        .filter(models.TemplateBackgroundAsset.user_id == user_id)
+        .count()
+    )
+    font_count = (
+        db.query(models.TemplateFontAsset)
+        .filter(models.TemplateFontAsset.user_id == user_id)
+        .count()
+    )
+    if bg_count > 0 and font_count > 0:
+        return
+
+    now = datetime.now(timezone.utc)
+    if bg_count == 0:
+        for label, asset_type, value_json in _DEFAULT_BACKGROUND_ASSETS:
+            db.add(
+                models.TemplateBackgroundAsset(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    asset_type=asset_type,
+                    label=label,
+                    preview_url=None,
+                    value_json=value_json,
+                    created_at=now,
+                )
+            )
+
+    if font_count == 0:
+        for display_name, weight, font_path in _DEFAULT_FONT_ASSETS:
+            db.add(
+                models.TemplateFontAsset(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    display_name=display_name,
+                    font_file_url=font_path,
+                    weight=weight,
+                    created_at=now,
+                )
+            )
+    db.commit()
+
+
+@router.get("/api/template-assets/backgrounds")
+def list_background_assets(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _ensure_default_template_assets(db, current_user.id)
+    rows = (
+        db.query(models.TemplateBackgroundAsset)
+        .filter(models.TemplateBackgroundAsset.user_id == current_user.id)
+        .order_by(models.TemplateBackgroundAsset.created_at.asc())
+        .all()
+    )
+    return [
+        {
+            "id": row.id,
+            "asset_type": row.asset_type,
+            "label": row.label,
+            "preview_url": row.preview_url,
+            "value_json": row.value_json or {},
+        }
+        for row in rows
+    ]
+
+
+@router.get("/api/template-assets/fonts")
+def list_font_assets(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _ensure_default_template_assets(db, current_user.id)
+    rows = (
+        db.query(models.TemplateFontAsset)
+        .filter(models.TemplateFontAsset.user_id == current_user.id)
+        .order_by(models.TemplateFontAsset.created_at.asc())
+        .all()
+    )
+    return [
+        {
+            "id": row.id,
+            "display_name": row.display_name,
+            "weight": row.weight,
+            "font_file_url": row.font_file_url,
+        }
+        for row in rows
+    ]
+
+
+def _image_template_response(row: models.ImageTemplate) -> dict:
+    return {
+        "id": row.id,
+        "user_id": row.user_id,
+        "name": row.name,
+        "reference_image_url": row.reference_image_url,
+        "creation_method": row.creation_method,
+        "template_json": row.template_json,
+        "canvas_width": row.canvas_width,
+        "canvas_height": row.canvas_height,
+        "aspect_ratio": row.aspect_ratio,
+        "created_at": row.created_at,
+    }
+
+
+_PLACEHOLDER_BY_ROLE = {
+    "headline": "Your Headline Here",
+    "subheadline": "Supporting text goes here",
+    "body": "Body text example",
+}
+
+
+def _lerp_channel(a: int, b: int, t: float) -> int:
+    return int(round(a + (b - a) * t))
+
+
+def _lerp_hex(c1: str, c2: str, t: float) -> tuple[int, int, int, int]:
+    r1, g1, b1, _ = _parse_hex_color(c1, default=(0, 0, 0, 255))
+    r2, g2, b2, _ = _parse_hex_color(c2, default=(255, 255, 255, 255))
+    return (
+        _lerp_channel(r1, r2, t),
+        _lerp_channel(g1, g2, t),
+        _lerp_channel(b1, b2, t),
+        255,
+    )
+
+
+def _render_gradient_background(stops: list[str], canvas_w: int, canvas_h: int) -> Image.Image:
+    if not stops:
+        return Image.new("RGBA", (canvas_w, canvas_h), (30, 30, 30, 255))
+    if len(stops) == 1:
+        return Image.new("RGBA", (canvas_w, canvas_h), _parse_hex_color(stops[0], default=(30, 30, 30, 255)))
+    img = Image.new("RGBA", (canvas_w, canvas_h))
+    pixels = img.load()
+    max_y = max(canvas_h - 1, 1)
+    seg_count = len(stops) - 1
+    for y in range(canvas_h):
+        t = y / max_y
+        seg = min(int(t * seg_count), seg_count - 1)
+        local_t = (t * seg_count) - seg
+        color = _lerp_hex(stops[seg], stops[seg + 1], local_t)
+        for x in range(canvas_w):
+            pixels[x, y] = color
+    return img
+
+
+def _resolve_font_path(font_file_url: str) -> str | None:
+    raw = (font_file_url or "").strip()
+    if not raw:
+        return None
+    if os.path.isfile(raw):
+        return raw
+    candidates = [
+        raw,
+        os.path.join(os.getcwd(), raw),
+        os.path.join(os.path.dirname(__file__), "..", "..", raw),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _get_font_for_asset(font_asset: models.TemplateFontAsset | None, weight: str, size_px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    if font_asset:
+        resolved = _resolve_font_path(font_asset.font_file_url)
+        if resolved:
+            try:
+                return ImageFont.truetype(resolved, size_px)
+            except Exception:
+                pass
+    return _get_font(weight, size_px)
+
+
+async def _load_background_asset_image(
+    db: Session,
+    user_id: int,
+    asset_id: str,
+    canvas_w: int,
+    canvas_h: int,
+) -> Image.Image:
+    asset = (
+        db.query(models.TemplateBackgroundAsset)
+        .filter(
+            models.TemplateBackgroundAsset.id == asset_id,
+            models.TemplateBackgroundAsset.user_id == user_id,
+        )
+        .first()
+    )
+    if not asset:
+        return Image.new("RGBA", (canvas_w, canvas_h), (40, 40, 40, 255))
+
+    value = asset.value_json or {}
+    asset_type = str(asset.asset_type or "").lower()
+    if asset_type == "solid_color":
+        return Image.new("RGBA", (canvas_w, canvas_h), _parse_hex_color(str(value.get("color_hex") or ""), default=(40, 40, 40, 255)))
+    if asset_type == "gradient":
+        stops = value.get("stops") or []
+        if isinstance(stops, list) and stops:
+            return _render_gradient_background([str(s) for s in stops], canvas_w, canvas_h)
+    image_url = asset.preview_url or value.get("image_url")
+    if image_url:
+        blob = await _download_bytes(str(image_url))
+        if blob:
+            return Image.open(io.BytesIO(blob)).convert("RGBA").resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
+    return Image.new("RGBA", (canvas_w, canvas_h), _parse_hex_color(str(value.get("color_hex") or ""), default=(40, 40, 40, 255))
+
+
+def _assemble_manual_template_preview(
+    template_json: dict,
+    background: Image.Image,
+    logo_bytes: bytes | None,
+    font_assets: dict[str, models.TemplateFontAsset],
+) -> bytes:
+    canvas_w = int(template_json.get("canvas_width") or 1024)
+    canvas_h = int(template_json.get("canvas_height") or 1024)
+    base = background.convert("RGBA").resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
+    logo_img = Image.open(io.BytesIO(logo_bytes)).convert("RGBA") if logo_bytes else None
+
+    layers = sorted(template_json.get("layers") or [], key=lambda layer: int(layer.get("z_index") or 0))
+    for layer in layers:
+        layer_type = str(layer.get("type") or "").lower()
+        x = _pct(float(layer.get("position_x_percent") or 0), canvas_w)
+        y = _pct(float(layer.get("position_y_percent") or 0), canvas_h)
+        w = _pct(float(layer.get("width_percent") or 100), canvas_w)
+        h = _pct(float(layer.get("height_percent") or 100), canvas_h)
+        if w <= 0 or h <= 0:
+            continue
+
+        if layer_type == "overlay":
+            color_opts = layer.get("color_options") or []
+            if not color_opts:
+                continue
+            opt = color_opts[0]
+            r, g, b, _ = _parse_hex_color(str(opt.get("color_hex") or ""), default=(0, 0, 0, 255))
+            opacity = max(0.0, min(1.0, float(opt.get("opacity") if opt.get("opacity") is not None else 0.35)))
+            overlay = Image.new("RGBA", (w, h), (r, g, b, int(round(opacity * 255))))
+            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+            layer_canvas.paste(overlay, (x, y), overlay)
+            base = Image.alpha_composite(base, layer_canvas)
+        elif layer_type == "logo" and logo_img is not None:
+            img_box = _fit_within(logo_img, w, h)
+            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+            layer_canvas.paste(img_box, (x, y), img_box)
+            base = Image.alpha_composite(base, layer_canvas)
+        elif layer_type == "text":
+            role = str(layer.get("role") or "body").lower()
+            text_str = _PLACEHOLDER_BY_ROLE.get(role, _PLACEHOLDER_BY_ROLE["body"])
+            font_opts = layer.get("font_options") or []
+            color_opts = layer.get("color_options") or []
+            if not font_opts or not color_opts:
+                continue
+            font_id = str(font_opts[0].get("font_asset_id") or "")
+            font_asset = font_assets.get(font_id)
+            min_pct = float(layer.get("font_size_min_percent") or 4.0)
+            max_pct = float(layer.get("font_size_max_percent") or 7.0)
+            font_px = max(10, int(round(((min_pct + max_pct) / 2.0) * canvas_h / 100.0)))
+            weight = str(layer.get("font_weight") or (font_asset.weight if font_asset else "regular"))
+            font = _get_font_for_asset(font_asset, weight, font_px)
+            color = _parse_hex_color(str(color_opts[0].get("color_hex") or ""), default=(255, 255, 255, 255))
+            align_opts = layer.get("text_align_options") or ["center"]
+            align = str(align_opts[0] if align_opts else "center").strip().lower()
+            text_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(text_layer)
+            cursor_y = 0
+            for paragraph in text_str.splitlines() or [text_str]:
+                for line in _wrap_text(draw, paragraph, font, w):
+                    bbox = draw.textbbox((0, 0), line, font=font)
+                    tw = bbox[2] - bbox[0]
+                    th = bbox[3] - bbox[1]
+                    tx = max(0, (w - tw) // 2) if align == "center" else max(0, w - tw) if align == "right" else 0
+                    draw.text((tx, cursor_y), line, font=font, fill=color)
+                    cursor_y += th + max(3, int(font_px * 0.22))
+                    if cursor_y > h:
+                        break
+                if cursor_y > h:
+                    break
+            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+            layer_canvas.paste(text_layer, (x, y), text_layer)
+            base = Image.alpha_composite(base, layer_canvas)
+
+    out = io.BytesIO()
+    base.convert("RGB").save(out, format="PNG")
+    return out.getvalue()
+
+
+@router.post("/api/image-templates/preview")
+async def preview_template_image(
+    payload: schemas.ImageTemplatePreviewRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    template_json = payload.template_json.model_dump(mode="json")
+    _validate_manual_layer_constraints(template_json)
+
+    bg_options = template_json.get("background_options") or []
+    if not bg_options:
+        raise HTTPException(status_code=400, detail="At least one background option is required for preview.")
+
+    first_bg_id = str(bg_options[0].get("asset_id") or "").strip()
+    if not first_bg_id:
+        raise HTTPException(status_code=400, detail="Invalid background asset_id.")
+
+    canvas_w = int(template_json.get("canvas_width") or 1080)
+    canvas_h = int(template_json.get("canvas_height") or 1080)
+    background = await _load_background_asset_image(db, current_user.id, first_bg_id, canvas_w, canvas_h)
+
+    font_ids: set[str] = set()
+    for layer in template_json.get("layers") or []:
+        if str(layer.get("type") or "").lower() != "text":
+            continue
+        for font_opt in layer.get("font_options") or []:
+            fid = str(font_opt.get("font_asset_id") or "").strip()
+            if fid:
+                font_ids.add(fid)
+    font_assets: dict[str, models.TemplateFontAsset] = {}
+    if font_ids:
+        rows = (
+            db.query(models.TemplateFontAsset)
+            .filter(
+                models.TemplateFontAsset.user_id == current_user.id,
+                models.TemplateFontAsset.id.in_(font_ids),
+            )
+            .all()
+        )
+        font_assets = {row.id: row for row in rows}
+
+    logo_bytes = None
+    if payload.persona_id is not None:
+        persona = (
+            db.query(models.AIPersona)
+            .filter(models.AIPersona.id == payload.persona_id, models.AIPersona.user_id == current_user.id)
+            .first()
+        )
+        if not persona:
+            raise HTTPException(status_code=404, detail="Persona not found")
+        logo_url = persona.template_logo_url
+        if logo_url:
+            try:
+                logo_bytes = await _download_bytes(logo_url)
+            except Exception:
+                logo_bytes = None
+
+    png_bytes = _assemble_manual_template_preview(template_json, background, logo_bytes, font_assets)
+    return Response(content=png_bytes, media_type="image/png")
+
+
+@router.post("/api/image-templates/manual")
+def create_manual_template(
+    payload: schemas.ManualImageTemplateCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Template name is required.")
+
+    template_json = _serialize_manual_template_json(payload)
+    _validate_manual_layer_constraints(template_json)
+    _validate_manual_template_assets(db, current_user.id, template_json)
+
+    row = models.ImageTemplate(
+        id=str(uuid.uuid4()),
+        user_id=current_user.id,
+        name=name,
+        reference_image_url="",
+        template_json=template_json,
+        canvas_width=payload.canvas_width,
+        canvas_height=payload.canvas_height,
+        aspect_ratio=payload.aspect_ratio,
+        creation_method="manual",
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _image_template_response(row)
+
+
+@router.put("/api/image-templates/{template_id}")
+def update_manual_template(
+    template_id: str,
+    payload: schemas.ManualImageTemplateUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    row = db.query(models.ImageTemplate).filter(
+        models.ImageTemplate.id == template_id,
+        models.ImageTemplate.user_id == current_user.id,
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if row.creation_method != "manual":
+        raise HTTPException(
+            status_code=400,
+            detail="Only manually built templates can be updated with this endpoint.",
+        )
+
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Template name is required.")
+
+    template_json = _serialize_manual_template_json(payload)
+    _validate_manual_layer_constraints(template_json)
+    _validate_manual_template_assets(db, current_user.id, template_json)
+
+    row.name = name
+    row.template_json = template_json
+    row.canvas_width = payload.template_json.canvas_width
+    row.canvas_height = payload.template_json.canvas_height
+    row.aspect_ratio = payload.template_json.aspect_ratio
+    db.commit()
+    db.refresh(row)
+    return _image_template_response(row)
+
+
 @router.post("/api/image-templates/analyze")
 async def analyze_template(
     name: str = Form(...),
@@ -166,22 +675,13 @@ async def analyze_template(
         canvas_width=canvas_width,
         canvas_height=canvas_height,
         aspect_ratio=aspect_ratio,
+        creation_method="extracted",
         created_at=datetime.now(timezone.utc),
     )
     db.add(row)
     db.commit()
     db.refresh(row)
-    return {
-        "id": row.id,
-        "user_id": row.user_id,
-        "name": row.name,
-        "reference_image_url": row.reference_image_url,
-        "template_json": row.template_json,
-        "canvas_width": row.canvas_width,
-        "canvas_height": row.canvas_height,
-        "aspect_ratio": row.aspect_ratio,
-        "created_at": row.created_at,
-    }
+    return _image_template_response(row)
 
 
 @router.get("/api/image-templates")
@@ -200,6 +700,7 @@ def list_templates(
             "id": r.id,
             "name": r.name,
             "reference_image_url": r.reference_image_url,
+            "creation_method": r.creation_method,
             "aspect_ratio": r.aspect_ratio,
             "canvas_width": r.canvas_width,
             "canvas_height": r.canvas_height,
@@ -221,16 +722,7 @@ def get_template(
     ).first()
     if not row:
         raise HTTPException(status_code=404, detail="Template not found")
-    return {
-        "id": row.id,
-        "name": row.name,
-        "reference_image_url": row.reference_image_url,
-        "template_json": row.template_json,
-        "canvas_width": row.canvas_width,
-        "canvas_height": row.canvas_height,
-        "aspect_ratio": row.aspect_ratio,
-        "created_at": row.created_at,
-    }
+    return _image_template_response(row)
 
 
 @router.delete("/api/image-templates/{template_id}")
@@ -247,7 +739,9 @@ async def delete_template(
         raise HTTPException(status_code=404, detail="Template not found")
 
     marker = "/storage/v1/object/public/image-templates/"
-    object_path = row.reference_image_url.split(marker, 1)[-1] if marker in row.reference_image_url else None
+    object_path = None
+    if row.reference_image_url and marker in row.reference_image_url:
+        object_path = row.reference_image_url.split(marker, 1)[-1]
     if object_path:
         await _delete_from_supabase("image-templates", object_path)
     db.query(models.PersonaImageTemplateAssignment).filter(
@@ -472,9 +966,12 @@ def _text_layers(template_json: dict) -> list[tuple[int, dict]]:
     ]
 
 
-def _generation_payload(row: models.PostImageGeneration | None) -> dict:
+def _generation_payload(row: models.PostImageGeneration | None, template: models.ImageTemplate | None = None) -> dict:
     if not row:
         return {"status": "not_started", "final_image_url": None, "error_message": None}
+    llm = row.llm_instructions or {}
+    template_json = (template.template_json if template else None) or {}
+    manual = _is_manual_template(template, template_json) if template else bool(llm.get("chosen_background_asset_id"))
     return {
         "id": row.id,
         "post_id": row.post_id,
@@ -482,6 +979,11 @@ def _generation_payload(row: models.PostImageGeneration | None) -> dict:
         "status": row.status,
         "background_generation_prompt": row.background_generation_prompt,
         "overlay_texts": row.overlay_texts or [],
+        "llm_instructions": llm,
+        "chosen_background_asset_id": llm.get("chosen_background_asset_id"),
+        "background_options": template_json.get("background_options") or [],
+        "template_creation_method": template.creation_method if template else None,
+        "can_edit_photocard": manual and bool(llm),
         "background_image_url": row.background_image_url,
         "logo_url": row.logo_url,
         "final_image_url": row.final_image_url,
@@ -603,6 +1105,415 @@ def _generate_overlay_texts(db: Session, post: models.PostLog, persona: models.A
     while len(values) < len(layers):
         values.append((post.content or "Learn more").strip().splitlines()[0][:80])
     return [{"layer_index": layer_index, "text": values[index]} for index, (layer_index, _) in enumerate(layers)]
+
+
+def _is_manual_template(template: models.ImageTemplate, template_json: dict) -> bool:
+    if str(template.creation_method or "").lower() == "manual":
+        return True
+    return bool(template_json.get("background_options"))
+
+
+def _build_llm_instruction_prompt(
+    post: models.PostLog,
+    persona: models.AIPersona,
+    template_json: dict,
+) -> str:
+    tone_tags = persona.tone_tags or ""
+    language = persona.language or "English"
+    backgrounds_block = []
+    for opt in template_json.get("background_options") or []:
+        backgrounds_block.append(f'asset_id: {opt.get("asset_id")}, label: {opt.get("label")}')
+
+    layers_block: list[str] = []
+    for layer in template_json.get("layers") or []:
+        layer_type = str(layer.get("type") or "").lower()
+        layer_id = layer.get("id")
+        if layer_type == "text":
+            font_opts = ", ".join(
+                f'{{"font_asset_id": "{f.get("font_asset_id")}", "label": "{f.get("label")}"}}'
+                for f in layer.get("font_options") or []
+            )
+            color_opts = ", ".join(
+                f'{{"color_hex": "{c.get("color_hex")}", "label": "{c.get("label")}"}}'
+                for c in layer.get("color_options") or []
+            )
+            aligns = ", ".join(f'"{a}"' for a in layer.get("text_align_options") or [])
+            layers_block.append(
+                f'layer_id: {layer_id}, role: {layer.get("role")}, '
+                f"font_options: [{font_opts}], color_options: [{color_opts}], "
+                f"font_size_min: {layer.get('font_size_min_percent')}%, "
+                f"font_size_max: {layer.get('font_size_max_percent')}%, "
+                f"text_align_options: [{aligns}]"
+            )
+        elif layer_type == "overlay":
+            color_opts = ", ".join(
+                f'{{"color_hex": "{c.get("color_hex")}", "opacity": {c.get("opacity")}, "label": "{c.get("label")}"}}'
+                for c in layer.get("color_options") or []
+            )
+            layers_block.append(f"layer_id: {layer_id}, color_options: [{color_opts}]")
+
+    return (
+        "You are a creative director for social media photocards.\n"
+        "You will be given a post and a set of design options.\n"
+        "You must choose exactly one option per decision and return ONLY a raw JSON object. No explanation. No markdown.\n\n"
+        f"POST CONTENT:\n{post.content or ''}\n\n"
+        f"PERSONA TONE: {tone_tags}\n"
+        f"PERSONA NICHE: {persona.niche}\n"
+        f"LANGUAGE: {language}\n\n"
+        "AVAILABLE BACKGROUNDS:\n"
+        + ("\n".join(backgrounds_block) or "(none)")
+        + "\n\nLAYERS TO FILL:\n"
+        + ("\n".join(layers_block) or "(none)")
+        + "\n\nReturn a JSON object with this exact structure:\n"
+        "{\n"
+        '  "chosen_background_asset_id": "uuid",\n'
+        '  "layers": [\n'
+        "    {\n"
+        '      "layer_id": "layer_2",\n'
+        '      "text": "Short punchy headline max 6 words",\n'
+        '      "font_asset_id": "uuid",\n'
+        '      "color_hex": "#ffffff",\n'
+        '      "font_size_percent": 5.5,\n'
+        '      "text_align": "center"\n'
+        "    },\n"
+        "    {\n"
+        '      "layer_id": "layer_3",\n'
+        '      "text": "Supporting line max 10 words",\n'
+        '      "font_asset_id": "uuid",\n'
+        '      "color_hex": "#dddddd",\n'
+        '      "font_size_percent": 2.8,\n'
+        '      "text_align": "center"\n'
+        "    },\n"
+        "    {\n"
+        '      "layer_id": "layer_1",\n'
+        '      "color_hex": "#000000",\n'
+        '      "opacity": 0.4\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        f"Choose options that best match the mood, topic and tone of the post. All text must be in {language}."
+    )
+
+
+def _first_option(options: list, key: str):
+    if not options:
+        return None
+    return options[0].get(key) if isinstance(options[0], dict) else None
+
+
+def _validate_and_clamp_llm_instructions(template_json: dict, raw: dict) -> dict:
+    bg_options = template_json.get("background_options") or []
+    allowed_bg = {str(o.get("asset_id")) for o in bg_options if o.get("asset_id")}
+    first_bg = str(bg_options[0].get("asset_id")) if bg_options else ""
+
+    chosen_bg = str(raw.get("chosen_background_asset_id") or "").strip()
+    if chosen_bg not in allowed_bg:
+        chosen_bg = first_bg
+
+    template_layers = {str(layer.get("id")): layer for layer in template_json.get("layers") or [] if layer.get("id")}
+    raw_layers = raw.get("layers") if isinstance(raw.get("layers"), list) else []
+    raw_by_id = {
+        str(item.get("layer_id")): item for item in raw_layers if isinstance(item, dict) and item.get("layer_id")
+    }
+
+    clamped_layers: list[dict] = []
+    for layer_id, layer in template_layers.items():
+        layer_type = str(layer.get("type") or "").lower()
+        incoming = raw_by_id.get(layer_id, {})
+
+        if layer_type == "text":
+            font_options = layer.get("font_options") or []
+            color_options = layer.get("color_options") or []
+            align_options = layer.get("text_align_options") or []
+            allowed_fonts = {str(f.get("font_asset_id")) for f in font_options if f.get("font_asset_id")}
+            allowed_colors = {str(c.get("color_hex")).lower() for c in color_options if c.get("color_hex")}
+
+            font_id = str(incoming.get("font_asset_id") or "").strip()
+            if font_id not in allowed_fonts:
+                font_id = str(_first_option(font_options, "font_asset_id") or "")
+
+            color_hex = str(incoming.get("color_hex") or "").strip().lower()
+            if color_hex and not color_hex.startswith("#"):
+                color_hex = f"#{color_hex}"
+            if color_hex.lower() not in allowed_colors:
+                color_hex = str(_first_option(color_options, "color_hex") or "#ffffff")
+
+            min_pct = float(layer.get("font_size_min_percent") or 1.0)
+            max_pct = float(layer.get("font_size_max_percent") or min_pct)
+            try:
+                font_size = float(incoming.get("font_size_percent"))
+            except (TypeError, ValueError):
+                font_size = (min_pct + max_pct) / 2.0
+            font_size = max(min_pct, min(max_pct, font_size))
+
+            text_align = str(incoming.get("text_align") or "").strip().lower()
+            if text_align not in [str(a).lower() for a in align_options]:
+                text_align = str(align_options[0]).lower() if align_options else "center"
+
+            text = str(incoming.get("text") or "").strip() or " "
+            clamped_layers.append(
+                {
+                    "layer_id": layer_id,
+                    "text": text,
+                    "font_asset_id": font_id,
+                    "color_hex": color_hex,
+                    "font_size_percent": font_size,
+                    "text_align": text_align,
+                }
+            )
+        elif layer_type == "overlay":
+            color_options = layer.get("color_options") or []
+            allowed = {
+                (str(c.get("color_hex")).lower(), float(c.get("opacity") if c.get("opacity") is not None else 0.35))
+                for c in color_options
+                if c.get("color_hex") is not None
+            }
+            color_hex = str(incoming.get("color_hex") or "").strip().lower()
+            if color_hex and not color_hex.startswith("#"):
+                color_hex = f"#{color_hex}"
+            try:
+                opacity = float(incoming.get("opacity"))
+            except (TypeError, ValueError):
+                opacity = float(color_options[0].get("opacity") if color_options else 0.35)
+
+            if (color_hex, opacity) not in allowed:
+                first = color_options[0] if color_options else {}
+                color_hex = str(first.get("color_hex") or "#000000").lower()
+                if not color_hex.startswith("#"):
+                    color_hex = f"#{color_hex}"
+                opacity = float(first.get("opacity") if first.get("opacity") is not None else 0.35)
+
+            clamped_layers.append(
+                {
+                    "layer_id": layer_id,
+                    "color_hex": color_hex,
+                    "opacity": max(0.0, min(1.0, opacity)),
+                }
+            )
+
+    return {"chosen_background_asset_id": chosen_bg, "layers": clamped_layers}
+
+
+def _generate_llm_instructions(
+    db: Session,
+    post: models.PostLog,
+    persona: models.AIPersona,
+    template_json: dict,
+) -> dict:
+    prompt = _build_llm_instruction_prompt(post, persona, template_json)
+    result = generate_post_text_for_user(
+        user_id=post.user_id,
+        prompt=prompt,
+        system_prompt=(
+            "You are a creative director for social media photocards. "
+            "Return only valid raw JSON matching the requested structure."
+        ),
+        temperature=0.6,
+        max_tokens=1200,
+        db=db,
+    )
+    if result is None:
+        result = generate_text(
+            prompt=prompt,
+            system_prompt=(
+                "You are a creative director for social media photocards. "
+                "Return only valid raw JSON matching the requested structure."
+            ),
+            model_name="gemini-2.0-flash",
+            provider_name="gemini",
+            api_key="",
+            temperature=0.6,
+            max_tokens=1200,
+        )
+    try:
+        parsed = json.loads(_clean_json_response(result or "{}"))
+    except Exception:
+        try:
+            repaired = generate_text(
+                prompt=(
+                    "Fix this malformed JSON and return only raw valid JSON with no markdown:\n\n"
+                    f"{result}"
+                ),
+                system_prompt="Return only valid raw JSON.",
+                model_name="gemini-2.0-flash",
+                provider_name="gemini",
+                api_key="",
+                temperature=0.0,
+                max_tokens=1200,
+            )
+            parsed = json.loads(_clean_json_response(repaired or "{}"))
+        except Exception:
+            parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    return _validate_and_clamp_llm_instructions(template_json, parsed)
+
+
+def _allowed_background_asset_ids(template_json: dict) -> set[str]:
+    return {
+        str(opt.get("asset_id")).strip()
+        for opt in template_json.get("background_options") or []
+        if opt.get("asset_id")
+    }
+
+
+def _validate_background_override(template_json: dict, asset_id: str) -> str:
+    asset_id = asset_id.strip()
+    if not asset_id:
+        raise HTTPException(status_code=400, detail="override_background_asset_id is empty.")
+    allowed = _allowed_background_asset_ids(template_json)
+    if asset_id not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail="override_background_asset_id is not in this template's background_options.",
+        )
+    return asset_id
+
+
+def _instructions_with_background_override(llm_instructions: dict, asset_id: str) -> dict:
+    merged = dict(llm_instructions or {})
+    merged["chosen_background_asset_id"] = asset_id
+    return merged
+
+
+def _merge_llm_instructions_with_overrides(
+    llm_instructions: dict,
+    layer_overrides: list[dict] | None,
+) -> dict:
+    if not layer_overrides:
+        return llm_instructions
+    merged = {
+        "chosen_background_asset_id": llm_instructions.get("chosen_background_asset_id"),
+        "layers": [dict(layer) for layer in llm_instructions.get("layers") or []],
+    }
+    by_id = {str(layer.get("layer_id")): layer for layer in merged["layers"]}
+    for override in layer_overrides or []:
+        layer_id = str(override.get("layer_id") or "").strip()
+        if not layer_id and override.get("layer_index") is not None:
+            continue
+        if layer_id not in by_id:
+            continue
+        target = by_id[layer_id]
+        if override.get("text") is not None or override.get("new_text") is not None:
+            target["text"] = str(override.get("new_text") or override.get("text") or target.get("text") or "")
+        for key in ("font_asset_id", "color_hex", "font_size_percent", "text_align", "opacity"):
+            if override.get(key) is not None:
+                target[key] = override[key]
+    return merged
+
+
+def _image_to_png_bytes(image: Image.Image) -> bytes:
+    out = io.BytesIO()
+    image.convert("RGB").save(out, format="PNG")
+    return out.getvalue()
+
+
+def _assemble_from_llm_instructions(
+    template_json: dict,
+    background: Image.Image,
+    logo_bytes: bytes | None,
+    llm_instructions: dict,
+    db: Session,
+    user_id: int,
+    layer_overrides: list[dict] | None = None,
+) -> bytes:
+    instructions = _merge_llm_instructions_with_overrides(llm_instructions, layer_overrides)
+    layer_map = {
+        str(item.get("layer_id")): item for item in instructions.get("layers") or [] if item.get("layer_id")
+    }
+
+    font_ids: set[str] = set()
+    for item in layer_map.values():
+        fid = str(item.get("font_asset_id") or "").strip()
+        if fid:
+            font_ids.add(fid)
+    font_assets: dict[str, models.TemplateFontAsset] = {}
+    if font_ids:
+        rows = (
+            db.query(models.TemplateFontAsset)
+            .filter(
+                models.TemplateFontAsset.user_id == user_id,
+                models.TemplateFontAsset.id.in_(font_ids),
+            )
+            .all()
+        )
+        font_assets = {row.id: row for row in rows}
+
+    canvas_w = int(template_json.get("canvas_width") or 1024)
+    canvas_h = int(template_json.get("canvas_height") or 1024)
+    base = background.convert("RGBA").resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
+    logo_img = Image.open(io.BytesIO(logo_bytes)).convert("RGBA") if logo_bytes else None
+
+    layers = sorted(template_json.get("layers") or [], key=lambda layer: int(layer.get("z_index") or 0))
+    for layer in layers:
+        layer_id = str(layer.get("id") or "")
+        layer_type = str(layer.get("type") or "").lower()
+        x = _pct(float(layer.get("position_x_percent") or 0), canvas_w)
+        y = _pct(float(layer.get("position_y_percent") or 0), canvas_h)
+        w = _pct(float(layer.get("width_percent") or 100), canvas_w)
+        h = _pct(float(layer.get("height_percent") or 100), canvas_h)
+        if w <= 0 or h <= 0:
+            continue
+
+        instr = layer_map.get(layer_id, {})
+        if layer_type == "overlay":
+            color_hex = str(instr.get("color_hex") or _first_option(layer.get("color_options") or [], "color_hex") or "#000000")
+            try:
+                opacity = float(instr.get("opacity"))
+            except (TypeError, ValueError):
+                opacity = float(
+                    (layer.get("color_options") or [{}])[0].get("opacity")
+                    if layer.get("color_options")
+                    else 0.35
+                )
+            r, g, b, _ = _parse_hex_color(color_hex, default=(0, 0, 0, 255))
+            opacity = max(0.0, min(1.0, opacity))
+            overlay = Image.new("RGBA", (w, h), (r, g, b, int(round(opacity * 255))))
+            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+            layer_canvas.paste(overlay, (x, y), overlay)
+            base = Image.alpha_composite(base, layer_canvas)
+        elif layer_type == "logo" and logo_img is not None:
+            img_box = _fit_within(logo_img, w, h)
+            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+            layer_canvas.paste(img_box, (x, y), img_box)
+            base = Image.alpha_composite(base, layer_canvas)
+        elif layer_type == "text":
+            text_str = str(instr.get("text") or "").strip()
+            if not text_str:
+                continue
+            font_id = str(instr.get("font_asset_id") or "")
+            font_asset = font_assets.get(font_id)
+            try:
+                font_size_pct = float(instr.get("font_size_percent"))
+            except (TypeError, ValueError):
+                min_pct = float(layer.get("font_size_min_percent") or 4.0)
+                max_pct = float(layer.get("font_size_max_percent") or 7.0)
+                font_size_pct = (min_pct + max_pct) / 2.0
+            font_px = max(10, int(round(font_size_pct * canvas_h / 100.0)))
+            weight = str(layer.get("font_weight") or (font_asset.weight if font_asset else "regular"))
+            font = _get_font_for_asset(font_asset, weight, font_px)
+            color = _parse_hex_color(str(instr.get("color_hex") or ""), default=(255, 255, 255, 255))
+            align = str(instr.get("text_align") or "center").strip().lower()
+            text_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(text_layer)
+            cursor_y = 0
+            for paragraph in text_str.splitlines() or [text_str]:
+                for line in _wrap_text(draw, paragraph, font, w):
+                    bbox = draw.textbbox((0, 0), line, font=font)
+                    tw = bbox[2] - bbox[0]
+                    th = bbox[3] - bbox[1]
+                    tx = max(0, (w - tw) // 2) if align == "center" else max(0, w - tw) if align == "right" else 0
+                    draw.text((tx, cursor_y), line, font=font, fill=color)
+                    cursor_y += th + max(3, int(font_px * 0.22))
+                    if cursor_y > h:
+                        break
+                if cursor_y > h:
+                    break
+            layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+            layer_canvas.paste(text_layer, (x, y), text_layer)
+            base = Image.alpha_composite(base, layer_canvas)
+
+    return _image_to_png_bytes(base)
 
 
 def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
@@ -730,55 +1641,113 @@ async def _run_post_image_generation(
             db.add(generation)
             db.flush()
         generation.template_id = template.id
-        generation.status = "generating_background"
         generation.error_message = None
         generation.updated_at = datetime.now(timezone.utc)
-        db.commit()
 
-        bg_prompt = _generate_background_prompt(db, post, persona, template_json)
-        generation.background_generation_prompt = bg_prompt
-        db.commit()
+        manual_template = _is_manual_template(template, template_json)
+        if manual_template:
+            generation.status = "generating_styling"
+            db.commit()
 
-        provider_instance, model_name, api_key = get_image_provider_for_user(user_id, db)
-        import asyncio
+            llm_instructions = _generate_llm_instructions(db, post, persona, template_json)
+            generation.llm_instructions = llm_instructions
+            generation.overlay_texts = []
+            generation.background_generation_prompt = None
+            db.commit()
 
-        bg_bytes = await asyncio.to_thread(
-            provider_instance.generate,
-            prompt=bg_prompt,
-            negative_prompt="text, letters, words, logo, watermark, signature",
-            aspect_ratio=template_json.get("aspect_ratio") or "1:1",
-            model_name=model_name,
-            api_key=api_key,
-        )
-        background_url = await _upload_to_supabase("generated-images", f"post-images/{post.id}/background.png", bg_bytes, "image/png")
-        generation.background_image_url = background_url
-        generation.status = "generating_text"
-        generation.updated_at = datetime.now(timezone.utc)
-        db.commit()
+            canvas_w = int(template_json.get("canvas_width") or 1080)
+            canvas_h = int(template_json.get("canvas_height") or 1080)
+            bg_asset_id = str(llm_instructions.get("chosen_background_asset_id") or "")
+            background_img = await _load_background_asset_image(db, user_id, bg_asset_id, canvas_w, canvas_h)
+            bg_bytes = _image_to_png_bytes(background_img)
+            background_url = await _upload_to_supabase(
+                "generated-images",
+                f"post-images/{post.id}/background.png",
+                bg_bytes,
+                "image/png",
+            )
+            generation.background_image_url = background_url
+        else:
+            generation.status = "generating_background"
+            db.commit()
 
-        generation.overlay_texts = _generate_overlay_texts(db, post, persona, template_json)
+            bg_prompt = _generate_background_prompt(db, post, persona, template_json)
+            generation.background_generation_prompt = bg_prompt
+            db.commit()
+
+            provider_instance, model_name, api_key = get_image_provider_for_user(user_id, db)
+            import asyncio
+
+            bg_bytes = await asyncio.to_thread(
+                provider_instance.generate,
+                prompt=bg_prompt,
+                negative_prompt="text, letters, words, logo, watermark, signature",
+                aspect_ratio=template_json.get("aspect_ratio") or "1:1",
+                model_name=model_name,
+                api_key=api_key,
+            )
+            background_url = await _upload_to_supabase(
+                "generated-images",
+                f"post-images/{post.id}/background.png",
+                bg_bytes,
+                "image/png",
+            )
+            generation.background_image_url = background_url
+            generation.status = "generating_text"
+            generation.updated_at = datetime.now(timezone.utc)
+            db.commit()
+
+            generation.overlay_texts = _generate_overlay_texts(db, post, persona, template_json)
+            generation.llm_instructions = {}
+
         if logo_bytes:
             generation.logo_url = await _upload_to_supabase("generated-images", f"logos/{user_id}/logo.png", logo_bytes, "image/png")
         elif not generation.logo_url:
-            previous = (
-                db.query(models.PostImageGeneration)
-                .join(models.PostLog, models.PostLog.id == models.PostImageGeneration.post_id)
-                .filter(
-                    models.PostLog.ai_persona_id == persona.id,
-                    models.PostImageGeneration.logo_url.isnot(None),
-                    models.PostImageGeneration.post_id != post.id,
+            logo_url = persona.template_logo_url
+            if logo_url:
+                generation.logo_url = logo_url
+            else:
+                previous = (
+                    db.query(models.PostImageGeneration)
+                    .join(models.PostLog, models.PostLog.id == models.PostImageGeneration.post_id)
+                    .filter(
+                        models.PostLog.ai_persona_id == persona.id,
+                        models.PostImageGeneration.logo_url.isnot(None),
+                        models.PostImageGeneration.post_id != post.id,
+                    )
+                    .order_by(models.PostImageGeneration.created_at.desc())
+                    .first()
                 )
-                .order_by(models.PostImageGeneration.created_at.desc())
-                .first()
-            )
-            if previous:
-                generation.logo_url = previous.logo_url
+                if previous:
+                    generation.logo_url = previous.logo_url
         generation.status = "assembling"
         generation.updated_at = datetime.now(timezone.utc)
         db.commit()
 
         logo_blob = logo_bytes or await _download_bytes(generation.logo_url)
-        final_bytes = _assemble_template_image(template_json, bg_bytes, logo_blob, generation.overlay_texts, generation.layer_overrides)
+        if manual_template and generation.llm_instructions:
+            canvas_w = int(template_json.get("canvas_width") or 1080)
+            canvas_h = int(template_json.get("canvas_height") or 1080)
+            bg_asset_id = str(generation.llm_instructions.get("chosen_background_asset_id") or "")
+            background_img = await _load_background_asset_image(db, user_id, bg_asset_id, canvas_w, canvas_h)
+            final_bytes = _assemble_from_llm_instructions(
+                template_json,
+                background_img,
+                logo_blob,
+                generation.llm_instructions,
+                db,
+                user_id,
+                generation.layer_overrides,
+            )
+        else:
+            bg_bytes = await _download_bytes(generation.background_image_url)
+            final_bytes = _assemble_template_image(
+                template_json,
+                bg_bytes,
+                logo_blob,
+                generation.overlay_texts,
+                generation.layer_overrides,
+            )
         final_url = await _upload_to_supabase("generated-images", f"post-images/{post.id}/final.png", final_bytes, "image/png")
         generation.final_image_url = final_url
         generation.status = "completed"
@@ -834,6 +1803,7 @@ async def generate_post_image(
 async def edit_post_image(
     post_id: int,
     text_overrides: str | None = Form(default=None),
+    override_background_asset_id: str | None = Form(default=None),
     logo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
@@ -848,6 +1818,9 @@ async def edit_post_image(
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
+    template_json = _template_payload(template)
+    manual_template = _is_manual_template(template, template_json)
+
     new_logo_bytes = await logo.read() if logo else None
     if new_logo_bytes:
         generation.logo_url = await _upload_to_supabase("generated-images", f"logos/{current_user.id}/logo.png", new_logo_bytes, "image/png")
@@ -858,19 +1831,80 @@ async def edit_post_image(
                 raise ValueError("text_overrides must be an array")
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Invalid text_overrides JSON: {exc}")
-        merged = {int(item.get("layer_index")): item for item in generation.layer_overrides or [] if item.get("layer_index") is not None}
+        merged_by_index: dict[int, dict] = {}
+        merged_by_id: dict[str, dict] = {}
+        for item in generation.layer_overrides or []:
+            if item.get("layer_id"):
+                merged_by_id[str(item["layer_id"])] = dict(item)
+            elif item.get("layer_index") is not None:
+                merged_by_index[int(item["layer_index"])] = dict(item)
         for item in incoming:
-            if item.get("layer_index") is not None:
-                merged[int(item["layer_index"])] = item
-        generation.layer_overrides = list(merged.values())
+            if item.get("layer_id"):
+                merged_by_id[str(item["layer_id"])] = {**merged_by_id.get(str(item["layer_id"]), {}), **item}
+            elif item.get("layer_index") is not None:
+                merged_by_index[int(item["layer_index"])] = {**merged_by_index.get(int(item["layer_index"]), {}), **item}
+        generation.layer_overrides = list(merged_by_index.values()) + list(merged_by_id.values())
+
+    llm_instructions = dict(generation.llm_instructions or {})
+    if override_background_asset_id:
+        if not manual_template or not llm_instructions:
+            raise HTTPException(
+                status_code=400,
+                detail="Background override is only supported for manually built template photocards.",
+            )
+        asset_id = _validate_background_override(template_json, override_background_asset_id)
+        asset_row = (
+            db.query(models.TemplateBackgroundAsset)
+            .filter(
+                models.TemplateBackgroundAsset.id == asset_id,
+                models.TemplateBackgroundAsset.user_id == current_user.id,
+            )
+            .first()
+        )
+        if not asset_row:
+            raise HTTPException(status_code=400, detail="Background asset not found.")
+        llm_instructions = _instructions_with_background_override(llm_instructions, asset_id)
+        generation.llm_instructions = llm_instructions
+
+        canvas_w = int(template_json.get("canvas_width") or 1080)
+        canvas_h = int(template_json.get("canvas_height") or 1080)
+        background_img = await _load_background_asset_image(db, current_user.id, asset_id, canvas_w, canvas_h)
+        bg_bytes = _image_to_png_bytes(background_img)
+        generation.background_image_url = await _upload_to_supabase(
+            "generated-images",
+            f"post-images/{post.id}/background.png",
+            bg_bytes,
+            "image/png",
+        )
 
     generation.status = "assembling"
     generation.updated_at = datetime.now(timezone.utc)
     db.commit()
 
-    background_bytes = await _download_bytes(generation.background_image_url)
     logo_bytes = new_logo_bytes or await _download_bytes(generation.logo_url)
-    final_bytes = _assemble_template_image(_template_payload(template), background_bytes, logo_bytes, generation.overlay_texts, generation.layer_overrides)
+    if manual_template and llm_instructions:
+        canvas_w = int(template_json.get("canvas_width") or 1080)
+        canvas_h = int(template_json.get("canvas_height") or 1080)
+        bg_asset_id = str(llm_instructions.get("chosen_background_asset_id") or "")
+        background_img = await _load_background_asset_image(db, current_user.id, bg_asset_id, canvas_w, canvas_h)
+        final_bytes = _assemble_from_llm_instructions(
+            template_json,
+            background_img,
+            logo_bytes,
+            llm_instructions,
+            db,
+            current_user.id,
+            generation.layer_overrides,
+        )
+    else:
+        background_bytes = await _download_bytes(generation.background_image_url)
+        final_bytes = _assemble_template_image(
+            template_json,
+            background_bytes,
+            logo_bytes,
+            generation.overlay_texts,
+            generation.layer_overrides,
+        )
     final_url = await _upload_to_supabase("generated-images", f"post-images/{post.id}/final.png", final_bytes, "image/png")
     generation.final_image_url = final_url
     generation.status = "completed"
@@ -892,7 +1926,10 @@ def get_post_image_status(
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
     generation = db.query(models.PostImageGeneration).filter(models.PostImageGeneration.post_id == post_id).first()
-    return _generation_payload(generation)
+    template = None
+    if generation:
+        template = db.query(models.ImageTemplate).filter(models.ImageTemplate.id == generation.template_id).first()
+    return _generation_payload(generation, template)
 
 
 @router.get("/api/internal/debug-template/{persona_id}")

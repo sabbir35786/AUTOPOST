@@ -21,6 +21,9 @@ from app.config import (
     MISTRAL_API_KEY,
     MISTRAL_MODEL,
     OPENAI_API_KEY,
+    OPENROUTER_API_KEY,
+    OPENROUTER_MODEL,
+    OPENROUTER_API_BASE_URL,
 )
 
 def _gemini_model_options() -> list[str]:
@@ -39,6 +42,7 @@ AVAILABLE_LLM_MODELS: dict[str, list[str]] = {
     "gemini": _gemini_model_options(),
     "openai": ["gpt-4o", "gpt-4o-mini"],
     "anthropic": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
+    "openrouter": ["openrouter/auto", "gpt-4-turbo", "claude-3.5-sonnet", "mistral-large"],
 }
 
 
@@ -74,6 +78,8 @@ def platform_key_configured(provider_name: str) -> bool:
         return bool(OPENAI_API_KEY)
     if provider in ("anthropic", "claude"):
         return bool(ANTHROPIC_API_KEY)
+    if provider in ("openrouter",):
+        return bool(OPENROUTER_API_KEY)
     return False
 
 
@@ -112,6 +118,8 @@ def generate_text(
         return _generate_anthropic(prompt, system_prompt, model_name, api_key, temperature, max_tokens, images)
     if provider in ("gemini", "google", "google_gemini"):
         return _generate_gemini(prompt, system_prompt, model_name, api_key, temperature, max_tokens, images)
+    if provider in ("openrouter",):
+        return _generate_openrouter(prompt, system_prompt, model_name, api_key, temperature, max_tokens, images, response_format)
     raise ValueError(f"Unsupported LLM provider: {provider_name}")
 
 
@@ -423,6 +431,71 @@ def _generate_gemini(
     raise RuntimeError(
         f"Gemini returned an empty response (model={resolved_model}, finish_reason={finish_reason})."
     )
+
+
+# ---------------------------------------------------------------------------
+# Provider: OpenRouter
+# Available models: openrouter/auto, gpt-4-turbo, claude-3.5-sonnet, mistral-large, and many more
+# ---------------------------------------------------------------------------
+
+def _generate_openrouter(
+    prompt: str,
+    system_prompt: str,
+    model_name: str,
+    api_key: str,
+    temperature: float,
+    max_tokens: int,
+    images: list[str] | None = None,
+    response_format: dict | None = None,
+) -> str | None:
+    effective_key = api_key or OPENROUTER_API_KEY
+    if not effective_key:
+        raise RuntimeError("OpenRouter API key is not configured.")
+
+    messages: list[dict] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    
+    # OpenRouter supports image_url in messages
+    if images:
+        content = [{"type": "text", "text": prompt}]
+        for img in images:
+            content.append({"type": "image_url", "image_url": {"url": img}})
+        messages.append({"role": "user", "content": content})
+    else:
+        messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format:
+        payload["response_format"] = response_format
+
+    response = httpx.post(
+        f"{OPENROUTER_API_BASE_URL.rstrip('/')}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {effective_key}",
+            "HTTP-Referer": "https://autopost-woad.vercel.app",
+            "X-Title": "AutoPoster AI",
+        },
+        json=payload,
+        timeout=60,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"OpenRouter request failed ({response.status_code}): {response.text[:200]}")
+
+    data = response.json()
+    choice = data.get("choices", [{}])[0]
+    content = choice.get("message", {}).get("content")
+    if isinstance(content, list):
+        return "".join(
+            item.get("text", "") if isinstance(item, dict) else str(item)
+            for item in content
+        )
+    return content
 
 
 # ---------------------------------------------------------------------------

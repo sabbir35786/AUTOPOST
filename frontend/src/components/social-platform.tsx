@@ -39,6 +39,8 @@ import { Textarea } from "@/components/ui/textarea"
 import { useAuth } from "@/contexts/auth-context"
 import { API_BASE_URL, BACKEND_ORIGIN, api, getApiErrorMessage } from "@/lib/api"
 import { cn } from "@/lib/utils"
+import { ManualTemplateBuilder } from "@/components/manual-template-builder"
+import { PostPhotocardEditor } from "@/components/post-photocard-editor"
 
 type PageConnection = {
   id: number
@@ -1540,6 +1542,7 @@ function PerformanceInsightsPanel({ insights, personas, timezone }: { insights: 
 function PostList({ title, posts, emptyText, emptyAction, timezone, published, onChanged }: { title: string; posts: Post[]; emptyText: string; emptyAction: string; timezone: string; published?: boolean; onChanged: () => void }) {
   const [aiFilter, setAiFilter] = React.useState<"all" | "manual" | "ai">("all")
   const [publishing, setPublishing] = React.useState<number | null>(null)
+  const [photocardEditPostId, setPhotocardEditPostId] = React.useState<number | null>(null)
   const visiblePosts = published ? posts.filter((post) => aiFilter === "all" || (aiFilter === "ai" ? post.ai_generated : !post.ai_generated)) : posts
   async function remove(id: number) {
     if (!window.confirm("Are you sure you want to delete this post? This action cannot be undone.")) return
@@ -1559,7 +1562,104 @@ function PostList({ title, posts, emptyText, emptyAction, timezone, published, o
       setPublishing(null)
     }
   }
-  return <><PageTitle title={title} subtitle={published ? "Live posts with engagement snapshots from the learning optimizer." : "Upcoming posts sorted by scheduled time."} />{published ? <div className="flex flex-wrap gap-2">{(["all", "manual", "ai"] as const).map((value) => <Button key={value} variant={aiFilter === value ? "default" : "outline"} className={aiFilter === value ? "bg-blue-700 hover:bg-blue-800" : ""} onClick={() => setAiFilter(value)}>{value === "all" ? "Show All" : value === "manual" ? "Manual Only" : "AI Generated Only"}</Button>)}</div> : null}<div className="grid gap-4">{visiblePosts.map((post) => <Card key={post.id}><CardContent className="grid gap-3 p-6"><PostRow post={post} timezone={timezone} />{published ? <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">{post.low_engagement ? <span className="rounded-full bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700">Low engagement</span> : null}<span>Likes {post.likes_count || 0}</span><span>Comments {post.comments_count || 0}</span><span>Shares {post.shares_count || 0}</span><span>Reach {post.reach_count || 0}</span><span>Score {Number(post.engagement_score || 0).toFixed(1)}</span><Button size="icon" variant="ghost"><RefreshCw className="size-4" /></Button></div> : null}<div className="flex flex-wrap gap-2"><Button variant="outline" asChild><Link href="/dashboard/create">Edit</Link></Button>{!published ? <Button className="bg-green-700 text-white hover:bg-green-800" onClick={() => publishNow(post.id)} disabled={publishing === post.id}>{publishing === post.id ? <><Loader2 className="size-4 animate-spin" /> Publishing...</> : "Publish Now"}</Button> : null}<Button variant="destructive" onClick={() => remove(post.id)}><Trash2 className="size-4" /> {published ? "Delete from Facebook" : "Delete"}</Button></div></CardContent></Card>)} {!visiblePosts.length ? <Empty text={emptyText} action={emptyAction} /> : null}</div></>
+  return (
+    <>
+      <PageTitle
+        title={title}
+        subtitle={
+          published
+            ? "Live posts with engagement snapshots from the learning optimizer."
+            : "Upcoming posts sorted by scheduled time."
+        }
+      />
+      {published ? (
+        <div className="flex flex-wrap gap-2">
+          {(["all", "manual", "ai"] as const).map((value) => (
+            <Button
+              key={value}
+              variant={aiFilter === value ? "default" : "outline"}
+              className={aiFilter === value ? "bg-blue-700 hover:bg-blue-800" : ""}
+              onClick={() => setAiFilter(value)}
+            >
+              {value === "all" ? "Show All" : value === "manual" ? "Manual Only" : "AI Generated Only"}
+            </Button>
+          ))}
+        </div>
+      ) : null}
+      <div className="grid gap-4">
+        {visiblePosts.map((post) => (
+          <Card key={post.id}>
+            <CardContent className="grid gap-3 p-6">
+              <PostRow post={post} timezone={timezone} />
+              {published ? (
+                <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
+                  {post.low_engagement ? (
+                    <span className="rounded-full bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700">
+                      Low engagement
+                    </span>
+                  ) : null}
+                  <span>Likes {post.likes_count || 0}</span>
+                  <span>Comments {post.comments_count || 0}</span>
+                  <span>Shares {post.shares_count || 0}</span>
+                  <span>Reach {post.reach_count || 0}</span>
+                  <span>Score {Number(post.engagement_score || 0).toFixed(1)}</span>
+                  <Button size="icon" variant="ghost">
+                    <RefreshCw className="size-4" />
+                  </Button>
+                </div>
+              ) : null}
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" asChild>
+                  <Link href="/dashboard/create">Edit</Link>
+                </Button>
+                {post.image_url || post.media_urls?.[0] ? (
+                  <Button variant="outline" onClick={() => setPhotocardEditPostId(post.id)}>
+                    Edit photocard
+                  </Button>
+                ) : null}
+                {!published ? (
+                  <Button
+                    className="bg-green-700 text-white hover:bg-green-800"
+                    onClick={() => publishNow(post.id)}
+                    disabled={publishing === post.id}
+                  >
+                    {publishing === post.id ? (
+                      <>
+                        <Loader2 className="size-4 animate-spin" /> Publishing...
+                      </>
+                    ) : (
+                      "Publish Now"
+                    )}
+                  </Button>
+                ) : null}
+                <Button variant="destructive" onClick={() => remove(post.id)}>
+                  <Trash2 className="size-4" /> {published ? "Delete from Facebook" : "Delete"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+        {!visiblePosts.length ? <Empty text={emptyText} action={emptyAction} /> : null}
+      </div>
+      <Sheet open={photocardEditPostId !== null} onOpenChange={(open) => !open && setPhotocardEditPostId(null)}>
+        <SheetContent className="overflow-y-auto w-full max-w-lg">
+          <div className="mt-6 grid gap-2">
+            <h2 className="text-lg font-semibold">Edit photocard</h2>
+            <p className="text-sm text-slate-500">Swap background or tweak overlay text without regenerating from AI.</p>
+          </div>
+          {photocardEditPostId !== null ? (
+            <PostPhotocardEditor
+              postId={photocardEditPostId}
+              onSaved={() => {
+                setPhotocardEditPostId(null)
+                onChanged()
+              }}
+            />
+          ) : null}
+        </SheetContent>
+      </Sheet>
+    </>
+  )
 }
 
 function AnalyticsView({ analytics, setAnalytics }: { analytics: Analytics | null; setAnalytics: (value: Analytics) => void }) {
@@ -1966,6 +2066,7 @@ function TemplateLibraryView() {
   const [selectedTemplate, setSelectedTemplate] = React.useState<any | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [analyzing, setAnalyzing] = React.useState(false)
+  const [createMode, setCreateMode] = React.useState<"choose" | "extract" | "manual">("choose")
   const [name, setName] = React.useState("")
   const [file, setFile] = React.useState<File | null>(null)
 
@@ -2034,39 +2135,71 @@ function TemplateLibraryView() {
 
   return (
     <>
-      <PageTitle title="Templates" subtitle="Upload reference images and reuse extracted layer structures across personas." />
-      <div className="grid gap-6 md:grid-cols-3 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards">
+      <PageTitle title="Templates" subtitle="Extract layouts from reference images or build templates manually with fixed structure and styling options." />
+      {createMode === "manual" ? (
+        <ManualTemplateBuilder
+          onCancel={() => setCreateMode("choose")}
+          onSaved={() => {
+            setCreateMode("choose")
+            loadTemplates()
+          }}
+        />
+      ) : null}
+      <div className={cn("grid gap-6 md:grid-cols-3 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards", createMode === "manual" && "hidden")}>
         <Card className="md:col-span-1 h-fit">
           <CardHeader>
-            <CardTitle>Upload Reference Image</CardTitle>
+            <CardTitle>New Template</CardTitle>
           </CardHeader>
-          <CardContent>
-            <form onSubmit={handleAnalyze} className="grid gap-4">
-              <div className="grid gap-2">
-                <Label htmlFor="template-name">Template Name</Label>
-                <Input
-                  id="template-name"
-                  placeholder="e.g. Minimalist Product Slide"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  disabled={analyzing}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="reference-file">Reference Image</Label>
-                <Input
-                  id="reference-file"
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => setFile(e.target.files?.[0] || null)}
-                  disabled={analyzing}
-                />
-              </div>
-              <Button type="submit" className="bg-purple-700 text-white hover:bg-purple-800 w-full" disabled={analyzing}>
-                {analyzing ? <Loader2 className="size-4 animate-spin mr-2" /> : <Sparkles className="size-4 mr-2" />}
-                {analyzing ? "Analyzing image structure..." : "Extract Design Layers"}
-              </Button>
-            </form>
+          <CardContent className="grid gap-4">
+            {createMode === "choose" ? (
+              <>
+                <p className="text-sm text-slate-600">Choose how to create your template.</p>
+                <Button
+                  type="button"
+                  className="bg-purple-700 text-white hover:bg-purple-800 w-full"
+                  onClick={() => setCreateMode("extract")}
+                >
+                  <Sparkles className="size-4 mr-2" />
+                  Extract from Reference Image
+                </Button>
+                <Button type="button" variant="outline" className="w-full" onClick={() => setCreateMode("manual")}>
+                  <LayoutTemplate className="size-4 mr-2" />
+                  Build Manually
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button type="button" variant="ghost" size="sm" className="w-fit -mt-1" onClick={() => setCreateMode("choose")}>
+                  ← Back
+                </Button>
+                <form onSubmit={handleAnalyze} className="grid gap-4">
+                  <div className="grid gap-2">
+                    <Label htmlFor="template-name">Template Name</Label>
+                    <Input
+                      id="template-name"
+                      placeholder="e.g. Minimalist Product Slide"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      disabled={analyzing}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="reference-file">Reference Image</Label>
+                    <Input
+                      id="reference-file"
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setFile(e.target.files?.[0] || null)}
+                      disabled={analyzing}
+                    />
+                  </div>
+                  <Button type="submit" className="bg-purple-700 text-white hover:bg-purple-800 w-full" disabled={analyzing}>
+                    {analyzing ? <Loader2 className="size-4 animate-spin mr-2" /> : <Sparkles className="size-4 mr-2" />}
+                    {analyzing ? "Analyzing image structure..." : "Extract Design Layers"}
+                  </Button>
+                </form>
+              </>
+            )}
           </CardContent>
         </Card>
         
@@ -2083,14 +2216,25 @@ function TemplateLibraryView() {
               templates.map((tpl) => (
                 <button type="button" key={tpl.id} onClick={() => openTemplate(tpl.id)} className="text-left relative overflow-hidden rounded-lg border bg-white shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow">
                   <div className="relative aspect-video w-full overflow-hidden bg-slate-100 border-b">
-                    <img src={tpl.reference_image_url} alt={tpl.name} className="h-full w-full object-cover" />
+                    {tpl.reference_image_url ? (
+                      <img src={tpl.reference_image_url} alt={tpl.name} className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-purple-100 to-slate-200 text-slate-500 text-sm">
+                        Manual template
+                      </div>
+                    )}
+                    {tpl.creation_method === "manual" ? (
+                      <span className="absolute top-2 left-2 rounded bg-purple-700 px-2 py-0.5 text-xs text-white">Manual</span>
+                    ) : null}
                   </div>
                   <div className="p-4 flex items-center justify-between">
                     <div>
                       <h3 className="font-semibold text-slate-800">{tpl.name}</h3>
-                      <p className="text-xs text-slate-500">Created: {new Date(tpl.created_at).toLocaleDateString()}</p>
+                      <p className="text-xs text-slate-500">
+                        {tpl.aspect_ratio || "1:1"} · {new Date(tpl.created_at).toLocaleDateString()}
+                      </p>
                     </div>
-                    <Button variant="ghost" size="icon" className="text-red-500 hover:text-red-700 hover:bg-red-50" onClick={() => handleDelete(tpl.id)}>
+                    <Button variant="ghost" size="icon" className="text-red-500 hover:text-red-700 hover:bg-red-50" onClick={(e) => { e.stopPropagation(); handleDelete(tpl.id) }}>
                       <Trash2 className="size-4" />
                     </Button>
                   </div>
@@ -2110,7 +2254,13 @@ function TemplateLibraryView() {
               </CardTitle>
             </CardHeader>
             <CardContent className="grid gap-4">
-              <img src={selectedTemplate.reference_image_url} alt={selectedTemplate.name} className="w-full rounded-md border" />
+              {selectedTemplate.reference_image_url ? (
+                <img src={selectedTemplate.reference_image_url} alt={selectedTemplate.name} className="w-full rounded-md border" />
+              ) : (
+                <p className="text-sm text-slate-600 rounded-md border p-4 bg-slate-50">
+                  Manually built template ({selectedTemplate.aspect_ratio}, {selectedTemplate.canvas_width}×{selectedTemplate.canvas_height})
+                </p>
+              )}
               <div className="text-sm text-slate-700">
                 {(() => {
                   const layers = selectedTemplate?.template_json?.layers || []

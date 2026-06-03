@@ -1,6 +1,7 @@
 from datetime import date, datetime
+from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class UserCreate(BaseModel):
@@ -393,6 +394,103 @@ class ChatResponse(BaseModel):
     model: str
 
 
+# --- Manual template builder: template_json option-list structure ---
+
+class BackgroundOption(BaseModel):
+    asset_id: str
+    label: str
+
+
+class FontOption(BaseModel):
+    font_asset_id: str
+    label: str
+
+
+class TextColorOption(BaseModel):
+    color_hex: str
+    label: str
+
+
+class OverlayColorOption(BaseModel):
+    color_hex: str
+    opacity: float = Field(ge=0.0, le=1.0)
+    label: str
+
+
+class TemplateLayerBase(BaseModel):
+    id: str
+    z_index: int
+    position_x_percent: float = Field(ge=0, le=100)
+    position_y_percent: float = Field(ge=0, le=100)
+    width_percent: float = Field(ge=0, le=100)
+    height_percent: float = Field(ge=0, le=100)
+
+
+class TextTemplateLayer(TemplateLayerBase):
+    type: Literal["text"] = "text"
+    role: Literal["headline", "subheadline", "body"]
+    font_options: list[FontOption] = Field(min_length=1)
+    color_options: list[TextColorOption] = Field(min_length=1)
+    font_size_min_percent: float = Field(gt=0)
+    font_size_max_percent: float = Field(gt=0)
+    text_align_options: list[Literal["left", "center", "right"]] = Field(min_length=1)
+    font_weight: Literal["bold", "regular"]
+
+
+class OverlayTemplateLayer(TemplateLayerBase):
+    type: Literal["overlay"] = "overlay"
+    color_options: list[OverlayColorOption] = Field(min_length=1)
+
+
+class LogoTemplateLayer(TemplateLayerBase):
+    type: Literal["logo"] = "logo"
+
+
+TemplateLayer = Annotated[
+    Union[TextTemplateLayer, OverlayTemplateLayer, LogoTemplateLayer],
+    Field(discriminator="type"),
+]
+
+
+class ManualTemplateJson(BaseModel):
+    """template_json for manually built templates (option lists + fixed layout)."""
+
+    canvas_width: int = Field(gt=0)
+    canvas_height: int = Field(gt=0)
+    aspect_ratio: str
+    background_options: list[BackgroundOption] = Field(min_length=1, max_length=6)
+    layers: list[TemplateLayer] = Field(default_factory=list)
+
+
+class ManualImageTemplateCreate(BaseModel):
+    name: str
+    canvas_width: int = Field(gt=0)
+    canvas_height: int = Field(gt=0)
+    aspect_ratio: str
+    template_json: ManualTemplateJson
+
+    @model_validator(mode="after")
+    def canvas_fields_match_template_json(self) -> "ManualImageTemplateCreate":
+        tj = self.template_json
+        if tj.canvas_width != self.canvas_width:
+            raise ValueError("canvas_width must match template_json.canvas_width")
+        if tj.canvas_height != self.canvas_height:
+            raise ValueError("canvas_height must match template_json.canvas_height")
+        if tj.aspect_ratio != self.aspect_ratio:
+            raise ValueError("aspect_ratio must match template_json.aspect_ratio")
+        return self
+
+
+class ManualImageTemplateUpdate(BaseModel):
+    name: str
+    template_json: ManualTemplateJson
+
+
+class ImageTemplatePreviewRequest(BaseModel):
+    template_json: ManualTemplateJson
+    persona_id: int | None = None
+
+
 class ImageTemplateBase(BaseModel):
     name: str
     reference_image_url: str
@@ -406,6 +504,10 @@ class ImageTemplateCreate(ImageTemplateBase):
 class ImageTemplateRead(ImageTemplateBase):
     id: str
     user_id: int
+    creation_method: str = "extracted"
+    canvas_width: int = 1080
+    canvas_height: int = 1080
+    aspect_ratio: str = "1:1"
     created_at: datetime
 
     model_config = {"from_attributes": True}
