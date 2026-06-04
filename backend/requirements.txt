@@ -18,5 +18,5 @@ itsdangerous
 qstash
 pillow
 pycairo
-PyGObject
+PyGObject==3.48.2
 fonttools
