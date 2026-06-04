@@ -2,7 +2,7 @@
 
 import axios, { AxiosHeaders, isAxiosError } from "axios"
 
-const DEFAULT_REMOTE_BACKEND = "https://autopost-qwgw.onrender.com"
+const DEFAULT_REMOTE_BACKEND = "https://autopost-1-ax2p.onrender.com"
 const VERCEL_BACKEND_PROXY = "/backend"
 
 function getBackendUrl() {
