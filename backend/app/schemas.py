@@ -167,6 +167,7 @@ class PostHistoryItem(BaseModel):
     link_preview_data: dict | None = None
     page_name: str | None = None
     page_picture_url: str | None = None
+    persona_name: str | None = None
     facebook_post_id: str | None = None
     failure_reason: str | None = None
     ai_generated: bool = False

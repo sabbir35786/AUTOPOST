@@ -13,6 +13,21 @@ from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException,
 from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy.orm import Session
 
+_gi_import_error = None
+try:
+    import cairo
+    import gi
+    gi.require_version('Pango', '1.0')
+    gi.require_version('PangoCairo', '1.0')
+    from gi.repository import Pango, PangoCairo
+except ImportError as e:
+    _gi_import_error = ImportError(
+        "Pango/Cairo dependencies missing. Install python3-gi and gir1.2-pango-1.0 (or appropriate packages for your OS)."
+    )
+    cairo = None
+    Pango = None
+    PangoCairo = None
+
 from app import models, schemas
 from app.auth import get_current_user
 from app.config import CRON_SECRET, GEMINI_API_KEY, SUPABASE_SERVICE_KEY, SUPABASE_URL
@@ -23,6 +38,136 @@ from app.providers.user_model_settings import generate_post_text_for_user
 
 router = APIRouter(tags=["image-templates"])
 logger = logging.getLogger(__name__)
+
+
+def _get_font_family_name(font_path: str) -> str:
+    try:
+        from fontTools.ttLib import TTFont
+        tt = TTFont(font_path)
+        for record in tt['name'].names:
+            if record.nameID == 1:
+                return record.toUnicode()
+    except Exception:
+        pass
+    # Fallback: derive from filename
+    import os
+    name = os.path.splitext(os.path.basename(font_path))[0]
+    return name.replace('-', ' ').replace('_', ' ')
+
+
+def render_text_layer_pango(
+    text: str,
+    font_path: str,
+    font_size_px: int,
+    text_color_hex: str,
+    layer_width_px: int,
+    layer_height_px: int,
+    text_align: str,
+    font_weight: str
+) -> Image.Image:
+    if _gi_import_error is not None:
+        raise _gi_import_error
+    
+    # Create transparent Cairo surface
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, layer_width_px, layer_height_px)
+    ctx = cairo.Context(surface)
+    
+    # Transparent background
+    ctx.set_source_rgba(0, 0, 0, 0)
+    ctx.paint()
+    
+    # Parse color
+    hex_color = text_color_hex.lstrip('#')
+    if len(hex_color) == 3:
+        hex_color = ''.join(c*2 for c in hex_color)
+    r = int(hex_color[0:2], 16) / 255
+    g = int(hex_color[2:4], 16) / 255
+    b = int(hex_color[4:6], 16) / 255
+    ctx.set_source_rgba(r, g, b, 1.0)
+    
+    # Create Pango layout
+    layout = PangoCairo.create_layout(ctx)
+    layout.set_width(layer_width_px * Pango.SCALE)
+    layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+    
+    # Set alignment
+    align_map = {
+        'center': Pango.Alignment.CENTER,
+        'right': Pango.Alignment.RIGHT,
+        'left': Pango.Alignment.LEFT
+    }
+    layout.set_alignment(align_map.get(text_align, Pango.Alignment.LEFT))
+    
+    # Set font using font description
+    font_desc = Pango.FontDescription()
+    font_desc.set_absolute_size(font_size_px * Pango.SCALE)
+    font_desc.set_weight(Pango.Weight.BOLD if font_weight == 'bold' else Pango.Weight.NORMAL)
+    
+    # Load custom font file via fontconfig
+    font_family = _get_font_family_name(font_path)
+    font_desc.set_family(font_family)
+    layout.set_font_description(font_desc)
+    layout.set_text(text, -1)
+    
+    # Calculate vertical centering
+    text_width, text_height = layout.get_pixel_size()
+    y_offset = max(0, (layer_height_px - text_height) // 2)
+    
+    ctx.move_to(0, y_offset)
+    PangoCairo.show_layout(ctx, layout)
+    
+    # Convert Cairo surface to PIL Image
+    buf = surface.get_data()
+    pil_img = Image.frombuffer('RGBA', (layer_width_px, layer_height_px), bytes(buf), 'raw', 'BGRA', 0, 1)
+    return pil_img.copy()
+
+
+def register_fonts_with_fontconfig():
+    fonts_dir = os.path.abspath("assets/fonts")
+    if not os.path.isdir(fonts_dir) and os.path.isdir(os.path.abspath("backend/assets/fonts")):
+        fonts_dir = os.path.abspath("backend/assets/fonts")
+    
+    fontconfig_dir = os.path.expanduser("~/.config/fontconfig")
+    os.makedirs(fontconfig_dir, exist_ok=True)
+    
+    conf_path = os.path.join(fontconfig_dir, "fonts.conf")
+    conf_content = f"""<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>{fonts_dir}</dir>
+</fontconfig>"""
+    
+    with open(conf_path, 'w') as f:
+        f.write(conf_content)
+    
+    import subprocess
+    try:
+        subprocess.run(['fc-cache', '-f', fonts_dir], capture_output=True)
+        print(f"[OK] Fonts registered with fontconfig from {fonts_dir}")
+    except Exception as e:
+        print(f"[WARNING] Failed to register fonts with fc-cache: {e}")
+
+
+def verify_pango_bengali():
+    try:
+        test_img = render_text_layer_pango(
+            text="বাংলা পরীক্ষা",
+            font_path="backend/assets/fonts/Roboto-Regular.ttf",
+            font_size_px=40,
+            text_color_hex="#000000",
+            layer_width_px=400,
+            layer_height_px=100,
+            text_align="center",
+            font_weight="regular"
+        )
+        print("[OK] Pango Bengali text rendering working correctly")
+    except Exception as e:
+        print(f"[WARNING] Pango text rendering failed: {e}")
+
+
+# Call once at app startup
+register_fonts_with_fontconfig()
+verify_pango_bengali()
 
 _VISION_SYSTEM_INSTRUCTION = (
     "You are an image layout analyst. Analyze this image and return ONLY a JSON object with no explanation, "
@@ -629,12 +774,21 @@ def _assemble_manual_template_preview(
             max_pct = float(layer.get("font_size_max_percent") or 7.0)
             font_px = max(10, int(round(((min_pct + max_pct) / 2.0) * canvas_h / 100.0)))
             weight = str(layer.get("font_weight") or (font_asset.weight if font_asset else "regular"))
-            font, script, font_path_used = _get_font_for_text(text_str, font_asset, weight, font_px)
-            color = _parse_hex_color(str(color_opts[0].get("color_hex") or ""), default=(255, 255, 255, 255))
+            _, script, font_path_used = _get_font_for_text(text_str, font_asset, weight, font_px)
+            color_hex = str(color_opts[0].get("color_hex") or "#ffffff")
             align_opts = layer.get("text_align_options") or ["center"]
             align = str(align_opts[0] if align_opts else "center").strip().lower()
-            text_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            _draw_wrapped_text_layer(text_layer, text_str, font, font_px, color, align)
+            
+            text_layer = render_text_layer_pango(
+                text=text_str,
+                font_path=font_path_used,
+                font_size_px=font_px,
+                text_color_hex=color_hex,
+                layer_width_px=w,
+                layer_height_px=h,
+                text_align=align,
+                font_weight=weight
+            )
             logger.info(
                 'Text layer %s: script=%s font=%s size=%spx text="%s"',
                 str(layer.get("id") or "preview"),
@@ -2219,11 +2373,20 @@ def _assemble_from_llm_instructions(
                 font_size_pct = (min_pct + max_pct) / 2.0
             font_px = max(10, int(round(font_size_pct * canvas_h / 100.0)))
             weight = str(layer.get("font_weight") or (font_asset.weight if font_asset else "regular"))
-            font, script, font_path_used = _get_font_for_text(text_str, font_asset, weight, font_px)
-            color = _parse_hex_color(str(instr.get("color_hex") or ""), default=(255, 255, 255, 255))
+            _, script, font_path_used = _get_font_for_text(text_str, font_asset, weight, font_px)
+            color_hex = str(instr.get("color_hex") or "#ffffff")
             align = str(instr.get("text_align") or "center").strip().lower()
-            text_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            _draw_wrapped_text_layer(text_layer, text_str, font, font_px, color, align)
+            
+            text_layer = render_text_layer_pango(
+                text=text_str,
+                font_path=font_path_used,
+                font_size_px=font_px,
+                text_color_hex=color_hex,
+                layer_width_px=w,
+                layer_height_px=h,
+                text_align=align,
+                font_weight=weight
+            )
             logger.info(
                 'Text layer %s: script=%s font=%s size=%spx text="%s"',
                 layer_id,
@@ -2237,85 +2400,6 @@ def _assemble_from_llm_instructions(
     return _image_to_png_bytes(base)
 
 
-def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
-    def split_long_token(token: str) -> list[str]:
-        pieces: list[str] = []
-        current_piece = ""
-        for char in token:
-            trial = f"{current_piece}{char}"
-            bbox = draw.textbbox((0, 0), trial, font=font)
-            if bbox[2] - bbox[0] <= max_width or not current_piece:
-                current_piece = trial
-            else:
-                pieces.append(current_piece)
-                current_piece = char
-        if current_piece:
-            pieces.append(current_piece)
-        return pieces
-
-    words = text.split()
-    lines: list[str] = []
-    current = ""
-    for word in words:
-        trial = f"{current} {word}".strip()
-        bbox = draw.textbbox((0, 0), trial, font=font)
-        if bbox[2] - bbox[0] <= max_width or not current:
-            if not current:
-                word_bbox = draw.textbbox((0, 0), word, font=font)
-                if word_bbox[2] - word_bbox[0] > max_width:
-                    pieces = split_long_token(word)
-                    lines.extend(pieces[:-1])
-                    current = pieces[-1] if pieces else ""
-                else:
-                    current = trial
-            else:
-                current = trial
-        else:
-            lines.append(current)
-            word_bbox = draw.textbbox((0, 0), word, font=font)
-            if word_bbox[2] - word_bbox[0] > max_width:
-                pieces = split_long_token(word)
-                lines.extend(pieces[:-1])
-                current = pieces[-1] if pieces else ""
-            else:
-                current = word
-    if current:
-        lines.append(current)
-    return lines or [text]
-
-
-def _draw_wrapped_text_layer(
-    text_layer: Image.Image,
-    text: str,
-    font: ImageFont.ImageFont,
-    font_px: int,
-    color: tuple[int, int, int, int],
-    align: str,
-    *,
-    shadow: bool = False,
-) -> None:
-    draw = ImageDraw.Draw(text_layer)
-    w, h = text_layer.size
-    lines: list[str] = []
-    for paragraph in text.splitlines() or [text]:
-        lines.extend(_wrap_text(draw, paragraph, font, w))
-
-    line_gap = max(3, int(font_px * 0.22))
-    line_metrics: list[tuple[str, int, int]] = []
-    for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font)
-        line_metrics.append((line, bbox[2] - bbox[0], bbox[3] - bbox[1]))
-    total_h = sum(item[2] for item in line_metrics) + max(0, len(line_metrics) - 1) * line_gap
-    cursor_y = max(0, (h - total_h) // 2)
-
-    for line, tw, th in line_metrics:
-        tx = max(0, (w - tw) // 2) if align == "center" else max(0, w - tw) if align == "right" else 0
-        if cursor_y + th > h:
-            break
-        if shadow:
-            draw.text((tx + 1, cursor_y + 1), line, font=font, fill=(0, 0, 0, 140))
-        draw.text((tx, cursor_y), line, font=font, fill=color)
-        cursor_y += th + line_gap
 
 
 def _assemble_template_image(
@@ -2371,11 +2455,36 @@ def _assemble_template_image(
             if not text_str:
                 continue
             font_px = max(10, int(round(float(layer.get("font_size_percent") or 5.0) * canvas_h / 100.0)))
-            font, script, font_path_used = _get_font_for_text(text_str, None, str(layer.get("font_weight") or "regular"), font_px)
-            color = _parse_hex_color(str(layer.get("text_color_hex") or ""), default=(255, 255, 255, 255))
+            weight = str(layer.get("font_weight") or "regular")
+            _, script, font_path_used = _get_font_for_text(text_str, None, weight, font_px)
+            color_hex = str(layer.get("text_color_hex") or "#ffffff")
             align = str(layer.get("text_align") or "left").strip().lower()
+            
             text_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            _draw_wrapped_text_layer(text_layer, text_str, font, font_px, color, align, shadow=True)
+            shadow_layer = render_text_layer_pango(
+                text=text_str,
+                font_path=font_path_used,
+                font_size_px=font_px,
+                text_color_hex="#000000",
+                layer_width_px=w,
+                layer_height_px=h,
+                text_align=align,
+                font_weight=weight
+            )
+            text_layer.paste(shadow_layer, (1, 1), mask=shadow_layer)
+            
+            main_text_img = render_text_layer_pango(
+                text=text_str,
+                font_path=font_path_used,
+                font_size_px=font_px,
+                text_color_hex=color_hex,
+                layer_width_px=w,
+                layer_height_px=h,
+                text_align=align,
+                font_weight=weight
+            )
+            text_layer.paste(main_text_img, (0, 0), mask=main_text_img)
+            
             logger.info(
                 'Text layer %s: script=%s font=%s size=%spx text="%s"',
                 str(layer.get("id") or layer_index),

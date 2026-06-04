@@ -5,6 +5,7 @@ import os
 import secrets
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode, urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, status
@@ -2763,12 +2764,15 @@ def _serialize_post(post: models.PostLog, connection: models.FacebookConnection 
                 threshold = float(persona.minimum_engagement_threshold or 0) if persona else 0
     score = float(latest_snapshot.engagement_score or 0) if latest_snapshot else 0
     image_generation = None
+    persona = None
     if post.id and db is not None:
         image_generation = (
             db.query(models.PostImageGeneration)
             .filter(models.PostImageGeneration.post_id == post.id)
             .first()
         )
+        if post.ai_persona_id:
+            persona = db.get(models.AIPersona, post.ai_persona_id)
     return {
         "id": post.id,
         "content": post.content,
@@ -2782,6 +2786,7 @@ def _serialize_post(post: models.PostLog, connection: models.FacebookConnection 
         "link_preview_data": post.link_preview_data,
         "page_name": connection.page_name if connection else None,
         "page_picture_url": connection.page_picture_url if connection else None,
+        "persona_name": persona.persona_name if persona else None,
         "facebook_post_id": post.facebook_post_id,
         "failure_reason": post.error_message,
         "ai_generated": post.ai_generated,
@@ -2793,6 +2798,17 @@ def _serialize_post(post: models.PostLog, connection: models.FacebookConnection 
         "engagement_score": score,
         "low_engagement": bool(threshold and score < threshold),
     }
+
+
+def _today_bounds_utc(tz_name: str) -> tuple[datetime, datetime]:
+    try:
+        user_tz = ZoneInfo(tz_name)
+    except Exception:
+        user_tz = ZoneInfo("UTC")
+    now_local = datetime.now(timezone.utc).astimezone(user_tz)
+    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
 
 @app.get("/posts", response_model=list[schemas.PostHistoryItem])
@@ -2810,7 +2826,15 @@ def list_posts(
     if status_filter == "published":
         query = query.filter(models.PostLog.status.in_(["published", "success"]))
     elif status_filter:
-        query = query.filter(models.PostLog.status == status_filter)
+        if status_filter == "scheduled":
+            query = query.filter(models.PostLog.status.in_(["scheduled", "missed"]))
+            today_start, tomorrow_start = _today_bounds_utc(current_user.timezone)
+            query = query.filter(
+                models.PostLog.scheduled_at >= today_start,
+                models.PostLog.scheduled_at < tomorrow_start,
+            )
+        else:
+            query = query.filter(models.PostLog.status == status_filter)
     order_column = models.PostLog.scheduled_at.asc() if status_filter == "scheduled" else models.PostLog.id.desc()
     return [_serialize_post(post, connection) for post, connection in query.order_by(order_column).limit(limit).all()]
 

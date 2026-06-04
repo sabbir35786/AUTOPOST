@@ -70,6 +70,7 @@ type Post = {
   link_url?: string | null
   page_name?: string | null
   page_picture_url?: string | null
+  persona_name?: string | null
   failure_reason?: string | null
   ai_generated: boolean
   auto_generated: boolean
@@ -237,7 +238,7 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
       }
       // Load posts – this can fail if no posts yet, show empty list
       try {
-        const postResponse = await api.get<Post[]>("/posts", { params: { limit: 50 } })
+        const postResponse = await api.get<Post[]>("/posts", { params: { limit: 50, ...(view === "scheduled" ? { status: "scheduled" } : {}) } })
         setPosts(postResponse.data)
       } catch (err) {
         console.error("Failed to load posts:", err)
@@ -316,7 +317,7 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
         {!loading && view === "style-analyzer" ? <StyleAnalyzerView pages={pages} /> : null}
         {!loading && view === "page-tracker" ? <PageTrackerView pages={pages} /> : null}
         {!loading && view === "templates" ? <TemplateLibraryView /> : null}
-        {!loading && view === "scheduled" ? <PostList title="Scheduled Posts" posts={posts.filter((post) => post.status === "scheduled")} emptyAction="/dashboard/create" emptyText="No upcoming posts yet." timezone={timezone} onChanged={load} /> : null}
+        {!loading && view === "scheduled" ? <PostList title="Scheduled Posts" posts={posts.filter((post) => post.status === "scheduled" || post.status === "missed")} emptyAction="/dashboard/create" emptyText="No scheduled slots for today." timezone={timezone} onChanged={load} /> : null}
         {!loading && view === "published" ? <PostList title="Published Posts" posts={posts.filter((post) => post.status === "published" || post.status === "success")} emptyAction="/dashboard/create" emptyText="No published posts yet." timezone={timezone} published onChanged={load} /> : null}
         {!loading && view === "analytics" ? <AnalyticsView analytics={analytics} setAnalytics={setAnalytics} /> : null}
         {!loading && view === "settings" ? <SettingsView pages={pages} timezone={timezone} onChanged={load} /> : null}
@@ -1638,6 +1639,14 @@ function PostList({ title, posts, emptyText, emptyAction, timezone, published, o
   const [publishing, setPublishing] = React.useState<number | null>(null)
   const [photocardEditPostId, setPhotocardEditPostId] = React.useState<number | null>(null)
   const visiblePosts = published ? posts.filter((post) => aiFilter === "all" || (aiFilter === "ai" ? post.ai_generated : !post.ai_generated)) : posts
+  const groupedScheduledPosts = React.useMemo(() => {
+    const groups = new Map<string, Post[]>()
+    for (const post of visiblePosts) {
+      const label = post.persona_name || post.page_name || "Unassigned persona"
+      groups.set(label, [...(groups.get(label) || []), post])
+    }
+    return Array.from(groups.entries()).map(([label, items]) => ({ label, items }))
+  }, [visiblePosts])
   async function remove(id: number) {
     if (!window.confirm("Are you sure you want to delete this post? This action cannot be undone.")) return
     await api.delete(`/posts/${id}`)
@@ -1663,7 +1672,7 @@ function PostList({ title, posts, emptyText, emptyAction, timezone, published, o
         subtitle={
           published
             ? "Live posts with engagement snapshots from the learning optimizer."
-            : "Upcoming posts sorted by scheduled time."
+            : `Today - ${todayLabel(timezone)}`
         }
       />
       {published ? (
@@ -1680,11 +1689,24 @@ function PostList({ title, posts, emptyText, emptyAction, timezone, published, o
           ))}
         </div>
       ) : null}
+      {!published ? (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+          Today - {todayLabel(timezone)}
+        </div>
+      ) : null}
       <div className="grid gap-4">
-        {visiblePosts.map((post) => (
+        {(published ? [{ label: "", items: visiblePosts }] : groupedScheduledPosts).map((group) => (
+          <div key={group.label || "published"} className="grid gap-3">
+            {!published ? <h2 className="text-sm font-semibold text-slate-700">{group.label}</h2> : null}
+            {group.items.map((post) => (
           <Card key={post.id}>
             <CardContent className="grid gap-3 p-6">
               <PostRow post={post} timezone={timezone} />
+              {!published && (post.status === "missed" || isPastScheduledSlot(post)) ? (
+                <span className="w-fit rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">
+                  {post.status === "missed" ? "Missed" : "Past"}
+                </span>
+              ) : null}
               {published ? (
                 <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
                   {post.low_engagement ? (
@@ -1732,6 +1754,8 @@ function PostList({ title, posts, emptyText, emptyAction, timezone, published, o
               </div>
             </CardContent>
           </Card>
+            ))}
+          </div>
         ))}
         {!visiblePosts.length ? <Empty text={emptyText} action={emptyAction} /> : null}
       </div>
@@ -2152,6 +2176,20 @@ function badgeClass(status: string) {
 function formatDate(value: string | null, timezone: string) {
   if (!value) return "Not scheduled"
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", timeZone: timezone }).format(new Date(value))
+}
+
+function todayLabel(timezone: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: timezone || "UTC",
+  }).format(new Date())
+}
+
+function isPastScheduledSlot(post: Post) {
+  return Boolean(post.scheduled_at && new Date(post.scheduled_at).getTime() < Date.now())
 }
 
 
