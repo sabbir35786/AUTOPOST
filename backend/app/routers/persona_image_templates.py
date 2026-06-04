@@ -98,14 +98,33 @@ def render_text_layer_pango(
     }
     layout.set_alignment(align_map.get(text_align, Pango.Alignment.LEFT))
     
-    # Set font using font description
+    # Set font using font description with Bengali/complex-script fallbacks.
+    # Pango accepts a comma-separated family list — it will use the first font
+    # that has a glyph for each character, so Bengali chars automatically fall
+    # back to Noto Sans Bengali even when the custom font has no Bengali glyphs.
     font_desc = Pango.FontDescription()
     font_desc.set_absolute_size(font_size_px * Pango.SCALE)
     font_desc.set_weight(Pango.Weight.BOLD if font_weight == 'bold' else Pango.Weight.NORMAL)
-    
-    # Load custom font file via fontconfig
-    font_family = _get_font_family_name(font_path)
-    font_desc.set_family(font_family)
+
+    # Build a family list: custom font first, then comprehensive fallbacks for
+    # Bengali, Arabic, Devanagari and other complex scripts.
+    custom_family = _get_font_family_name(font_path) if font_path else ""
+    fallback_families = [
+        "Noto Sans Bengali",
+        "Noto Serif Bengali",
+        "Noto Sans Arabic",
+        "Noto Sans Devanagari",
+        "Noto Sans",
+        "Noto Sans CJK SC",
+        "DejaVu Sans",
+        "sans-serif",
+    ]
+    if custom_family:
+        all_families = ", ".join([custom_family] + fallback_families)
+    else:
+        all_families = ", ".join(fallback_families)
+
+    font_desc.set_family(all_families)
     layout.set_font_description(font_desc)
     layout.set_text(text, -1)
     

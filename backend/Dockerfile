@@ -9,6 +9,10 @@ RUN apt-get update && apt-get install -y \
     gobject-introspection \
     gir1.2-pango-1.0 \
     fontconfig \
+    fonts-noto \
+    fonts-noto-core \
+    fonts-noto-extra \
+    && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
