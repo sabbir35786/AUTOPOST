@@ -2,10 +2,10 @@
   "rewrites": [
     {
       "source": "/backend/:path*",
-      "destination": "https://autopost-qwgw.onrender.com/:path*"
+      "destination": "https://autopost-1-ax2p.onrender.com/:path*"
     }
   ],
   "env": {
-    "NEXT_PUBLIC_BACKEND_URL": "https://autopost-qwgw.onrender.com"
+    "NEXT_PUBLIC_BACKEND_URL": "https://autopost-1-ax2p.onrender.com"
   }
 }

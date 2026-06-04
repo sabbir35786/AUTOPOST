@@ -5,7 +5,7 @@ const nextConfig = {
     return [
       {
         source: "/backend/:path*",
-        destination: "https://autopost-qwgw.onrender.com/:path*",
+        destination: "https://autopost-1-ax2p.onrender.com/:path*",
       },
     ];
   },
