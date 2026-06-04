@@ -529,7 +529,7 @@ export function TemplateVisualBuilder({
                     <img src={state.previewLogoBase64} alt="logo" className="w-full h-full object-contain pointer-events-none" />
                   ) : (
                     <span className="absolute top-0 left-0 text-[9px] bg-black/50 text-white px-1 truncate max-w-full">
-                      {layer.type === "text" ? (layer as TextLayer).role : layer.type}
+                      {layer.type}
                     </span>
                   )}
                   {selected && !isLocked(layer.id) ? (
