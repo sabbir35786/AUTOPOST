@@ -434,7 +434,7 @@ export function ManualTemplateBuilder({ onCancel, onSaved }: ManualTemplateBuild
         template_json: buildTemplateJsonFromState(state, fontAssets),
       }
       await api.post("/api/image-templates/manual", payload)
-      toast.success("Template saved!")
+      toast.success("Template saved successfully.")
       onSaved()
     } catch (err) {
       toast.error(getApiErrorMessage(err, "Failed to save template."))

@@ -89,4 +89,8 @@ export type TemplateState = {
   /** First selected background for visual preview */
   previewBackgroundAssetId: string | null
   visualMeta: Record<string, VisualLayerMeta>
+  previewTexts?: Record<string, string>
+  previewLogoBase64?: string | null
+  previewBackgroundColor?: string | null
+  previewBackgroundImageBase64?: string | null
 }

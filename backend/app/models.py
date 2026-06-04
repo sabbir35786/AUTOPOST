@@ -476,6 +476,7 @@ class ImageTemplate(Base):
     aspect_ratio: Mapped[str] = mapped_column(String, default="1:1", nullable=False)
     creation_method: Mapped[str] = mapped_column(String, default="extracted", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class TemplateBackgroundAsset(Base):

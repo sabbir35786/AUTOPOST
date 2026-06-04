@@ -82,6 +82,7 @@ from app.mistral_service import (
 from app.learning.service import (
     build_learning_prompt_hint,
     build_strategy_prompt_hint,
+    delete_persona_dependencies,
     get_performance_insights,
     reset_persona_learning,
     run_engagement_snapshot_job,
@@ -1292,6 +1293,7 @@ def delete_ai_persona(
     persona = db.query(models.AIPersona).filter(models.AIPersona.id == persona_id, models.AIPersona.user_id == current_user.id).first()
     if not persona:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persona not found")
+    delete_persona_dependencies(db, persona_id)
     db.delete(persona)
     db.commit()
     return {"detail": "Persona deleted"}
@@ -1941,6 +1943,146 @@ def generate_ai_post(
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     return {"content": content}
+
+
+@app.post("/api/ai/test-full-flow")
+async def test_full_flow(
+    payload: schemas.AIGenerateRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Test Full Flow: generate post text + image in one call. Returns draft post with caption and image."""
+    if payload.persona_id:
+        settings = db.query(models.AIPersona).filter(
+            models.AIPersona.id == payload.persona_id,
+            models.AIPersona.user_id == current_user.id
+        ).first()
+        if not settings:
+            raise HTTPException(status_code=404, detail="Persona not found")
+    else:
+        settings = _get_ai_settings(db, current_user.id, payload.page_connection_id)
+    recent_topics = [
+        row[0]
+        for row in db.query(models.PostLog.topic)
+        .filter(
+            models.PostLog.facebook_connection_id == payload.page_connection_id,
+            models.PostLog.topic.isnot(None),
+        )
+        .order_by(models.PostLog.created_at.desc())
+        .limit(5)
+        .all()
+    ]
+    try:
+        print("[TEST-FLOW] Generating post text...")
+        hint_parts = [
+            build_learning_prompt_hint(db, settings) if user_has_learning_access(current_user) else None,
+            build_strategy_prompt_hint(db, settings),
+        ]
+        learning_hint = " ".join(part for part in hint_parts if part)
+        content = generate_persona_post_with_user_model(
+            db,
+            settings,
+            recent_topics=recent_topics,
+            topic_hint=payload.topic_hint,
+            learning_hint=learning_hint,
+        )
+        print(f"[TEST-FLOW] Post text generated ({len(content)} chars)")
+
+        # Create a draft post row so image generation can attach to it
+        post_log = models.PostLog(
+            user_id=current_user.id,
+            facebook_connection_id=payload.page_connection_id,
+            content=content,
+            status="draft",
+            ai_generated=True,
+            auto_generated=False,
+            ai_persona_id=settings.id,
+        )
+        db.add(post_log)
+        db.flush()
+        print(f"[TEST-FLOW] Draft post created: id={post_log.id}")
+
+        # Check if persona has an assigned image template
+        assignment = (
+            db.query(models.PersonaImageTemplateAssignment)
+            .filter(models.PersonaImageTemplateAssignment.persona_id == settings.id)
+            .first()
+        )
+
+        image_url = None
+        image_error = None
+        template_name = None
+        if assignment:
+            template = db.query(models.ImageTemplate).filter(
+                models.ImageTemplate.id == assignment.image_template_id,
+                models.ImageTemplate.user_id == current_user.id,
+            ).first()
+            template_name = template.name if template else None
+            print(f"[TEST-FLOW] Template assigned: '{template_name}' — starting image generation...")
+            try:
+                from app.routers.persona_image_templates import _run_post_image_generation
+                generation = await _run_post_image_generation(
+                    db, post_log.id, current_user.id,
+                    template_id=assignment.image_template_id,
+                    raise_errors=True,
+                )
+                image_url = generation.final_image_url if generation else None
+                print(f"[TEST-FLOW] Image generated: {image_url}")
+            except Exception as img_exc:
+                image_error = str(getattr(img_exc, "detail", None) or img_exc)
+                print(f"[TEST-FLOW] Image generation failed: {image_error}")
+        else:
+            print("[TEST-FLOW] No image template assigned — skipping image generation")
+
+        # Get the model preference for meta info
+        model_pref = db.query(models.ModelSettings).filter(
+            models.ModelSettings.user_id == current_user.id,
+            models.ModelSettings.task_category == "post_generation"
+        ).first()
+
+        return {
+            "post_id": post_log.id,
+            "content": content,
+            "image_url": image_url,
+            "image_error": image_error,
+            "persona_name": settings.persona_name,
+            "template_name": template_name,
+            "model_provider": model_pref.provider_name if model_pref else "default",
+            "model_name": model_pref.model_name if model_pref else "default",
+            "timestamp": post_log.created_at.isoformat() if post_log.created_at else None,
+        }
+    except ProviderConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+
+@app.post("/api/posts/{post_id}/publish-test-to-facebook")
+async def publish_test_to_facebook(
+    post_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Publish a test-flow draft post to Facebook."""
+    post_log = db.query(models.PostLog).filter(
+        models.PostLog.id == post_id,
+        models.PostLog.user_id == current_user.id,
+    ).first()
+    if not post_log:
+        raise HTTPException(status_code=404, detail="Post not found")
+    connection = db.query(models.FacebookConnection).filter(
+        models.FacebookConnection.id == post_log.facebook_connection_id,
+        models.FacebookConnection.user_id == current_user.id,
+    ).first()
+    if not connection:
+        raise HTTPException(status_code=400, detail="No Facebook page connected for this post. Connect a page in Settings first.")
+    try:
+        success = await publish_post_to_facebook(db, post_log, connection)
+        return {"success": success, "post_id": post_log.id, "status": post_log.status, "error_message": post_log.error_message}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/ai/prompt/test", response_model=schemas.AIGenerateResponse)

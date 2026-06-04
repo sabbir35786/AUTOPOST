@@ -105,7 +105,7 @@ export function TemplateBuilder({ onCancel, onSaved }: Props) {
         aspect_ratio: tj.aspect_ratio,
         template_json: tj,
       })
-      toast.success("Template saved!")
+      toast.success("Template saved successfully.")
       onSaved()
     } catch (err) {
       toast.error(getApiErrorMessage(err, "Failed to save template."))

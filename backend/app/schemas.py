@@ -246,6 +246,7 @@ AIPageSettingsRead = AIPersonaRead
 class AIGenerateRequest(BaseModel):
     page_connection_id: int
     topic_hint: str | None = None
+    persona_id: int | None = None
 
 
 class AIGenerateResponse(BaseModel):

@@ -1107,6 +1107,9 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
   const [insights, setInsights] = React.useState<PerformanceInsights | null>(null)
   const [strategy, setStrategy] = React.useState<any>(null)
   const [prefilled, setPrefilled] = React.useState(false)
+  const [fullFlowResult, setFullFlowResult] = React.useState<any>(null)
+  const [testingFullFlow, setTestingFullFlow] = React.useState(false)
+  const [publishingTest, setPublishingTest] = React.useState(false)
   const selectedPage = pages.find((page) => page.id === selectedPageId) || pages[0]
 
   React.useEffect(() => {
@@ -1256,6 +1259,37 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
     }
   }
 
+  async function runTestFullFlow(persona: AIPersona) {
+    if (!selectedPage?.id) return
+    setTestingFullFlow(true)
+    setFullFlowResult(null)
+    try {
+      const res = await api.post("/api/ai/test-full-flow", {
+        page_connection_id: selectedPage.id,
+        persona_id: persona.id,
+      })
+      setFullFlowResult(res.data)
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Full flow test failed.")
+      setTestingFullFlow(false)
+    }
+  }
+
+  async function publishTestPost() {
+    if (!fullFlowResult?.post_id) return
+    setPublishingTest(true)
+    try {
+      await api.post(`/api/posts/${fullFlowResult.post_id}/publish-test-to-facebook`)
+      toast.success("Test post published to Facebook!")
+      setFullFlowResult(null)
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Could not publish test post.")
+    } finally {
+      setPublishingTest(false)
+      setTestingFullFlow(false)
+    }
+  }
+
   return <><PageTitle title="Prompt Studio" subtitle="Build the exact AI prompt used by each scheduled persona." aiPowered />{!pages.length ? <Empty text="Connect a page before setting up AI personas." action="/dashboard/settings" /> : <div className="grid gap-5">
     {pages.length > 1 ? <Select value={String(selectedPageId ?? pages[0].id)} onChange={(event) => setSelectedPageId(Number(event.target.value))}>{pages.map((page) => <option key={page.id} value={String(page.id)}>{page.page_name}</option>)}</Select> : <PageMini page={pages[0]} />}
     <div className="grid grid-cols-2 gap-2 md:grid-cols-7">{dayOptions.map((day) => {
@@ -1263,10 +1297,70 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
       const index = owner ? Math.max(0, personas.findIndex((persona) => persona.id === owner.id)) : 0
       return <button key={day} className={cn("min-h-24 rounded-md border p-3 text-left", owner ? personaColors[index % personaColors.length] : "border-dashed bg-white text-slate-500")} onClick={() => setEditing(owner || emptyPersona())}><div className="flex items-center justify-between"><span className="font-medium">{day}</span>{!owner ? <Plus className="size-4" /> : null}</div><p className="mt-3 text-xs">{owner?.persona_name || "Unassigned"}</p></button>
     })}</div>
-    <div className="grid gap-4 md:grid-cols-2">{personas.map((persona, index) => <Card key={persona.id}><CardContent className="grid gap-3 p-5"><div className="flex items-start justify-between gap-3"><div><h2 className="font-semibold">{persona.persona_name}</h2><p className="text-sm text-slate-500">{persona.assigned_days.join(", ") || "No days assigned"}</p></div><span className={cn("rounded-full px-2 py-1 text-xs font-medium", persona.is_active ? "bg-green-50 text-green-700" : "bg-slate-100 text-slate-600")}>{persona.is_active ? "Active" : "Paused"}</span></div><div className="flex flex-wrap gap-2">{persona.tone_tags.map((tag) => <span key={tag} className={cn("rounded-full border px-2 py-1 text-xs", personaColors[index % personaColors.length])}>{tag}</span>)}</div><div className="flex items-center justify-between text-sm text-slate-500"><span>{persona.posting_time_slots.join(", ")}</span><span>Score {Number(persona.performance_score || 0.5).toFixed(2)}</span></div><Button variant="outline" onClick={() => setEditing(persona)}>Edit</Button>
-        {persona.id !== undefined && <Button variant="destructive" onClick={() => deletePersona(persona.id!)}>Delete</Button>}</CardContent></Card>)}{personas.length < 5 ? <Button variant="outline" className="min-h-36 border-dashed" onClick={() => setEditing({ ...emptyPersona(), persona_name: `Persona ${personas.length + 1}` })}><Plus className="size-4" /> Add New Persona</Button> : null}</div>
+    <div className="grid gap-4 md:grid-cols-2">{personas.map((persona, index) => <Card key={persona.id}><CardContent className="grid gap-3 p-5"><div className="flex items-start justify-between gap-3"><div><h2 className="font-semibold">{persona.persona_name}</h2><p className="text-sm text-slate-500">{persona.assigned_days.join(", ") || "No days assigned"}</p></div><span className={cn("rounded-full px-2 py-1 text-xs font-medium", persona.is_active ? "bg-green-50 text-green-700" : "bg-slate-100 text-slate-600")}>{persona.is_active ? "Active" : "Paused"}</span></div><div className="flex flex-wrap gap-2">{persona.tone_tags.map((tag) => <span key={tag} className={cn("rounded-full border px-2 py-1 text-xs", personaColors[index % personaColors.length])}>{tag}</span>)}</div><div className="flex items-center justify-between text-sm text-slate-500"><span>{persona.posting_time_slots.join(", ")}</span><span>Score {Number(persona.performance_score || 0.5).toFixed(2)}</span></div>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setEditing(persona)}>Edit</Button>
+          <Button variant="outline" className="text-purple-600 border-purple-200" onClick={() => runTestFullFlow(persona)}>Test Full Flow</Button>
+          {persona.id !== undefined && <Button variant="destructive" onClick={() => deletePersona(persona.id!)}>Delete</Button>}
+        </div>
+      </CardContent></Card>)}{personas.length < 5 ? <Button variant="outline" className="min-h-36 border-dashed" onClick={() => setEditing({ ...emptyPersona(), persona_name: `Persona ${personas.length + 1}` })}><Plus className="size-4" /> Add New Persona</Button> : null}</div>
     <PerformanceInsightsPanel insights={insights} personas={personas} timezone={Intl.DateTimeFormat().resolvedOptions().timeZone} />
-  </div>}{editing ? <PromptStudioModal draft={draft} config={config} simplePrompt={simplePrompt} rawPrompt={rawPrompt} previewTab={previewTab} saving={saving} strategy={strategy} fromStyleAnalyzer={prefilled} onStrategyDecision={handleStrategyDecision} onPreviewTab={setPreviewTab} onChange={setEditing} onConfig={updateConfig} onToggleTone={toggleTone} onToggleDay={toggleDay} onToggleConfigList={toggleConfigList} onAddTag={addTag} onSave={saveSettings} onTest={testSample} onResetLearning={resetLearning} onClose={() => { setEditing(null); setPrefilled(false) }} /> : null}{sample ? <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4"><Card className="max-w-xl"><CardHeader><CardTitle>Sample AI Post</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="whitespace-pre-wrap text-sm text-slate-700">{sample}</p><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={() => setSample("")}>Close</Button></CardContent></Card></div> : null}</>
+  </div>}{editing ? <PromptStudioModal draft={draft} config={config} simplePrompt={simplePrompt} rawPrompt={rawPrompt} previewTab={previewTab} saving={saving} strategy={strategy} fromStyleAnalyzer={prefilled} onStrategyDecision={handleStrategyDecision} onPreviewTab={setPreviewTab} onChange={setEditing} onConfig={updateConfig} onToggleTone={toggleTone} onToggleDay={toggleDay} onToggleConfigList={toggleConfigList} onAddTag={addTag} onSave={saveSettings} onTest={testSample} onResetLearning={resetLearning} onClose={() => { setEditing(null); setPrefilled(false) }} /> : null}{sample ? <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4"><Card className="max-w-xl"><CardHeader><CardTitle>Sample AI Post</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="whitespace-pre-wrap text-sm text-slate-700">{sample}</p><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={() => setSample("")}>Close</Button></CardContent></Card></div> : null}
+  {testingFullFlow ? (
+    <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4 overflow-y-auto">
+      <Card className="max-w-3xl w-full my-8 flex flex-col max-h-[90vh]">
+        <CardHeader className="shrink-0 border-b">
+          <CardTitle className="flex items-center justify-between">
+            <span>Test Full Flow</span>
+            <Button variant="ghost" size="icon" onClick={() => { setTestingFullFlow(false); setFullFlowResult(null); }}><X className="size-4" /></Button>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex-1 overflow-y-auto p-0">
+          {!fullFlowResult ? (
+            <div className="flex flex-col items-center justify-center p-12 text-slate-500">
+              <Loader2 className="size-8 animate-spin mb-4 text-purple-600" />
+              <p>Generating post text and image... This may take a minute.</p>
+            </div>
+          ) : (
+            <div className="grid gap-6 p-6">
+              <div className="grid gap-2 text-sm text-slate-600 bg-slate-50 p-3 rounded">
+                <p><strong>Persona:</strong> {fullFlowResult.persona_name}</p>
+                <p><strong>Model:</strong> {fullFlowResult.model_provider} / {fullFlowResult.model_name}</p>
+                <p><strong>Template:</strong> {fullFlowResult.template_name || "None"}</p>
+              </div>
+              <div className="grid gap-2">
+                <Label className="text-lg">Generated Caption</Label>
+                <div className="whitespace-pre-wrap p-4 bg-white border rounded text-sm shadow-sm">{fullFlowResult.content}</div>
+              </div>
+              <div className="grid gap-2">
+                <Label className="text-lg">Generated Image</Label>
+                {fullFlowResult.image_error ? (
+                  <div className="p-4 bg-red-50 text-red-700 border border-red-200 rounded text-sm">
+                    <strong>Image Generation Failed:</strong> {fullFlowResult.image_error}
+                  </div>
+                ) : fullFlowResult.image_url ? (
+                  <img src={fullFlowResult.image_url} alt="Generated post image" className="max-w-full h-auto rounded border shadow-sm" />
+                ) : (
+                  <div className="p-4 bg-slate-50 text-slate-500 border border-slate-200 rounded text-sm italic">
+                    No image was generated. {fullFlowResult.template_name ? "Template processing returned no image." : "Assign a template in Prompt Studio to automatically generate images."}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </CardContent>
+        {fullFlowResult && (
+          <div className="shrink-0 border-t p-4 flex justify-end gap-3 bg-slate-50 rounded-b-xl">
+            <Button variant="outline" onClick={() => { setTestingFullFlow(false); setFullFlowResult(null); }} disabled={publishingTest}>Close</Button>
+            <Button className="bg-blue-600 hover:bg-blue-700 text-white" onClick={publishTestPost} disabled={publishingTest || !!fullFlowResult.image_error}>
+              {publishingTest ? <><Loader2 className="size-4 animate-spin mr-2" /> Publishing...</> : "Publish to Facebook"}
+            </Button>
+          </div>
+        )}
+      </Card>
+    </div>
+  ) : null}
+  </>
 }
 
 function dayName(day: string) {
@@ -2097,11 +2191,7 @@ function TemplateLibraryView() {
       const formData = new FormData()
       formData.append("name", name.trim())
       formData.append("image", file)
-      await api.post("/api/image-templates/analyze", formData, {
-        headers: {
-          "Content-Type": "multipart/form-data"
-        }
-      })
+      await api.post("/api/image-templates/analyze", formData)
       toast.success("Image analyzed and template created successfully!")
       setName("")
       setFile(null)

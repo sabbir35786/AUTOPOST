@@ -2113,6 +2113,10 @@ async def _run_post_image_generation(
 ) -> models.PostImageGeneration:
     generation = None
     try:
+        print(f"\n{'='*60}")
+        print(f"[IMG-GEN] Starting image generation for post_id={post_id}, user_id={user_id}")
+        print(f"{'='*60}")
+
         post = db.query(models.PostLog).filter(models.PostLog.id == post_id, models.PostLog.user_id == user_id).first()
         if not post:
             raise HTTPException(status_code=404, detail="Post not found")
@@ -2121,8 +2125,12 @@ async def _run_post_image_generation(
         persona = db.query(models.AIPersona).filter(models.AIPersona.id == post.ai_persona_id, models.AIPersona.user_id == user_id).first()
         if not persona:
             raise HTTPException(status_code=404, detail="Persona not found")
+        print(f"[IMG-GEN] Persona: {persona.persona_name} (id={persona.id}), niche={persona.niche}")
+
+        print(f"[IMG-GEN] Resolving template...")
         template = _resolve_template_for_post(db, post, user_id, template_id)
         template_json = _template_payload(template)
+        print(f"[IMG-GEN] Template resolved: '{template.name}' (id={template.id}, method={template.creation_method})")
 
         generation = db.query(models.PostImageGeneration).filter(models.PostImageGeneration.post_id == post.id).first()
         if generation is None:
@@ -2134,11 +2142,16 @@ async def _run_post_image_generation(
         generation.updated_at = datetime.now(timezone.utc)
 
         manual_template = _is_manual_template(template, template_json)
+        print(f"[IMG-GEN] Template type: {'manual (asset-based)' if manual_template else 'extracted (AI-generated bg)'}")
+
         if manual_template:
             generation.status = "generating_styling"
             db.commit()
 
+            print(f"[IMG-GEN] Generating LLM styling instructions (background pick, text, colors)...")
             llm_instructions = _generate_llm_instructions(db, post, persona, template_json)
+            print(f"[IMG-GEN] LLM chose background asset: {llm_instructions.get('chosen_background_asset_id')}")
+            print(f"[IMG-GEN] LLM generated {len(llm_instructions.get('layers', []))} layer instructions")
             generation.llm_instructions = llm_instructions
             generation.overlay_texts = []
             generation.background_generation_prompt = None
@@ -2147,8 +2160,10 @@ async def _run_post_image_generation(
             canvas_w = int(template_json.get("canvas_width") or 1080)
             canvas_h = int(template_json.get("canvas_height") or 1080)
             bg_asset_id = str(llm_instructions.get("chosen_background_asset_id") or "")
+            print(f"[IMG-GEN] Loading background asset image ({canvas_w}x{canvas_h})...")
             background_img = await _load_background_asset_image(db, user_id, bg_asset_id, canvas_w, canvas_h)
             bg_bytes = _image_to_png_bytes(background_img)
+            print(f"[IMG-GEN] Uploading background to Supabase storage...")
             background_url = await _upload_to_supabase(
                 "generated-images",
                 f"post-images/{post.id}/background.png",
@@ -2156,15 +2171,20 @@ async def _run_post_image_generation(
                 "image/png",
             )
             generation.background_image_url = background_url
+            print(f"[IMG-GEN] Background uploaded: {background_url[:80]}...")
         else:
             generation.status = "generating_background"
             db.commit()
 
+            print(f"[IMG-GEN] Generating background prompt via LLM...")
             bg_prompt = _generate_background_prompt(db, post, persona, template_json)
+            print(f"[IMG-GEN] Background prompt: {bg_prompt[:120]}...")
             generation.background_generation_prompt = bg_prompt
             db.commit()
 
+            print(f"[IMG-GEN] Generating background image via image provider...")
             provider_instance, model_name, api_key = get_image_provider_for_user(user_id, db)
+            print(f"[IMG-GEN] Using image provider: {type(provider_instance).__name__}, model: {model_name}")
             import asyncio
 
             bg_bytes = await asyncio.to_thread(
@@ -2175,6 +2195,8 @@ async def _run_post_image_generation(
                 model_name=model_name,
                 api_key=api_key,
             )
+            print(f"[IMG-GEN] Background image generated ({len(bg_bytes)} bytes)")
+            print(f"[IMG-GEN] Uploading background to Supabase storage...")
             background_url = await _upload_to_supabase(
                 "generated-images",
                 f"post-images/{post.id}/background.png",
@@ -2182,18 +2204,26 @@ async def _run_post_image_generation(
                 "image/png",
             )
             generation.background_image_url = background_url
+            print(f"[IMG-GEN] Background uploaded: {background_url[:80]}...")
             generation.status = "generating_text"
             generation.updated_at = datetime.now(timezone.utc)
             db.commit()
 
+            print(f"[IMG-GEN] Generating overlay text via LLM...")
             generation.overlay_texts = _generate_overlay_texts(db, post, persona, template_json)
+            print(f"[IMG-GEN] Generated {len(generation.overlay_texts)} overlay text(s)")
+            for ot in generation.overlay_texts:
+                print(f"  -> layer_index={ot.get('layer_index')}: \"{ot.get('text', '')[:60]}\"")
             generation.llm_instructions = {}
 
+        print(f"[IMG-GEN] Resolving logo...")
         if logo_bytes:
+            print(f"[IMG-GEN] Uploading provided logo ({len(logo_bytes)} bytes)...")
             generation.logo_url = await _upload_to_supabase("generated-images", f"logos/{user_id}/logo.png", logo_bytes, "image/png")
         elif not generation.logo_url:
             logo_url = persona.template_logo_url
             if logo_url:
+                print(f"[IMG-GEN] Using persona's saved logo: {logo_url[:80]}...")
                 generation.logo_url = logo_url
             else:
                 previous = (
@@ -2208,16 +2238,23 @@ async def _run_post_image_generation(
                     .first()
                 )
                 if previous:
+                    print(f"[IMG-GEN] Using logo from previous generation")
                     generation.logo_url = previous.logo_url
+                else:
+                    print(f"[IMG-GEN] No logo found — skipping logo layer")
+        else:
+            print(f"[IMG-GEN] Reusing existing logo: {generation.logo_url[:80] if generation.logo_url else '(none)'}")
         generation.status = "assembling"
         generation.updated_at = datetime.now(timezone.utc)
         db.commit()
 
+        print(f"[IMG-GEN] Assembling layers into final image...")
         logo_blob = logo_bytes or await _download_bytes(generation.logo_url)
         if manual_template and generation.llm_instructions:
             canvas_w = int(template_json.get("canvas_width") or 1080)
             canvas_h = int(template_json.get("canvas_height") or 1080)
             bg_asset_id = str(generation.llm_instructions.get("chosen_background_asset_id") or "")
+            print(f"[IMG-GEN] Assembling via LLM instructions (manual template path)")
             background_img = await _load_background_asset_image(db, user_id, bg_asset_id, canvas_w, canvas_h)
             final_bytes = _assemble_from_llm_instructions(
                 template_json,
@@ -2229,6 +2266,7 @@ async def _run_post_image_generation(
                 generation.layer_overrides,
             )
         else:
+            print(f"[IMG-GEN] Assembling via overlay texts (extracted template path)")
             bg_bytes = await _download_bytes(generation.background_image_url)
             final_bytes = _assemble_template_image(
                 template_json,
@@ -2237,6 +2275,8 @@ async def _run_post_image_generation(
                 generation.overlay_texts,
                 generation.layer_overrides,
             )
+        print(f"[IMG-GEN] Final image assembled ({len(final_bytes)} bytes)")
+        print(f"[IMG-GEN] Uploading final image to Supabase storage...")
         final_url = await _upload_to_supabase("generated-images", f"post-images/{post.id}/final.png", final_bytes, "image/png")
         generation.final_image_url = final_url
         generation.status = "completed"
@@ -2246,8 +2286,12 @@ async def _run_post_image_generation(
         post.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(generation)
+        print(f"[IMG-GEN] ✅ Image generation COMPLETE — {final_url[:80]}...")
+        print(f"{'='*60}\n")
         return generation
     except Exception as exc:
+        print(f"[IMG-GEN] ❌ Image generation FAILED: {exc}")
+        print(f"{'='*60}\n")
         if generation is not None:
             generation.status = "failed"
             generation.error_message = str(getattr(exc, "detail", None) or exc)

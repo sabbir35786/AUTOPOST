@@ -10,17 +10,20 @@ from app.database import engine
 
 # Migration files to run in order (priority order)
 MIGRATIONS = [
-    'fix_image_templates_schema.sql',  # Critical fix for schema issues
-    'add_image_generation_tables.sql',
-    'add_template_image_generation.sql',
-    'add_user_settings_models.sql',
-    'add_sessions_table.sql',
-    'add_media_library_id_to_post_logs.sql',
-    'fix_facebook_connections_flow.sql',
-    'rebuild_image_templates_system.sql',
-    'add_manual_template_builder_step1.sql',
-    'add_manual_template_builder_step2.sql',
-    'add_manual_template_builder_step5.sql',
+    '01.sql',
+    '02 add_image_generation_tables.sql',
+    '03 add_manual_template_builder_step1.sql',
+    '04 add_manual_template_builder_step2.sql',
+    '05 add_manual_template_builder_step5.sql',
+    '06 add_media_library_id_to_post_logs.sql',
+    '07 add_sessions_table.sql',
+    '08 add_template_image_generation.sql',
+    '09 add_user_settings_models.sql',
+    '10 fix_facebook_connections_flow.sql',
+    '11 fix_image_templates_schema.sql',
+    '12 rebuild_image_templates_system.sql',
+    '13 drop_layers_json_column.sql',
+    '14 add_updated_at_to_image_templates.sql',
 ]
 
 def run_migrations():

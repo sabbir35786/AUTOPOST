@@ -318,13 +318,24 @@ export function TemplateVisualBuilder({
   const primarySelected = selectedIds[0]
   const primaryLayer = json.layers.find((l) => l.id === primarySelected)
 
-  const canvasBgStyle: React.CSSProperties = previewBg
+  const canvasBgStyle: React.CSSProperties = state.previewBackgroundImageBase64
+    ? {
+        backgroundImage: `url(${state.previewBackgroundImageBase64})`,
+        backgroundSize: "cover",
+        backgroundPosition: "center",
+      }
+    : state.previewBackgroundColor
+    ? {
+        backgroundColor: state.previewBackgroundColor,
+      }
+    : previewBg
     ? {
         ...backgroundSwatchStyle(previewBg),
         backgroundSize: "cover",
         backgroundPosition: "center",
       }
     : { backgroundColor: "#1e293b" }
+
 
   return (
     <div className="grid gap-4">
@@ -457,6 +468,31 @@ export function TemplateVisualBuilder({
                 if (c) bg = `${c.color_hex}${Math.round(c.opacity * 255).toString(16).padStart(2, "0")}`
               }
 
+              let textContent = ""
+              let textStyle: React.CSSProperties = {}
+              if (layer.type === "text") {
+                const tl = layer as TextLayer
+                textContent = state.previewTexts?.[layer.id] || `[Preview ${tl.role}]`
+                const textColor = tl.color_options[0]?.color_hex || "#ffffff"
+                const textAlign = tl.text_align_options[0] || "center"
+                const avgPct = (tl.font_size_min_percent + tl.font_size_max_percent) / 2
+                const fontSizePx = displayH * (avgPct / 100)
+                textStyle = {
+                  color: textColor,
+                  textAlign: textAlign,
+                  fontSize: `${fontSizePx}px`,
+                  fontWeight: tl.font_weight || "bold",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: textAlign === "left" ? "flex-start" : textAlign === "right" ? "flex-end" : "center",
+                  padding: "4px",
+                  wordBreak: "break-word",
+                  whiteSpace: "pre-wrap",
+                  height: "100%",
+                  width: "100%",
+                }
+              }
+
               return (
                 <div
                   key={layer.id}
@@ -469,7 +505,7 @@ export function TemplateVisualBuilder({
                     top,
                     width: w,
                     height: h,
-                    background: layer.type === "logo" ? "rgba(255,255,255,0.15)" : bg,
+                    background: layer.type === "logo" ? (state.previewLogoBase64 ? "transparent" : "rgba(255,255,255,0.15)") : bg,
                     border,
                     transform: `rotate(${rot}deg)`,
                     transformOrigin: "center center",
@@ -487,9 +523,15 @@ export function TemplateVisualBuilder({
                     startDrag(e, "move", layer.id)
                   }}
                 >
-                  <span className="absolute top-0 left-0 text-[9px] bg-black/50 text-white px-1 truncate max-w-full">
-                    {layer.type === "text" ? (layer as TextLayer).role : layer.type}
-                  </span>
+                  {layer.type === "text" ? (
+                    <div style={textStyle}>{textContent}</div>
+                  ) : layer.type === "logo" && state.previewLogoBase64 ? (
+                    <img src={state.previewLogoBase64} alt="logo" className="w-full h-full object-contain pointer-events-none" />
+                  ) : (
+                    <span className="absolute top-0 left-0 text-[9px] bg-black/50 text-white px-1 truncate max-w-full">
+                      {layer.type === "text" ? (layer as TextLayer).role : layer.type}
+                    </span>
+                  )}
                   {selected && !isLocked(layer.id) ? (
                     <>
                       {(["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((h) => (
@@ -557,6 +599,23 @@ export function TemplateVisualBuilder({
               onChange={(patch) => {
                 if (selectedIds.length > 1) patchLayers(selectedIds, patch)
                 else patchLayer(primaryLayer.id, patch)
+              }}
+              previewText={state.previewTexts?.[primaryLayer.id] || ""}
+              onPreviewTextChange={(text) => {
+                onStateChange({
+                  ...state,
+                  previewTexts: {
+                    ...(state.previewTexts || {}),
+                    [primaryLayer.id]: text
+                  }
+                })
+              }}
+              previewLogoBase64={state.previewLogoBase64}
+              onLogoUpload={(base64) => {
+                onStateChange({
+                  ...state,
+                  previewLogoBase64: base64
+                })
               }}
             />
           ) : (

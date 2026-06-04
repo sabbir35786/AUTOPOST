@@ -23,12 +23,20 @@ export function TemplateLayerFields({
   onChange,
   onClose,
   compact = false,
+  previewText = "",
+  onPreviewTextChange,
+  previewLogoBase64,
+  onLogoUpload,
 }: {
   layer: TemplateLayer
   fontAssets: FontAsset[]
   onChange: (patch: Partial<TemplateLayer>) => void
   onClose?: () => void
   compact?: boolean
+  previewText?: string
+  onPreviewTextChange?: (text: string) => void
+  previewLogoBase64?: string | null
+  onLogoUpload?: (base64: string | null) => void
 }) {
   const num = (label: string, key: LayerLayoutKey, min = 0, max = 100) => (
     <div className="grid gap-1">
@@ -72,7 +80,13 @@ export function TemplateLayerFields({
       </div>
 
       {layer.type === "text" ? (
-        <TextLayerFields layer={layer} fontAssets={fontAssets} onChange={onChange} />
+        <TextLayerFields
+          layer={layer}
+          fontAssets={fontAssets}
+          onChange={onChange}
+          previewText={previewText}
+          onPreviewTextChange={onPreviewTextChange}
+        />
       ) : null}
       {layer.type === "overlay" ? (
         <OverlayColorEditor
@@ -81,7 +95,38 @@ export function TemplateLayerFields({
         />
       ) : null}
       {layer.type === "logo" ? (
-        <p className="text-sm text-slate-600 italic">Logo image comes from persona settings.</p>
+        <div className="grid gap-2 border border-dashed border-purple-300 rounded p-3 bg-white">
+          <Label className="font-semibold text-xs text-purple-950">Preview Logo Image</Label>
+          <p className="text-[11px] text-slate-500 mb-1">Upload a preview logo. It is only shown inside this builder for preview.</p>
+          <input
+            type="file"
+            accept="image/png, image/jpeg, image/jpg"
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              if (file && onLogoUpload) {
+                const reader = new FileReader()
+                reader.onloadend = () => {
+                  onLogoUpload(reader.result as string)
+                }
+                reader.readAsDataURL(file)
+              }
+            }}
+            className="text-xs file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-purple-100 file:text-purple-700 hover:file:bg-purple-200 cursor-pointer w-full"
+          />
+          {previewLogoBase64 ? (
+            <div className="relative mt-2 size-16 border rounded bg-slate-50 overflow-hidden flex items-center justify-center">
+              <img src={previewLogoBase64} alt="Preview Logo" className="max-w-full max-h-full object-contain" />
+              <button
+                type="button"
+                onClick={() => onLogoUpload && onLogoUpload(null)}
+                className="absolute top-0.5 right-0.5 bg-red-500 text-white rounded-full p-0.5 hover:bg-red-600"
+              >
+                <X className="size-3" />
+              </button>
+            </div>
+          ) : null}
+          <p className="text-xs text-slate-600 italic mt-1">Logo image comes from persona settings in real posts.</p>
+        </div>
       ) : null}
     </div>
   )
@@ -91,15 +136,28 @@ function TextLayerFields({
   layer,
   fontAssets,
   onChange,
+  previewText = "",
+  onPreviewTextChange,
 }: {
   layer: TextLayer
   fontAssets: FontAsset[]
   onChange: (patch: Partial<TemplateLayer>) => void
+  previewText?: string
+  onPreviewTextChange?: (text: string) => void
 }) {
   const fontIds = layer.font_options.map((f) => f.font_asset_id)
 
   return (
     <>
+      <div className="grid gap-2">
+        <Label>Preview text (Temporary)</Label>
+        <Input
+          value={previewText}
+          onChange={(e) => onPreviewTextChange && onPreviewTextChange(e.target.value)}
+          placeholder="Type preview text to show on canvas..."
+          className="border-purple-300 focus:border-purple-500"
+        />
+      </div>
       <div className="grid gap-2">
         <Label>Role</Label>
         <Select

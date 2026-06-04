@@ -407,6 +407,34 @@ async def regenerate_ai_recommendations(db: Session, page: models.FacebookConnec
         db.add(models.AIRecommendation(page_connection_id=page.id, recommendation_text=text, generated_at=now))
 
 
+def delete_persona_dependencies(db: Session, persona_id: int) -> None:
+    """Detach or remove rows referencing ai_personas before deleting the persona."""
+    db.query(models.PersonaLearningPattern).filter(
+        models.PersonaLearningPattern.persona_id == persona_id,
+    ).delete(synchronize_session=False)
+    db.query(models.LearnedStrategy).filter(
+        models.LearnedStrategy.persona_id == persona_id,
+    ).delete(synchronize_session=False)
+    db.query(models.PromptTemplate).filter(
+        models.PromptTemplate.persona_id == persona_id,
+    ).delete(synchronize_session=False)
+    db.query(models.PostEngagementSnapshot).filter(
+        models.PostEngagementSnapshot.persona_id == persona_id,
+    ).delete(synchronize_session=False)
+    db.query(models.PersonaImageTemplateAssignment).filter(
+        models.PersonaImageTemplateAssignment.persona_id == persona_id,
+    ).delete(synchronize_session=False)
+    db.query(models.ImagePromptSettings).filter(
+        models.ImagePromptSettings.persona_id == persona_id,
+    ).delete(synchronize_session=False)
+    db.query(models.LearningSignal).filter(
+        models.LearningSignal.persona_id == persona_id,
+    ).update({models.LearningSignal.persona_id: None}, synchronize_session=False)
+    db.query(models.PostLog).filter(
+        models.PostLog.ai_persona_id == persona_id,
+    ).update({models.PostLog.ai_persona_id: None}, synchronize_session=False)
+
+
 def reset_persona_learning(db: Session, persona: models.AIPersona) -> None:
     persona.performance_score = 0.5
     persona.learned_patterns_summary = None
