@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ from app.providers.llm_providers import ProviderConfigurationError, generate_tex
 from app.providers.user_model_settings import generate_post_text_for_user
 
 router = APIRouter(tags=["image-templates"])
+logger = logging.getLogger(__name__)
 
 _VISION_SYSTEM_INSTRUCTION = (
     "You are an image layout analyst. Analyze this image and return ONLY a JSON object with no explanation, "
@@ -205,6 +207,7 @@ _DEFAULT_BACKGROUND_ASSETS = [
 _DEFAULT_FONT_ASSETS = [
     ("Roboto Bold", "bold", "backend/assets/fonts/Roboto-Bold.ttf"),
     ("Roboto Regular", "regular", "backend/assets/fonts/Roboto-Regular.ttf"),
+    ("Nirmala UI Regular", "regular", "C:\\Windows\\Fonts\\Nirmala.ttc"),
 ]
 
 
@@ -220,6 +223,25 @@ def _ensure_default_template_assets(db: Session, user_id: int) -> None:
         .count()
     )
     if bg_count > 0 and font_count > 0:
+        existing_font_paths = {
+            str(row.font_file_url or "").strip().lower()
+            for row in db.query(models.TemplateFontAsset)
+            .filter(models.TemplateFontAsset.user_id == user_id)
+            .all()
+        }
+        for display_name, weight, font_path in _DEFAULT_FONT_ASSETS:
+            if font_path.lower() not in existing_font_paths and _resolve_font_path(font_path):
+                db.add(
+                    models.TemplateFontAsset(
+                        id=str(uuid.uuid4()),
+                        user_id=user_id,
+                        display_name=display_name,
+                        font_file_url=font_path,
+                        weight=weight,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                )
+        db.commit()
         return
 
     now = datetime.now(timezone.utc)
@@ -372,15 +394,108 @@ def _resolve_font_path(font_file_url: str) -> str | None:
     return None
 
 
+def _detect_script(text: str) -> str:
+    for char in text or "":
+        if char.isspace():
+            continue
+        cp = ord(char)
+        if 0x0980 <= cp <= 0x09FF:
+            return "bengali"
+        if 0x0600 <= cp <= 0x06FF or 0x0750 <= cp <= 0x077F or 0x08A0 <= cp <= 0x08FF:
+            return "arabic"
+        if 0x0900 <= cp <= 0x097F:
+            return "devanagari"
+        if 0x0400 <= cp <= 0x04FF:
+            return "cyrillic"
+    return "latin"
+
+
+def _font_candidates_for_script(script: str, weight: str, preferred_font_path: str | None = None) -> list[str]:
+    w = (weight or "regular").strip().lower()
+    bold = w == "bold"
+    candidates: list[str] = []
+    if script == "latin" and preferred_font_path:
+        candidates.append(preferred_font_path)
+
+    if script == "bengali":
+        candidates.extend(
+            [
+                "backend/assets/fonts/NotoSansBengali-Bold.ttf" if bold else "backend/assets/fonts/NotoSansBengali-Regular.ttf",
+                "assets/fonts/NotoSansBengali-Bold.ttf" if bold else "assets/fonts/NotoSansBengali-Regular.ttf",
+                "C:\\Windows\\Fonts\\Nirmala.ttc",
+            ]
+        )
+    elif script == "arabic":
+        candidates.extend(
+            [
+                "backend/assets/fonts/NotoSansArabic-Bold.ttf" if bold else "backend/assets/fonts/NotoSansArabic-Regular.ttf",
+                "assets/fonts/NotoSansArabic-Bold.ttf" if bold else "assets/fonts/NotoSansArabic-Regular.ttf",
+                "C:\\Windows\\Fonts\\arial.ttf",
+            ]
+        )
+    elif script == "devanagari":
+        candidates.extend(
+            [
+                "backend/assets/fonts/NotoSansDevanagari-Bold.ttf" if bold else "backend/assets/fonts/NotoSansDevanagari-Regular.ttf",
+                "assets/fonts/NotoSansDevanagari-Bold.ttf" if bold else "assets/fonts/NotoSansDevanagari-Regular.ttf",
+                "C:\\Windows\\Fonts\\Nirmala.ttc",
+                "C:\\Windows\\Fonts\\mangal.ttf",
+            ]
+        )
+    elif script == "cyrillic":
+        candidates.extend(
+            [
+                preferred_font_path or "",
+                "backend/assets/fonts/NotoSans-Bold.ttf" if bold else "backend/assets/fonts/NotoSans-Regular.ttf",
+                "assets/fonts/NotoSans-Bold.ttf" if bold else "assets/fonts/NotoSans-Regular.ttf",
+                "C:\\Windows\\Fonts\\arial.ttf",
+            ]
+        )
+    else:
+        candidates.extend(
+            [
+                preferred_font_path or "",
+                "backend/assets/fonts/Roboto-Bold.ttf" if bold else "backend/assets/fonts/Roboto-Regular.ttf",
+                "assets/fonts/Roboto-Bold.ttf" if bold else "assets/fonts/Roboto-Regular.ttf",
+                "backend/assets/fonts/NotoSans-Bold.ttf" if bold else "backend/assets/fonts/NotoSans-Regular.ttf",
+                "assets/fonts/NotoSans-Bold.ttf" if bold else "assets/fonts/NotoSans-Regular.ttf",
+                "C:\\Windows\\Fonts\\arialbd.ttf" if bold else "C:\\Windows\\Fonts\\arial.ttf",
+            ]
+        )
+
+    candidates.extend(
+        [
+            "backend/assets/fonts/NotoSans-Bold.ttf" if bold else "backend/assets/fonts/NotoSans-Regular.ttf",
+            "assets/fonts/NotoSans-Bold.ttf" if bold else "assets/fonts/NotoSans-Regular.ttf",
+            "C:\\Windows\\Fonts\\Nirmala.ttc",
+            "C:\\Windows\\Fonts\\arial.ttf",
+        ]
+    )
+    return [path for path in dict.fromkeys(candidates) if path]
+
+
+def _get_font_for_text(
+    text: str,
+    font_asset: models.TemplateFontAsset | None,
+    weight: str,
+    size_px: int,
+) -> tuple[ImageFont.FreeTypeFont | ImageFont.ImageFont, str, str]:
+    preferred = _resolve_font_path(font_asset.font_file_url) if font_asset else None
+    script = _detect_script(text)
+    for candidate in _font_candidates_for_script(script, weight, preferred):
+        resolved = _resolve_font_path(candidate)
+        if not resolved:
+            continue
+        try:
+            return ImageFont.truetype(resolved, size_px), script, resolved
+        except Exception:
+            continue
+    return _get_font(weight, size_px), script, "PIL default fallback"
+
+
 def _get_font_for_asset(font_asset: models.TemplateFontAsset | None, weight: str, size_px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    if font_asset:
-        resolved = _resolve_font_path(font_asset.font_file_url)
-        if resolved:
-            try:
-                return ImageFont.truetype(resolved, size_px)
-            except Exception:
-                pass
-    return _get_font(weight, size_px)
+    font, _, _ = _get_font_for_text("", font_asset, weight, size_px)
+    return font
 
 
 async def _load_background_asset_image(
@@ -514,25 +629,20 @@ def _assemble_manual_template_preview(
             max_pct = float(layer.get("font_size_max_percent") or 7.0)
             font_px = max(10, int(round(((min_pct + max_pct) / 2.0) * canvas_h / 100.0)))
             weight = str(layer.get("font_weight") or (font_asset.weight if font_asset else "regular"))
-            font = _get_font_for_asset(font_asset, weight, font_px)
+            font, script, font_path_used = _get_font_for_text(text_str, font_asset, weight, font_px)
             color = _parse_hex_color(str(color_opts[0].get("color_hex") or ""), default=(255, 255, 255, 255))
             align_opts = layer.get("text_align_options") or ["center"]
             align = str(align_opts[0] if align_opts else "center").strip().lower()
             text_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(text_layer)
-            cursor_y = 0
-            for paragraph in text_str.splitlines() or [text_str]:
-                for line in _wrap_text(draw, paragraph, font, w):
-                    bbox = draw.textbbox((0, 0), line, font=font)
-                    tw = bbox[2] - bbox[0]
-                    th = bbox[3] - bbox[1]
-                    tx = max(0, (w - tw) // 2) if align == "center" else max(0, w - tw) if align == "right" else 0
-                    draw.text((tx, cursor_y), line, font=font, fill=color)
-                    cursor_y += th + max(3, int(font_px * 0.22))
-                    if cursor_y > h:
-                        break
-                if cursor_y > h:
-                    break
+            _draw_wrapped_text_layer(text_layer, text_str, font, font_px, color, align)
+            logger.info(
+                'Text layer %s: script=%s font=%s size=%spx text="%s"',
+                str(layer.get("id") or "preview"),
+                script,
+                font_path_used,
+                font_px,
+                text_str[:30],
+            )
             base = _composite_layer_onto_base(base, text_layer, x, y, w, h, rotation)
 
     out = io.BytesIO()
@@ -1039,7 +1149,8 @@ async def preview_template_image(
         )
         if not persona:
             raise HTTPException(status_code=404, detail="Persona not found")
-        logo_url = persona.template_logo_url
+        settings = db.query(models.ImagePromptSettings).filter(models.ImagePromptSettings.persona_id == persona.id).first()
+        logo_url = settings.template_logo_url if settings else None
         if logo_url:
             try:
                 logo_bytes = await _download_bytes(logo_url)
@@ -1607,86 +1718,166 @@ def _is_manual_template(template: models.ImageTemplate, template_json: dict) -> 
     return bool(template_json.get("background_options"))
 
 
+def build_image_instruction_prompt(
+    template_json: dict,
+    input_text: str,
+    persona: models.AIPersona | None = None,
+) -> tuple[str, str]:
+    """
+    Build system and user messages for LLM template instructions.
+    Returns (system_message, user_message) tuple.
+    
+    Dynamically constructs prompts based on actual template structure.
+    No hardcoding. Precise. Mirrors template exactly.
+    """
+    # System message (constant)
+    system_message = (
+        "You are a creative director for social media photocards.\n"
+        "You will be given a post and a set of design options from a template.\n"
+        "You must make design decisions strictly within the provided options.\n"
+        "You must return ONLY a raw JSON object. No explanation. No markdown. No backticks. Raw JSON only.\n"
+        "Every decision you make must come from the options listed. Do not invent values outside the provided lists."
+    )
+    
+    # Build user message dynamically
+    user_parts = []
+    
+    # 1. Post content
+    user_parts.append(f"POST CONTENT:\n{input_text or ''}")
+    
+    # 2. Persona info (if provided)
+    if persona:
+        user_parts.append(f"TONE: {persona.tone_tags or 'neutral'}")
+        user_parts.append(f"NICHE: {persona.niche or 'general'}")
+        user_parts.append(f"LANGUAGE: {persona.language or 'English'}")
+    
+    # 3. Background options (only if they exist)
+    bg_options = template_json.get("background_options") or []
+    if bg_options:
+        bg_lines = ["BACKGROUND — choose exactly one:"]
+        for opt in bg_options:
+            asset_id = opt.get("asset_id")
+            label = opt.get("label", "Unnamed")
+            bg_lines.append(f"- asset_id: {asset_id} | label: {label}")
+        user_parts.append("\n".join(bg_lines))
+    
+    # 4. Layers sorted by z_index
+    layers = sorted(template_json.get("layers") or [], key=lambda x: int(x.get("z_index") or 0))
+    
+    for layer in layers:
+        layer_type = str(layer.get("type") or "").lower()
+        layer_id = layer.get("id")
+        
+        if layer_type == "text":
+            role = layer.get("role") or "body"
+            min_font = layer.get("font_size_min_percent", 4.0)
+            max_font = layer.get("font_size_max_percent", 10.0)
+            
+            # Determine max words based on role
+            max_words_map = {"headline": 6, "subheadline": 12, "body": 20}
+            max_words = max_words_map.get(role, 20)
+            
+            text_lines = [f"TEXT LAYER {layer_id} — role: {role}"]
+            
+            # Font options
+            font_opts = layer.get("font_options") or []
+            if font_opts:
+                text_lines.append("Choose font from:")
+                for fopt in font_opts:
+                    fid = fopt.get("font_asset_id")
+                    fname = fopt.get("label", "Unnamed")
+                    text_lines.append(f"- font_asset_id: {fid} | name: {fname}")
+            
+            # Color options
+            color_opts = layer.get("color_options") or []
+            if color_opts:
+                text_lines.append("Choose color from:")
+                for copt in color_opts:
+                    chex = copt.get("color_hex")
+                    clbl = copt.get("label", chex)
+                    text_lines.append(f"- color_hex: {chex} | label: {clbl}")
+            
+            # Font size range
+            text_lines.append(f"Choose font_size_percent between {min_font} and {max_font}")
+            
+            # Text align options
+            align_opts = layer.get("text_align_options") or ["center"]
+            text_lines.append(f"Choose text_align from: {', '.join(align_opts)}")
+            
+            # Generation instruction
+            language = persona.language if persona else "English"
+            text_lines.append(f"Generate the text content for this layer based on the post. Max words: {max_words}")
+            text_lines.append(f"Language must be: {language}")
+            
+            user_parts.append("\n".join(text_lines))
+        
+        elif layer_type == "overlay":
+            overlay_lines = [f"OVERLAY LAYER {layer_id}"]
+            overlay_lines.append("Choose color and opacity from:")
+            
+            color_opts = layer.get("color_options") or []
+            for copt in color_opts:
+                chex = copt.get("color_hex")
+                opac = copt.get("opacity", 0.35)
+                clbl = copt.get("label", chex)
+                overlay_lines.append(f"- color_hex: {chex} | opacity: {opac} | label: {clbl}")
+            
+            user_parts.append("\n".join(overlay_lines))
+        
+        # Logo layers: no prompt section, LLM doesn't decide anything
+    
+    # 5. Expected response format (dynamic based on actual layers)
+    response_lines = ["Return a JSON object with exactly this structure:"]
+    response_lines.append("{")
+    
+    # Background if it exists
+    if bg_options:
+        response_lines.append('  "chosen_background_asset_id": "one of the asset_ids listed above",')
+    
+    response_lines.append('  "layers": [')
+    
+    # For each text layer
+    text_layers = [l for l in layers if str(l.get("type") or "").lower() == "text"]
+    for idx, tlayer in enumerate(text_layers):
+        response_lines.append("    {")
+        response_lines.append(f'      "layer_id": "{tlayer.get("id")}",')
+        response_lines.append('      "text": "generated text here",')
+        response_lines.append('      "font_asset_id": "one of the font_asset_ids listed above",')
+        response_lines.append('      "color_hex": "one of the color_hex values listed above",')
+        response_lines.append('      "font_size_percent": 5.5,')
+        response_lines.append('      "text_align": "one of the text_align_options listed above"')
+        response_lines.append("    }" + ("," if idx < len(text_layers) - 1 else ""))
+    
+    # For each overlay layer
+    overlay_layers = [l for l in layers if str(l.get("type") or "").lower() == "overlay"]
+    if overlay_layers and text_layers:
+        response_lines.append("    ,")
+    
+    for idx, olayer in enumerate(overlay_layers):
+        response_lines.append("    {")
+        response_lines.append(f'      "layer_id": "{olayer.get("id")}",')
+        response_lines.append('      "color_hex": "one of the color_hex values listed above",')
+        response_lines.append('      "opacity": 0.35')
+        response_lines.append("    }" + ("," if idx < len(overlay_layers) - 1 else ""))
+    
+    response_lines.append("  ]")
+    response_lines.append("}")
+    
+    user_parts.append("\n".join(response_lines))
+    
+    user_message = "\n\n".join(user_parts)
+    return system_message, user_message
+
+
 def _build_llm_instruction_prompt(
     post: models.PostLog,
     persona: models.AIPersona,
     template_json: dict,
 ) -> str:
-    tone_tags = persona.tone_tags or ""
-    language = persona.language or "English"
-    backgrounds_block = []
-    for opt in template_json.get("background_options") or []:
-        backgrounds_block.append(f'asset_id: {opt.get("asset_id")}, label: {opt.get("label")}')
-
-    layers_block: list[str] = []
-    for layer in template_json.get("layers") or []:
-        layer_type = str(layer.get("type") or "").lower()
-        layer_id = layer.get("id")
-        if layer_type == "text":
-            font_opts = ", ".join(
-                f'{{"font_asset_id": "{f.get("font_asset_id")}", "label": "{f.get("label")}"}}'
-                for f in layer.get("font_options") or []
-            )
-            color_opts = ", ".join(
-                f'{{"color_hex": "{c.get("color_hex")}", "label": "{c.get("label")}"}}'
-                for c in layer.get("color_options") or []
-            )
-            aligns = ", ".join(f'"{a}"' for a in layer.get("text_align_options") or [])
-            layers_block.append(
-                f'layer_id: {layer_id}, role: {layer.get("role")}, '
-                f"font_options: [{font_opts}], color_options: [{color_opts}], "
-                f"font_size_min: {layer.get('font_size_min_percent')}%, "
-                f"font_size_max: {layer.get('font_size_max_percent')}%, "
-                f"text_align_options: [{aligns}]"
-            )
-        elif layer_type == "overlay":
-            color_opts = ", ".join(
-                f'{{"color_hex": "{c.get("color_hex")}", "opacity": {c.get("opacity")}, "label": "{c.get("label")}"}}'
-                for c in layer.get("color_options") or []
-            )
-            layers_block.append(f"layer_id: {layer_id}, color_options: [{color_opts}]")
-
-    return (
-        "You are a creative director for social media photocards.\n"
-        "You will be given a post and a set of design options.\n"
-        "You must choose exactly one option per decision and return ONLY a raw JSON object. No explanation. No markdown.\n\n"
-        f"POST CONTENT:\n{post.content or ''}\n\n"
-        f"PERSONA TONE: {tone_tags}\n"
-        f"PERSONA NICHE: {persona.niche}\n"
-        f"LANGUAGE: {language}\n\n"
-        "AVAILABLE BACKGROUNDS:\n"
-        + ("\n".join(backgrounds_block) or "(none)")
-        + "\n\nLAYERS TO FILL:\n"
-        + ("\n".join(layers_block) or "(none)")
-        + "\n\nReturn a JSON object with this exact structure:\n"
-        "{\n"
-        '  "chosen_background_asset_id": "uuid",\n'
-        '  "layers": [\n'
-        "    {\n"
-        '      "layer_id": "layer_2",\n'
-        '      "text": "Short punchy headline max 6 words",\n'
-        '      "font_asset_id": "uuid",\n'
-        '      "color_hex": "#ffffff",\n'
-        '      "font_size_percent": 5.5,\n'
-        '      "text_align": "center"\n'
-        "    },\n"
-        "    {\n"
-        '      "layer_id": "layer_3",\n'
-        '      "text": "Supporting line max 10 words",\n'
-        '      "font_asset_id": "uuid",\n'
-        '      "color_hex": "#dddddd",\n'
-        '      "font_size_percent": 2.8,\n'
-        '      "text_align": "center"\n'
-        "    },\n"
-        "    {\n"
-        '      "layer_id": "layer_1",\n'
-        '      "color_hex": "#000000",\n'
-        '      "opacity": 0.4\n'
-        "    }\n"
-        "  ]\n"
-        "}\n"
-        f"Choose options that best match the mood, topic and tone of the post. All text must be in {language}."
-    )
+    """Backward compatibility wrapper. Use the new build_image_instruction_prompt."""
+    system_msg, user_msg = build_image_instruction_prompt(template_json, post.content or "", persona)
+    # Return combined message for backward compatibility
+    return f"{system_msg}\n\n{user_msg}"
 
 
 def _first_option(options: list, key: str):
@@ -1695,13 +1886,25 @@ def _first_option(options: list, key: str):
     return options[0].get(key) if isinstance(options[0], dict) else None
 
 
-def _validate_and_clamp_llm_instructions(template_json: dict, raw: dict) -> dict:
+def _validate_and_clamp_llm_instructions(template_json: dict, raw: dict, logger: logging.Logger | None = None) -> dict:
+    """
+    Validate LLM response strictly. Every value must come from template options.
+    Use first option as fallback. Log every fallback used.
+    
+    Background section always uses first background if missing or invalid.
+    Each layer that's missing from response uses first option for all fields.
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    
     bg_options = template_json.get("background_options") or []
     allowed_bg = {str(o.get("asset_id")) for o in bg_options if o.get("asset_id")}
     first_bg = str(bg_options[0].get("asset_id")) if bg_options else ""
 
     chosen_bg = str(raw.get("chosen_background_asset_id") or "").strip()
     if chosen_bg not in allowed_bg:
+        if chosen_bg:
+            logger.warning(f"Invalid background asset_id '{chosen_bg}', using fallback '{first_bg}'")
         chosen_bg = first_bg
 
     template_layers = {str(layer.get("id")): layer for layer in template_json.get("layers") or [] if layer.get("id")}
@@ -1714,6 +1917,9 @@ def _validate_and_clamp_llm_instructions(template_json: dict, raw: dict) -> dict
     for layer_id, layer in template_layers.items():
         layer_type = str(layer.get("type") or "").lower()
         incoming = raw_by_id.get(layer_id, {})
+        
+        if not incoming:
+            logger.warning(f"Layer {layer_id}: LLM did not return this layer, using all defaults")
 
         if layer_type == "text":
             font_options = layer.get("font_options") or []
@@ -1722,29 +1928,53 @@ def _validate_and_clamp_llm_instructions(template_json: dict, raw: dict) -> dict
             allowed_fonts = {str(f.get("font_asset_id")) for f in font_options if f.get("font_asset_id")}
             allowed_colors = {str(c.get("color_hex")).lower() for c in color_options if c.get("color_hex")}
 
+            # Font validation
             font_id = str(incoming.get("font_asset_id") or "").strip()
+            first_font = str(_first_option(font_options, "font_asset_id") or "")
             if font_id not in allowed_fonts:
-                font_id = str(_first_option(font_options, "font_asset_id") or "")
+                if font_id:
+                    logger.warning(f"Layer {layer_id}: LLM returned invalid font_asset_id '{font_id}', using fallback '{first_font}'")
+                font_id = first_font
 
+            # Color validation
             color_hex = str(incoming.get("color_hex") or "").strip().lower()
             if color_hex and not color_hex.startswith("#"):
                 color_hex = f"#{color_hex}"
+            first_color = str(_first_option(color_options, "color_hex") or "#ffffff")
             if color_hex.lower() not in allowed_colors:
-                color_hex = str(_first_option(color_options, "color_hex") or "#ffffff")
+                if color_hex:
+                    logger.warning(f"Layer {layer_id}: LLM returned invalid color_hex '{color_hex}', using fallback '{first_color}'")
+                color_hex = first_color
 
+            # Font size validation
             min_pct = float(layer.get("font_size_min_percent") or 1.0)
             max_pct = float(layer.get("font_size_max_percent") or min_pct)
             try:
                 font_size = float(incoming.get("font_size_percent"))
+                if font_size < min_pct or font_size > max_pct:
+                    clamped_size = max(min_pct, min(max_pct, font_size))
+                    logger.warning(f"Layer {layer_id}: LLM font_size_percent {font_size} outside range [{min_pct}, {max_pct}], clamped to {clamped_size}")
+                    font_size = clamped_size
             except (TypeError, ValueError):
                 font_size = (min_pct + max_pct) / 2.0
-            font_size = max(min_pct, min(max_pct, font_size))
+                logger.warning(f"Layer {layer_id}: LLM returned invalid font_size_percent, using midpoint {font_size}")
 
+            # Text align validation
             text_align = str(incoming.get("text_align") or "").strip().lower()
+            first_align = str(align_options[0]).lower() if align_options else "center"
             if text_align not in [str(a).lower() for a in align_options]:
-                text_align = str(align_options[0]).lower() if align_options else "center"
+                if text_align:
+                    logger.warning(f"Layer {layer_id}: LLM returned invalid text_align '{text_align}', using fallback '{first_align}'")
+                text_align = first_align
 
-            text = str(incoming.get("text") or "").strip() or " "
+            # Text content
+            text = str(incoming.get("text") or "").strip()
+            if not text:
+                role = layer.get("role") or "headline"
+                text_map = {"headline": "Your Headline Here", "subheadline": "Supporting text", "body": "Content"}
+                text = text_map.get(role, "Content")
+                logger.warning(f"Layer {layer_id}: LLM did not provide text, using default '{text}'")
+            
             clamped_layers.append(
                 {
                     "layer_id": layer_id,
@@ -1762,20 +1992,27 @@ def _validate_and_clamp_llm_instructions(template_json: dict, raw: dict) -> dict
                 for c in color_options
                 if c.get("color_hex") is not None
             }
+            
             color_hex = str(incoming.get("color_hex") or "").strip().lower()
             if color_hex and not color_hex.startswith("#"):
                 color_hex = f"#{color_hex}"
+            
             try:
                 opacity = float(incoming.get("opacity"))
             except (TypeError, ValueError):
-                opacity = float(color_options[0].get("opacity") if color_options else 0.35)
-
+                opacity = None
+            
+            first = color_options[0] if color_options else {}
+            first_color_hex = str(first.get("color_hex") or "#000000").lower()
+            if not first_color_hex.startswith("#"):
+                first_color_hex = f"#{first_color_hex}"
+            first_opacity = float(first.get("opacity") if first.get("opacity") is not None else 0.35)
+            
             if (color_hex, opacity) not in allowed:
-                first = color_options[0] if color_options else {}
-                color_hex = str(first.get("color_hex") or "#000000").lower()
-                if not color_hex.startswith("#"):
-                    color_hex = f"#{color_hex}"
-                opacity = float(first.get("opacity") if first.get("opacity") is not None else 0.35)
+                if color_hex or opacity is not None:
+                    logger.warning(f"Layer {layer_id}: LLM overlay values invalid, using fallback color={first_color_hex} opacity={first_opacity}")
+                color_hex = first_color_hex
+                opacity = first_opacity
 
             clamped_layers.append(
                 {
@@ -1982,30 +2219,40 @@ def _assemble_from_llm_instructions(
                 font_size_pct = (min_pct + max_pct) / 2.0
             font_px = max(10, int(round(font_size_pct * canvas_h / 100.0)))
             weight = str(layer.get("font_weight") or (font_asset.weight if font_asset else "regular"))
-            font = _get_font_for_asset(font_asset, weight, font_px)
+            font, script, font_path_used = _get_font_for_text(text_str, font_asset, weight, font_px)
             color = _parse_hex_color(str(instr.get("color_hex") or ""), default=(255, 255, 255, 255))
             align = str(instr.get("text_align") or "center").strip().lower()
             text_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(text_layer)
-            cursor_y = 0
-            for paragraph in text_str.splitlines() or [text_str]:
-                for line in _wrap_text(draw, paragraph, font, w):
-                    bbox = draw.textbbox((0, 0), line, font=font)
-                    tw = bbox[2] - bbox[0]
-                    th = bbox[3] - bbox[1]
-                    tx = max(0, (w - tw) // 2) if align == "center" else max(0, w - tw) if align == "right" else 0
-                    draw.text((tx, cursor_y), line, font=font, fill=color)
-                    cursor_y += th + max(3, int(font_px * 0.22))
-                    if cursor_y > h:
-                        break
-                if cursor_y > h:
-                    break
+            _draw_wrapped_text_layer(text_layer, text_str, font, font_px, color, align)
+            logger.info(
+                'Text layer %s: script=%s font=%s size=%spx text="%s"',
+                layer_id,
+                script,
+                font_path_used,
+                font_px,
+                text_str[:30],
+            )
             base = _composite_layer_onto_base(base, text_layer, x, y, w, h, rotation)
 
     return _image_to_png_bytes(base)
 
 
 def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
+    def split_long_token(token: str) -> list[str]:
+        pieces: list[str] = []
+        current_piece = ""
+        for char in token:
+            trial = f"{current_piece}{char}"
+            bbox = draw.textbbox((0, 0), trial, font=font)
+            if bbox[2] - bbox[0] <= max_width or not current_piece:
+                current_piece = trial
+            else:
+                pieces.append(current_piece)
+                current_piece = char
+        if current_piece:
+            pieces.append(current_piece)
+        return pieces
+
     words = text.split()
     lines: list[str] = []
     current = ""
@@ -2013,13 +2260,62 @@ def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, 
         trial = f"{current} {word}".strip()
         bbox = draw.textbbox((0, 0), trial, font=font)
         if bbox[2] - bbox[0] <= max_width or not current:
-            current = trial
+            if not current:
+                word_bbox = draw.textbbox((0, 0), word, font=font)
+                if word_bbox[2] - word_bbox[0] > max_width:
+                    pieces = split_long_token(word)
+                    lines.extend(pieces[:-1])
+                    current = pieces[-1] if pieces else ""
+                else:
+                    current = trial
+            else:
+                current = trial
         else:
             lines.append(current)
-            current = word
+            word_bbox = draw.textbbox((0, 0), word, font=font)
+            if word_bbox[2] - word_bbox[0] > max_width:
+                pieces = split_long_token(word)
+                lines.extend(pieces[:-1])
+                current = pieces[-1] if pieces else ""
+            else:
+                current = word
     if current:
         lines.append(current)
     return lines or [text]
+
+
+def _draw_wrapped_text_layer(
+    text_layer: Image.Image,
+    text: str,
+    font: ImageFont.ImageFont,
+    font_px: int,
+    color: tuple[int, int, int, int],
+    align: str,
+    *,
+    shadow: bool = False,
+) -> None:
+    draw = ImageDraw.Draw(text_layer)
+    w, h = text_layer.size
+    lines: list[str] = []
+    for paragraph in text.splitlines() or [text]:
+        lines.extend(_wrap_text(draw, paragraph, font, w))
+
+    line_gap = max(3, int(font_px * 0.22))
+    line_metrics: list[tuple[str, int, int]] = []
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_metrics.append((line, bbox[2] - bbox[0], bbox[3] - bbox[1]))
+    total_h = sum(item[2] for item in line_metrics) + max(0, len(line_metrics) - 1) * line_gap
+    cursor_y = max(0, (h - total_h) // 2)
+
+    for line, tw, th in line_metrics:
+        tx = max(0, (w - tw) // 2) if align == "center" else max(0, w - tw) if align == "right" else 0
+        if cursor_y + th > h:
+            break
+        if shadow:
+            draw.text((tx + 1, cursor_y + 1), line, font=font, fill=(0, 0, 0, 140))
+        draw.text((tx, cursor_y), line, font=font, fill=color)
+        cursor_y += th + line_gap
 
 
 def _assemble_template_image(
@@ -2075,25 +2371,19 @@ def _assemble_template_image(
             if not text_str:
                 continue
             font_px = max(10, int(round(float(layer.get("font_size_percent") or 5.0) * canvas_h / 100.0)))
-            font = _get_font(str(layer.get("font_weight") or "regular"), font_px)
+            font, script, font_path_used = _get_font_for_text(text_str, None, str(layer.get("font_weight") or "regular"), font_px)
             color = _parse_hex_color(str(layer.get("text_color_hex") or ""), default=(255, 255, 255, 255))
             align = str(layer.get("text_align") or "left").strip().lower()
             text_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(text_layer)
-            cursor_y = 0
-            for paragraph in text_str.splitlines() or [text_str]:
-                for line in _wrap_text(draw, paragraph, font, w):
-                    bbox = draw.textbbox((0, 0), line, font=font)
-                    tw = bbox[2] - bbox[0]
-                    th = bbox[3] - bbox[1]
-                    tx = max(0, (w - tw) // 2) if align == "center" else max(0, w - tw) if align == "right" else 0
-                    draw.text((tx + 1, cursor_y + 1), line, font=font, fill=(0, 0, 0, 140))
-                    draw.text((tx, cursor_y), line, font=font, fill=color)
-                    cursor_y += th + max(3, int(font_px * 0.22))
-                    if cursor_y > h:
-                        break
-                if cursor_y > h:
-                    break
+            _draw_wrapped_text_layer(text_layer, text_str, font, font_px, color, align, shadow=True)
+            logger.info(
+                'Text layer %s: script=%s font=%s size=%spx text="%s"',
+                str(layer.get("id") or layer_index),
+                script,
+                font_path_used,
+                font_px,
+                text_str[:30],
+            )
             layer_canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
             layer_canvas.paste(text_layer, (x, y), text_layer)
             base = Image.alpha_composite(base, layer_canvas)
@@ -2221,7 +2511,8 @@ async def _run_post_image_generation(
             print(f"[IMG-GEN] Uploading provided logo ({len(logo_bytes)} bytes)...")
             generation.logo_url = await _upload_to_supabase("generated-images", f"logos/{user_id}/logo.png", logo_bytes, "image/png")
         elif not generation.logo_url:
-            logo_url = persona.template_logo_url
+            settings = db.query(models.ImagePromptSettings).filter(models.ImagePromptSettings.persona_id == persona.id).first()
+            logo_url = settings.template_logo_url if settings else None
             if logo_url:
                 print(f"[IMG-GEN] Using persona's saved logo: {logo_url[:80]}...")
                 generation.logo_url = logo_url
@@ -2487,4 +2778,261 @@ def debug_template(
         "template_json": tpl,
         "layer_count": len(layers),
         "canvas_size": {"width": tpl.get("canvas_width"), "height": tpl.get("canvas_height")},
+    }
+
+
+from pydantic import BaseModel
+
+class TemplateTestRequest(BaseModel):
+    input_text: str
+
+@router.post("/api/image-templates/{template_id}/test-llm")
+async def test_image_template_llm(
+    template_id: str,
+    payload: TemplateTestRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    logger = logging.getLogger(__name__)
+    
+    # 1. Load the template
+    template = db.query(models.ImageTemplate).filter(
+        models.ImageTemplate.id == template_id,
+        models.ImageTemplate.user_id == current_user.id
+    ).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+        
+    template_json = _template_payload(template)
+    
+    # 2. Check if template has background options
+    background_options = template_json.get("background_options") or []
+    if not background_options:
+        raise HTTPException(
+            status_code=400,
+            detail="This template has no background options configured. Edit the template and add at least one background."
+        )
+        
+    # 3. Find/mock persona
+    persona = db.query(models.AIPersona).join(
+        models.PersonaImageTemplateAssignment,
+        models.PersonaImageTemplateAssignment.persona_id == models.AIPersona.id
+    ).filter(
+        models.PersonaImageTemplateAssignment.image_template_id == template.id,
+        models.AIPersona.user_id == current_user.id
+    ).first()
+    
+    if not persona:
+        persona = db.query(models.AIPersona).filter(models.AIPersona.user_id == current_user.id).first()
+        
+    if not persona:
+        class MockPersona:
+            id = -1
+            tone_tags = "clear, useful"
+            niche = "general"
+            language = "English"
+        persona = MockPersona()
+        
+    # 4. Build prompt using the new function
+    system_msg, user_msg = build_image_instruction_prompt(template_json, payload.input_text, persona)
+    full_prompt = f"{system_msg}\n\n{user_msg}"
+    
+    # 5. Generate LLM instructions
+    result = generate_post_text_for_user(
+        user_id=current_user.id,
+        prompt=user_msg,
+        system_prompt=system_msg,
+        temperature=0.6,
+        max_tokens=1200,
+        db=db,
+    )
+    if result is None:
+        result = generate_text(
+            prompt=user_msg,
+            system_prompt=system_msg,
+            model_name="gemini-2.0-flash",
+            provider_name="gemini",
+            api_key="",
+            temperature=0.6,
+            max_tokens=1200,
+        )
+    
+    # Parse and validate LLM response
+    try:
+        parsed = json.loads(_clean_json_response(result or "{}"))
+    except Exception:
+        try:
+            repaired = generate_text(
+                prompt=(
+                    "Fix this malformed JSON and return only raw valid JSON with no markdown:\n\n"
+                    f"{result}"
+                ),
+                system_prompt="Return only valid raw JSON.",
+                model_name="gemini-2.0-flash",
+                provider_name="gemini",
+                api_key="",
+                temperature=0.0,
+                max_tokens=1200,
+            )
+            parsed = json.loads(_clean_json_response(repaired or "{}"))
+        except Exception:
+            parsed = {}
+    
+    if not isinstance(parsed, dict):
+        parsed = {}
+    
+    # Validate with strict rules
+    llm_decisions = _validate_and_clamp_llm_instructions(template_json, parsed, logger)
+    
+    # Build enriched readable decisions for frontend display
+    bg_label = "Unknown"
+    for opt in template_json.get("background_options") or []:
+        if str(opt.get("asset_id")) == str(llm_decisions.get("chosen_background_asset_id")):
+            bg_label = opt.get("label") or "Unknown"
+            break
+            
+    readable_decisions = [f"Background chosen: {bg_label}"]
+    
+    # Also check logo note here
+    settings = db.query(models.ImagePromptSettings).filter(models.ImagePromptSettings.persona_id == persona.id).first()
+    logo_url = settings.template_logo_url if settings else None
+    if not logo_url:
+        readable_decisions.append("No logo set for this template")
+    else:
+        readable_decisions.append("Logo will be applied")
+        
+    for l_instr in llm_decisions.get("layers") or []:
+        layer_id = l_instr.get("layer_id")
+        t_layer = next((l for l in template_json.get("layers") or [] if str(l.get("id")) == str(layer_id)), None)
+        if not t_layer:
+            continue
+        role = t_layer.get("role") or t_layer.get("id") or "Text"
+        l_type = str(t_layer.get("type") or "").lower()
+        
+        if l_type == "text":
+            text_val = l_instr.get("text")
+            font_label = "System Font"
+            font_asset_id = l_instr.get("font_asset_id")
+            for f in t_layer.get("font_options") or []:
+                if str(f.get("font_asset_id")) == str(font_asset_id):
+                    font_label = f.get("label") or "System Font"
+                    break
+            color_hex = l_instr.get("color_hex")
+            color_label = color_hex
+            for c in t_layer.get("color_options") or []:
+                if str(c.get("color_hex")).lower() == str(color_hex).lower():
+                    color_label = c.get("label") or color_hex
+                    break
+            font_size = l_instr.get("font_size_percent")
+            readable_decisions.append(
+                f"{role.capitalize()}: '{text_val}' — {font_label}, {color_label}, {font_size}%"
+            )
+        elif l_type == "overlay":
+            color_hex = l_instr.get("color_hex")
+            color_label = color_hex
+            for c in t_layer.get("color_options") or []:
+                if str(c.get("color_hex")).lower() == str(color_hex).lower():
+                    color_label = c.get("label") or color_hex
+                    break
+            opacity = l_instr.get("opacity")
+            readable_decisions.append(
+                f"Overlay: {color_label} with {int(opacity * 100)}% opacity"
+            )
+            
+    return {
+        "prompt_sent": full_prompt,
+        "llm_decisions": llm_decisions,
+        "readable_decisions": readable_decisions
+    }
+
+
+class TemplateTestRenderRequest(BaseModel):
+    llm_decisions: dict
+
+@router.post("/api/image-templates/{template_id}/test-render")
+async def test_image_template_render(
+    template_id: str,
+    payload: TemplateTestRenderRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    # 1. Load the template
+    template = db.query(models.ImageTemplate).filter(
+        models.ImageTemplate.id == template_id,
+        models.ImageTemplate.user_id == current_user.id
+    ).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+        
+    template_json = _template_payload(template)
+    llm_decisions = payload.llm_decisions
+
+    # 2. Find/mock persona
+    persona = db.query(models.AIPersona).join(
+        models.PersonaImageTemplateAssignment,
+        models.PersonaImageTemplateAssignment.persona_id == models.AIPersona.id
+    ).filter(
+        models.PersonaImageTemplateAssignment.image_template_id == template.id,
+        models.AIPersona.user_id == current_user.id
+    ).first()
+    
+    if not persona:
+        persona = db.query(models.AIPersona).filter(models.AIPersona.user_id == current_user.id).first()
+        
+    if not persona:
+        class MockPersona:
+            id = -1
+        persona = MockPersona()
+
+    # 3. Load background asset and logo
+    canvas_w = int(template_json.get("canvas_width") or 1080)
+    canvas_h = int(template_json.get("canvas_height") or 1080)
+    bg_asset_id = str(llm_decisions.get("chosen_background_asset_id") or "")
+    
+    background_img = await _load_background_asset_image(db, current_user.id, bg_asset_id, canvas_w, canvas_h)
+    
+    settings = db.query(models.ImagePromptSettings).filter(models.ImagePromptSettings.persona_id == persona.id).first()
+    logo_url = settings.template_logo_url if settings else None
+    logo_bytes = None
+    
+    if logo_url:
+        try:
+            logo_bytes = await _download_bytes(logo_url)
+        except Exception as e:
+            pass
+            
+    # 4. Assemble the final image via PIL
+    try:
+        final_bytes = _assemble_from_llm_instructions(
+            template_json,
+            background_img,
+            logo_bytes,
+            llm_decisions,
+            db,
+            current_user.id,
+            layer_overrides=None
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"PIL assembly failed: {exc}"
+        )
+        
+    # 5. Upload to Supabase temporary path
+    object_path = f"template-tests/{template.id}/preview.png"
+    try:
+        await _delete_from_supabase("image-templates", object_path)
+    except Exception:
+        pass
+        
+    try:
+        preview_image_url = await _upload_to_supabase("image-templates", object_path, final_bytes, "image/png")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Upload to storage failed: {exc}"
+        )
+        
+    return {
+        "preview_image_url": preview_image_url
     }

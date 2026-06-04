@@ -436,6 +436,8 @@ async def publish_post_to_facebook(
             media.is_used = True
             media.used_in_post_id = post_log.id
             db.commit()
+    if not image_url and post_log.image_url:
+        image_url = post_log.image_url
 
     endpoint, params = _build_facebook_post_request(
         connection,

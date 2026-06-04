@@ -2164,6 +2164,54 @@ function TemplateLibraryView() {
   const [name, setName] = React.useState("")
   const [file, setFile] = React.useState<File | null>(null)
 
+  const [testingTemplate, setTestingTemplate] = React.useState<any | null>(null)
+  const [inputText, setInputText] = React.useState("")
+  const [isRunningTest, setIsRunningTest] = React.useState(false)
+  const [testLoadingText, setTestLoadingText] = React.useState("")
+  const [testResult, setTestResult] = React.useState<any | null>(null)
+  const [testError, setTestError] = React.useState<string | null>(null)
+  const [showPrompt, setShowPrompt] = React.useState(false)
+
+  async function runTemplateTest() {
+    if (!inputText.trim()) {
+      toast.error("Please enter a post or describe your content first.")
+      return
+    }
+    setIsRunningTest(true)
+    setTestError(null)
+    setTestResult(null)
+    setTestLoadingText("LLM is deciding styling…")
+
+    try {
+      // Step 1: LLM Styling Decisions
+      const llmResponse = await api.post(`/api/image-templates/${testingTemplate.id}/test-llm`, {
+        input_text: inputText.trim()
+      })
+      
+      const intermediateResult = llmResponse.data
+      setTestResult(intermediateResult) // Display readable decisions immediately
+      setTestLoadingText("Assembling photocard…")
+
+      // Step 2: Render Image via PIL
+      const renderResponse = await api.post(`/api/image-templates/${testingTemplate.id}/test-render`, {
+        llm_decisions: intermediateResult.llm_decisions
+      })
+
+      // Combine both results
+      setTestResult({
+        ...intermediateResult,
+        preview_image_url: renderResponse.data.preview_image_url
+      })
+      
+    } catch (err: any) {
+      const errMsg = err?.response?.data?.detail || err.message || "Test failed."
+      setTestError(errMsg)
+    } finally {
+      setIsRunningTest(false)
+      setTestLoadingText("")
+    }
+  }
+
   const loadTemplates = React.useCallback(async () => {
     setLoading(true)
     try {
@@ -2304,7 +2352,7 @@ function TemplateLibraryView() {
               <div className="col-span-2 text-center py-10 text-slate-500">No layout templates saved. Upload one to get started!</div>
             ) : (
               templates.map((tpl) => (
-                <button type="button" key={tpl.id} onClick={() => openTemplate(tpl.id)} className="text-left relative overflow-hidden rounded-lg border bg-white shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow">
+                <div key={tpl.id} className="text-left relative overflow-hidden rounded-lg border bg-white shadow-sm flex flex-col justify-between hover:shadow-md transition-shadow cursor-pointer group" onClick={() => openTemplate(tpl.id)}>
                   <div className="relative aspect-video w-full overflow-hidden bg-slate-100 border-b">
                     {tpl.reference_image_url ? (
                       <img src={tpl.reference_image_url} alt={tpl.name} className="h-full w-full object-cover" />
@@ -2318,17 +2366,32 @@ function TemplateLibraryView() {
                     ) : null}
                   </div>
                   <div className="p-4 flex items-center justify-between">
-                    <div>
-                      <h3 className="font-semibold text-slate-800">{tpl.name}</h3>
+                    <div className="mr-2 overflow-hidden">
+                      <h3 className="font-semibold text-slate-800 truncate">{tpl.name}</h3>
                       <p className="text-xs text-slate-500">
                         {tpl.aspect_ratio || "1:1"} · {new Date(tpl.created_at).toLocaleDateString()}
                       </p>
                     </div>
-                    <Button variant="ghost" size="icon" className="text-red-500 hover:text-red-700 hover:bg-red-50" onClick={(e) => { e.stopPropagation(); handleDelete(tpl.id) }}>
-                      <Trash2 className="size-4" />
-                    </Button>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 px-2.5 text-xs text-purple-700 border-purple-200 hover:bg-purple-50 hover:text-purple-800"
+                        onClick={(e) => { e.stopPropagation(); setTestingTemplate(tpl) }}
+                      >
+                        Test
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-red-500 hover:text-red-700 hover:bg-red-50"
+                        onClick={(e) => { e.stopPropagation(); handleDelete(tpl.id) }}
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
+                    </div>
                   </div>
-                </button>
+                </div>
               ))
             )}
           </CardContent>
@@ -2368,6 +2431,137 @@ function TemplateLibraryView() {
           </Card>
         </div>
       ) : null}
+
+      <Sheet open={testingTemplate !== null} onOpenChange={(open) => {
+        if (!open) {
+          setTestingTemplate(null)
+          setInputText("")
+          setTestResult(null)
+          setTestError(null)
+          setShowPrompt(false)
+        }
+      }}>
+        <SheetContent className="overflow-y-auto w-full max-w-lg">
+          <div className="mt-6 grid gap-4">
+            <h2 className="text-lg font-semibold flex items-center gap-2">
+              <Sparkles className="size-5 text-purple-600" />
+              Test Template: {testingTemplate?.name}
+            </h2>
+            <p className="text-sm text-slate-500">
+              Run a standalone test generation using LLM styling and PIL assembly. Nothing is saved.
+            </p>
+            
+            <div className="grid gap-2">
+              <Label htmlFor="test-content" className="text-sm font-medium">
+                Paste a post or describe your content
+              </Label>
+              <Textarea
+                id="test-content"
+                rows={4}
+                className="resize-none"
+                placeholder="e.g. 5 productivity tips every entrepreneur needs to know this year…"
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                disabled={isRunningTest}
+              />
+            </div>
+
+            <Button
+              className="bg-purple-700 hover:bg-purple-800 text-white w-full"
+              onClick={runTemplateTest}
+              disabled={isRunningTest || !inputText.trim()}
+            >
+              {isRunningTest ? (
+                <>
+                  <Loader2 className="size-4 animate-spin mr-2" />
+                  {testLoadingText}
+                </>
+              ) : (
+                "Run Test"
+              )}
+            </Button>
+
+            {/* Result Area */}
+            {(isRunningTest || testResult || testError) && (
+              <div className="mt-4 border-t pt-4 grid gap-3">
+                <h3 className="text-sm font-semibold text-slate-800">Result</h3>
+                
+                {/* Loader showing the exact phase */}
+                {isRunningTest && (
+                  <div className="rounded-md bg-slate-50 p-4 border flex items-center gap-3">
+                    <Loader2 className="size-5 animate-spin text-purple-700" />
+                    <span className="text-sm font-medium text-slate-700">
+                      {testLoadingText}
+                    </span>
+                  </div>
+                )}
+
+                {/* Error State */}
+                {testError && (
+                  <div className="rounded-md bg-red-50 p-4 border border-red-200 text-sm text-red-600 font-medium">
+                    <p className="font-semibold mb-1">Testing failed</p>
+                    <p className="whitespace-pre-wrap break-words">{testError}</p>
+                  </div>
+                )}
+
+                {/* Success Results */}
+                {testResult && (
+                  <div className="grid gap-4">
+                    {/* Collapsible Prompt Section */}
+                    {testResult.prompt_sent && (
+                      <div className="rounded-md border border-slate-200 bg-slate-50 overflow-hidden">
+                        <button
+                          type="button"
+                          onClick={() => setShowPrompt(!showPrompt)}
+                          className="w-full px-4 py-3 flex items-center justify-between hover:bg-slate-100 transition-colors text-sm font-medium text-slate-700"
+                        >
+                          <span>View Prompt Sent to LLM</span>
+                          <span className="text-xs text-slate-500">{showPrompt ? "▼" : "▶"}</span>
+                        </button>
+                        {showPrompt && (
+                          <div className="border-t border-slate-200 px-4 py-3 bg-slate-900 max-h-96 overflow-y-auto">
+                            <pre className="text-xs text-slate-200 font-mono whitespace-pre-wrap break-words">
+                              {testResult.prompt_sent}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* LLM Decisions readable list */}
+                    {testResult.readable_decisions && testResult.readable_decisions.length > 0 && (
+                      <div className="rounded-md bg-slate-50 p-4 border border-slate-200 text-sm text-slate-700">
+                        <p className="font-semibold text-slate-800 mb-2">LLM Styling Decisions:</p>
+                        <ul className="list-disc list-inside space-y-1">
+                          {testResult.readable_decisions.map((decision: string, idx: number) => (
+                            <li key={idx} className="leading-relaxed font-mono text-xs">{decision}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Final Image Rendering */}
+                    {testResult.preview_image_url && (
+                      <div className="grid gap-2">
+                        <div className="relative border rounded-lg overflow-hidden bg-slate-100">
+                          <img
+                            src={testResult.preview_image_url}
+                            alt="Photocard Preview"
+                            className="w-full h-auto object-contain"
+                          />
+                        </div>
+                        <p className="text-xs text-slate-500 text-center italic">
+                          This is a preview only. Nothing is saved.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </SheetContent>
+      </Sheet>
     </>
   )
 }

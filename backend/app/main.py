@@ -2040,6 +2040,9 @@ async def test_full_flow(
             models.ModelSettings.task_category == "post_generation"
         ).first()
 
+        db.commit()
+        db.refresh(post_log)
+
         return {
             "post_id": post_log.id,
             "content": content,
@@ -2079,8 +2082,19 @@ async def publish_test_to_facebook(
     if not connection:
         raise HTTPException(status_code=400, detail="No Facebook page connected for this post. Connect a page in Settings first.")
     try:
+        await verify_page_connection_for_publish(db, connection)
+        if post_log.image_url and not post_log.media_urls:
+            post_log.media_urls = [post_log.image_url]
+            db.commit()
         success = await publish_post_to_facebook(db, post_log, connection)
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=post_log.error_message or "Facebook rejected the post.",
+            )
         return {"success": success, "post_id": post_log.id, "status": post_log.status, "error_message": post_log.error_message}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

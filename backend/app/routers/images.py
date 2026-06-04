@@ -659,21 +659,54 @@ class GenerateLayeredRequest(BaseModel):
 
 
 def get_pillow_font(size: int):
-    font_names = [
+    """
+    Get a Pillow font that supports Unicode/CJK characters.
+    Tries multiple strategies to find a suitable font.
+    Falls back to system default if suitable fonts not found.
+    """
+    import os
+    
+    font_candidates = []
+    
+    # Strategy 1: Check Windows system fonts directory
+    windows_fonts = "C:\\Windows\\Fonts"
+    if os.path.isdir(windows_fonts):
+        # ArialUni supports a wide range of Unicode characters
+        arial_uni = os.path.join(windows_fonts, "ArialUni.ttf")
+        if os.path.isfile(arial_uni):
+            font_candidates.append(arial_uni)
+        
+        # Check for CJK-specific fonts (Windows versions)
+        cjk_fonts = ["msyh.ttf", "msyhl.ttf", "msjh.ttf", "msjhl.ttf", "arial.ttf"]
+        for font_file in cjk_fonts:
+            path = os.path.join(windows_fonts, font_file)
+            if os.path.isfile(path):
+                font_candidates.append(path)
+    
+    # Strategy 2: Add common cross-platform fonts
+    font_candidates.extend([
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+        "/System/Library/Fonts/Arial.ttf",
         "arial.ttf",
         "LiberationSans-Regular.ttf",
         "DejaVuSans.ttf",
-        "Roboto-Regular.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
-    ]
-    for font_name in font_names:
+    ])
+    
+    # Try each candidate
+    for font_path in font_candidates:
         try:
-            return ImageFont.truetype(font_name, size)
-        except IOError:
+            font = ImageFont.truetype(font_path, size)
+            return font
+        except (IOError, OSError, AttributeError):
             continue
-    return ImageFont.load_default()
+    
+    # Final fallback to default font
+    try:
+        return ImageFont.load_default(size=max(1, size // 11))
+    except (TypeError, IOError):
+        return ImageFont.load_default()
 
 
 @router.get("/templates")
