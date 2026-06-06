@@ -1437,6 +1437,14 @@ def _save_prompt_template_snapshot(db: Session, persona: models.AIPersona) -> No
     target.updated_at = datetime.now(timezone.utc)
 
 
+def _try_save_prompt_template_snapshot(db: Session, persona: models.AIPersona) -> None:
+    try:
+        with db.begin_nested():
+            _save_prompt_template_snapshot(db, persona)
+    except Exception as exc:
+        print(f"Persona saved, but prompt template snapshot failed for persona {persona.id}: {exc}")
+
+
 def _latest_learned_strategy_hint(db: Session, persona: models.AIPersona) -> str | None:
     strategy = (
         db.query(models.LearnedStrategy)
@@ -1709,7 +1717,7 @@ def create_ai_persona(
     persona.template_logo_url = payload.template_logo_url
     db.flush()
     _upsert_persona_template_settings(db, persona, payload)
-    _save_prompt_template_snapshot(db, persona)
+    _try_save_prompt_template_snapshot(db, persona)
     db.commit()
     db.refresh(persona)
     
@@ -1758,7 +1766,7 @@ def update_ai_persona(
     persona.template_logo_url = payload.template_logo_url
     _upsert_persona_template_settings(db, persona, payload)
     persona.updated_at = datetime.now(timezone.utc)
-    _save_prompt_template_snapshot(db, persona)
+    _try_save_prompt_template_snapshot(db, persona)
     db.commit()
     db.refresh(persona)
     

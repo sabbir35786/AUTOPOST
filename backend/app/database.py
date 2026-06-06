@@ -307,6 +307,18 @@ def _ensure_product_blueprint_columns() -> None:
         },
     )
     _add_missing_columns(
+        "prompt_templates",
+        {
+            "template_name": "varchar default 'Custom' not null",
+            "question_answers": "json default '{}' not null",
+            "assembled_prompt": "text",
+            "raw_prompt": "text",
+            "creativity_level": "integer default 7 not null",
+            "style_examples": "json default '[]' not null",
+            "updated_at": "timestamp",
+        },
+    )
+    _add_missing_columns(
         "post_image_generations",
         {
             "llm_instructions": "json default '{}' not null",
