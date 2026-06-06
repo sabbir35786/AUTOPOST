@@ -1397,8 +1397,8 @@ function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab,
   const [assigningTemplate, setAssigningTemplate] = React.useState(false)
 
   React.useEffect(() => {
-    if (!draft.id) return
     api.get("/api/image-templates").then((res) => setSavedTemplates(res.data || [])).catch(() => setSavedTemplates([]))
+    if (!draft.id) return
     api.get(`/api/personas/${draft.id}/assign-image-template`).then((res) => setAssignedTemplate(res.data)).catch(() => setAssignedTemplate({ image_template_id: null, name: null }))
   }, [draft.id])
 

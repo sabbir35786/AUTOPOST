@@ -1036,7 +1036,7 @@ async def generate_template_layered_image(
                 model_name=model_name,
                 api_key=api_key
             )
-        bg_bytes = await asyncio.to_thread(_generate())
+        bg_bytes = await asyncio.to_thread(_generate)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate background image: {str(e)}")
 
@@ -1444,7 +1444,7 @@ async def generate_layered_image(
                 model_name=model_name,
                 api_key=api_key
             )
-        bg_bytes = await asyncio.to_thread(_generate())
+        bg_bytes = await asyncio.to_thread(_generate)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate background image: {str(e)}")
 
