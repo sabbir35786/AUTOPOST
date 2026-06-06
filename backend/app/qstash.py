@@ -180,36 +180,33 @@ def schedule_post_delivery(*, persona_id: str | None = None, post_id: str | None
         return None
 
     try:
-        # Use the v2 SDK: client.message.publish_json(...)
-        response = client.message.publish_json(
-            url=callback_url,
-            body=payload,
-            delay=delay_seconds,
-        )
-        # SDK v2 returns an object with .message_id; fall back for older versions
-        message_id = (
-            getattr(response, "message_id", None)
-            or (response.get("messageId") if hasattr(response, "get") else None)
-        )
-        print(f"QStash message scheduled: {message_id} for {label} at {scheduled_at_utc}")
-        return message_id
-    except AttributeError:
-        # Older SDK: client.publish_json(...)
-        try:
+        if hasattr(client, "messages") and hasattr(client.messages, "create"):
+            # Use the v2 SDK
+            response = client.messages.create(
+                url=callback_url,
+                body=payload,
+                delay=delay_seconds,
+            )
+            message_id = getattr(response, "message_id", None)
+        elif hasattr(client, "message") and hasattr(client.message, "publish_json"):
+            # Older v2 SDK beta
+            response = client.message.publish_json(
+                url=callback_url,
+                body=payload,
+                delay=delay_seconds,
+            )
+            message_id = getattr(response, "message_id", None) or (response.get("messageId") if hasattr(response, "get") else None)
+        else:
+            # Older v1 SDK
             response = client.publish_json(
                 url=callback_url,
                 body=payload,
                 delay=delay_seconds,
             )
-            message_id = (
-                getattr(response, "message_id", None)
-                or (response.get("messageId") if hasattr(response, "get") else None)
-            )
-            print(f"QStash message scheduled (legacy API): {message_id} for {label}")
-            return message_id
-        except Exception as exc2:
-            print(f"Failed to schedule post delivery via QStash (legacy fallback): {exc2}")
-            return None
+            message_id = getattr(response, "message_id", None) or (response.get("messageId") if hasattr(response, "get") else None)
+        
+        print(f"QStash message scheduled: {message_id} for {label} at {scheduled_at_utc}")
+        return message_id
     except Exception as exc:
         print(f"Failed to schedule post delivery via QStash: {exc}")
         return None

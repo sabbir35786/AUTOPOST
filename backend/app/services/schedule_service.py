@@ -76,8 +76,7 @@ def get_todays_slots_for_persona(schedule: PersonaSchedule) -> list[datetime]:
     for time_str in times_to_use:
         hour, minute = map(int, time_str.split(":"))
         slot_local = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if slot_local > now:
-            slots.append(slot_local.astimezone(timezone.utc))
+        slots.append(slot_local.astimezone(timezone.utc))
     return slots
 
 
@@ -114,6 +113,14 @@ async def register_todays_slots(persona_id: int | str, db: Session) -> list[dict
         ScheduledSlot.scheduled_at <= today_end,
     ).all()
 
+    existing_non_pending = db.query(ScheduledSlot).filter(
+        ScheduledSlot.persona_id == persona_id_int,
+        ScheduledSlot.status.in_(["published", "generating", "failed", "missed"]),
+        ScheduledSlot.scheduled_at >= today_start,
+        ScheduledSlot.scheduled_at <= today_end,
+    ).all()
+    non_pending_times = set(slot.scheduled_at for slot in existing_non_pending)
+
     for slot in existing:
         if slot.qstash_message_id:
             cancel_scheduled_post(slot.qstash_message_id)
@@ -125,18 +132,22 @@ async def register_todays_slots(persona_id: int | str, db: Session) -> list[dict
     now_utc = datetime.now(timezone.utc)
 
     for slot_utc in slot_times:
-        delay_seconds = int((slot_utc - now_utc).total_seconds())
-        if delay_seconds < QSTASH_MIN_DELAY_SECONDS:
+        if slot_utc in non_pending_times:
             continue
 
-        message_id = schedule_post_delivery(
-            persona_id=str(persona_id_int),
-            scheduled_at_utc=slot_utc,
-        )
-
+        delay_seconds = int((slot_utc - now_utc).total_seconds())
+        message_id = None
         error_message = None
-        if not message_id:
-            error_message = "QStash scheduling failed — cron will retry at fire time"
+
+        if delay_seconds >= QSTASH_MIN_DELAY_SECONDS:
+            message_id = schedule_post_delivery(
+                persona_id=str(persona_id_int),
+                scheduled_at_utc=slot_utc,
+            )
+            if not message_id:
+                error_message = "QStash scheduling failed — cron will retry at fire time"
+        else:
+            error_message = "Time too close or in past — will be processed by fallback cron immediately"
 
         new_slot = ScheduledSlot(
             persona_id=persona_id_int,

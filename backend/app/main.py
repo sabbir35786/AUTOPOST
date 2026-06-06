@@ -1044,14 +1044,19 @@ def _schedule_persona_posts(db: Session, persona: models.AIPersona, user: models
     db.commit()
 
     import asyncio
+    async def schedule_and_process():
+        from app.services.schedule_service import register_todays_slots, process_due_persona_slots
+        await register_todays_slots(str(persona.id), db)
+        await process_due_persona_slots(db)
+
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            asyncio.ensure_future(register_todays_slots(str(persona.id), db))
+            asyncio.ensure_future(schedule_and_process())
         else:
-            loop.run_until_complete(register_todays_slots(str(persona.id), db))
+            loop.run_until_complete(schedule_and_process())
     except RuntimeError:
-        asyncio.run(register_todays_slots(str(persona.id), db))
+        asyncio.run(schedule_and_process())
 
     print(f"Schedule saved and today's slots registered for persona {persona.persona_name}")
 

@@ -44,10 +44,7 @@ def _find_slot_for_webhook(db: Session, persona_id: int, scheduled_at_str: str |
 
     if scheduled_at_str:
         scheduled_at = datetime.fromisoformat(scheduled_at_str)
-        if scheduled_at.tzinfo is None:
-            scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
-        else:
-            scheduled_at = scheduled_at.astimezone(timezone.utc)
+        scheduled_at = _normalize_scheduled_at(scheduled_at)
         window_start = scheduled_at - timedelta(seconds=60)
         window_end = scheduled_at + timedelta(seconds=60)
         return (
