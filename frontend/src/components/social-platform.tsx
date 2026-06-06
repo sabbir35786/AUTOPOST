@@ -420,11 +420,16 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
     }
   }, [])
 
+  const hasActiveSlots = dashboardData?.todays_slots?.some(
+    (slot) => slot.status === "pending" || slot.status === "generating"
+  )
+
   React.useEffect(() => {
     fetchDashboard()
-    const interval = setInterval(fetchDashboard, 30000) // 30s auto-refresh
+    const intervalMs = hasActiveSlots ? 5000 : 30000
+    const interval = setInterval(fetchDashboard, intervalMs)
     return () => clearInterval(interval)
-  }, [fetchDashboard])
+  }, [fetchDashboard, hasActiveSlots])
 
   if (!pages.length) return (
     <>
@@ -459,15 +464,19 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
                   </div>
                   <div className="flex flex-col items-end">
                     <span className={cn(
-                      "text-xs px-2 py-1 rounded-full font-medium",
+                      "text-xs px-2 py-1 rounded-full font-medium capitalize",
                       slot.status === "pending" ? "bg-amber-100 text-amber-700" :
                       slot.status === "generating" ? "bg-blue-100 text-blue-700" :
                       slot.status === "publishing" ? "bg-purple-100 text-purple-700" :
                       slot.status === "published" ? "bg-green-100 text-green-700" :
-                      "bg-red-100 text-red-700"
+                      slot.status === "failed" ? "bg-red-100 text-red-700" :
+                      "bg-slate-100 text-slate-600"
                     )}>
                       {slot.status}
                     </span>
+                    {!slot.qstash_scheduled && slot.status === "pending" ? (
+                      <span className="text-[10px] text-amber-600">cron fallback</span>
+                    ) : null}
                     {slot.error_message && <span className="text-[10px] text-red-500 max-w-[120px] truncate" title={slot.error_message}>{slot.error_message}</span>}
                   </div>
                 </div>
@@ -1287,6 +1296,7 @@ function applyTemplate(persona: AIPersona, template: string): AIPersona {
 }
 
 function AISettingsView({ pages }: { pages: PageConnection[] }) {
+  const router = useRouter()
   const { user } = useAuth()
   const userTimezone = user?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
   const [selectedPageId, setSelectedPageId] = React.useState<number | null>(pages[0]?.id ?? null)
@@ -1429,12 +1439,25 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
       const saved = response.data
       if (saved.id) {
         try {
-          await api.post(`/api/personas/${saved.id}/schedule`, {
-            timezone: scheduleDraft.timezone,
-            active_days: scheduleDraft.active_days,
-            default_times: scheduleDraft.default_times,
-            day_overrides: scheduleDraft.day_overrides,
-          })
+          const scheduleRes = await api.post<{ slots?: { scheduled_at?: string; status: string }[]; warning?: string }>(
+            `/api/personas/${saved.id}/schedule`,
+            {
+              timezone: userTimezone,
+              active_days: scheduleDraft.active_days,
+              default_times: scheduleDraft.default_times,
+              day_overrides: scheduleDraft.day_overrides,
+            }
+          )
+          const slots = scheduleRes.data.slots || []
+          if (showToast) {
+            if (slots.length) {
+              toast.success(`${slots.length} slot(s) registered for today. Check the dashboard.`)
+            } else if (scheduleRes.data.warning) {
+              toast.warning(scheduleRes.data.warning)
+            } else {
+              toast.warning("Schedule saved. No slots for today — check active days include today and time is at least 30 seconds ahead.")
+            }
+          }
         } catch (scheduleError: any) {
           console.error("Schedule save failed:", scheduleError)
           if (showToast) {
@@ -1444,7 +1467,6 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
       }
       setEditing(saved)
       await loadPersonas()
-      if (showToast) toast.success("AI persona and schedule saved.")
       return saved
     } finally {
       setSaving(false)
@@ -1455,6 +1477,7 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
       await savePersona(true)
       setEditing(null)
       setPrefilled(false)
+      router.push("/dashboard")
     } catch (error: any) {
       toast.error(error?.response?.data?.detail || error.message || "Could not save AI persona.")
     }

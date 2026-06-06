@@ -7,10 +7,15 @@ from sqlalchemy import func
 from app import models, schemas
 from app.database import get_db
 from app.config import APP_BASE_URL, BACKEND_URL
-from app.services.schedule_service import register_all_todays_slots, register_todays_slots, normalize_active_days, normalize_day_name
+from app.services.schedule_service import (
+    register_all_todays_slots,
+    register_todays_slots,
+    normalize_active_days,
+    normalize_day_name,
+    get_today_bounds_utc,
+)
+from app.services.slot_publish_service import execute_slot_publish
 from app.qstash import cancel_scheduled_post, verify_qstash_signature
-from app.posts import generate_persona_post_with_user_model, publish_post_to_facebook
-from app.services.publish_image_service import maybe_generate_image_for_post
 from pydantic import BaseModel
 from zoneinfo import ZoneInfo
 from datetime import timezone
@@ -38,7 +43,11 @@ def _find_slot_for_webhook(db: Session, persona_id: int, scheduled_at_str: str |
     )
 
     if scheduled_at_str:
-        scheduled_at = _normalize_scheduled_at(datetime.fromisoformat(scheduled_at_str))
+        scheduled_at = datetime.fromisoformat(scheduled_at_str)
+        if scheduled_at.tzinfo is None:
+            scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+        else:
+            scheduled_at = scheduled_at.astimezone(timezone.utc)
         window_start = scheduled_at - timedelta(seconds=60)
         window_end = scheduled_at + timedelta(seconds=60)
         return (
@@ -98,95 +107,10 @@ async def publish_post_webhook(request: Request, db: Session = Depends(get_db)):
     if not slot:
         return {"status": "skipped", "reason": "No matching slot found"}
 
-    # Idempotency: slot already completed
-    if slot.status == "published":
-        return {"status": "already_published", "slot_id": str(slot.id)}
-
-    if slot.post_id:
-        existing_post = db.get(models.PostLog, slot.post_id)
-        if existing_post and existing_post.status in ("published", "success"):
-            slot.status = "published"
-            db.commit()
-            return {"status": "already_published", "post_id": existing_post.id}
-
-    slot.status = "generating"
-    db.commit()
-
-    post_log = None
-    try:
-        persona = db.get(models.AIPersona, persona_id)
-        if not persona:
-            raise Exception("Persona not found")
-
-        connection = db.get(models.FacebookConnection, persona.page_connection_id)
-        if not connection:
-            raise Exception("Facebook connection not found")
-
-        print(f"[Publish] Generating post for persona {persona_id}")
-        recent_topics = []
-        post_content = generate_persona_post_with_user_model(db, persona, recent_topics)
-
-        post_log = models.PostLog(
-            user_id=persona.user_id,
-            facebook_connection_id=persona.page_connection_id,
-            ai_persona_id=persona.id,
-            content=post_content,
-            status="publishing",
-            delivery_status="delivering",
-            auto_generated=True,
-            ai_generated=True,
-        )
-        db.add(post_log)
-        db.flush()
-
-        skip_reason = await maybe_generate_image_for_post(db, persona, post_log)
-        if skip_reason:
-            post_log.status = "missed"
-            post_log.error_message = skip_reason
-            post_log.delivery_status = "failed"
-            slot.status = "failed"
-            slot.error_message = skip_reason
-            db.commit()
-            return {"status": "skipped", "reason": skip_reason}
-
-        print(f"[Publish] Publishing to Facebook for persona {persona_id}")
-        success = await publish_post_to_facebook(db, post_log, connection)
-
-        if not success:
-            raise Exception(f"Facebook publish failed: {post_log.error_message}")
-
-        post_log.status = "published"
-        post_log.delivery_status = "delivered"
-        persona.total_posts_published = (persona.total_posts_published or 0) + 1
-        persona.last_auto_post_at = datetime.now(timezone.utc)
-
-        slot.status = "published"
-        slot.post_id = post_log.id
-        slot.error_message = None
-        db.commit()
-
-        print(f"[Publish] Successfully published for persona {persona_id}, post {post_log.id}")
-        return {"status": "published", "post_id": post_log.id}
-
-    except Exception as e:
-        db.rollback()
-        slot = db.get(models.ScheduledSlot, slot.id)
-        post_log = db.get(models.PostLog, post_log.id) if post_log and post_log.id else None
-
-        # Recover: Facebook publish succeeded but slot update failed
-        if post_log and post_log.status in ("published", "success") and post_log.facebook_post_id:
-            slot.status = "published"
-            slot.post_id = post_log.id
-            slot.error_message = None
-            db.commit()
-            print(f"[Publish] Recovered slot {slot.id} — post {post_log.id} was already on Facebook")
-            return {"status": "published", "post_id": post_log.id, "recovered": True}
-
-        slot.status = "failed"
-        slot.error_message = str(e)
-        db.commit()
-        print(f"[Publish] Failed for persona {persona_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    result = await execute_slot_publish(db, slot)
+    if result.get("status") == "failed":
+        raise HTTPException(status_code=500, detail=result.get("reason", "Publish failed"))
+    return result
 
 from app.auth import get_current_user
 
@@ -259,20 +183,24 @@ async def save_persona_schedule(
         db.add(schedule)
     db.commit()
     
-    slots_registered = 0
+    slots_registered: list[dict] = []
     if persona.is_active:
         try:
-            await register_todays_slots(persona_id, db)
-            slots_registered = 1
+            slots_registered = await register_todays_slots(persona_id, db)
         except Exception as exc:
             print(f"[Schedule] Persona {persona_id} saved but slot registration failed: {exc}")
             return {
                 "status": "saved",
                 "message": "Schedule saved; slot registration failed — will retry at midnight.",
                 "warning": str(exc),
+                "slots": [],
             }
-    
-    return {"status": "saved", "message": "Schedule saved and today's slots registered", "slots_registered": slots_registered}
+
+    return {
+        "status": "saved",
+        "message": "Schedule saved and today's slots registered",
+        "slots": slots_registered,
+    }
 
 @router.delete("/api/personas/{persona_id}/schedule")
 async def delete_persona_schedule(
@@ -334,17 +262,22 @@ def _effective_slot_status(slot: models.ScheduledSlot, db: Session) -> str:
 @router.get("/api/dashboard")
 async def get_dashboard(
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user=Depends(get_current_user),
 ):
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0)
-    today_end = datetime.utcnow().replace(hour=23, minute=59, second=59)
-    
-    # Today's slots only
-    todays_slots = db.query(models.ScheduledSlot).join(models.AIPersona).filter(
-        models.AIPersona.user_id == current_user.id,
-        models.ScheduledSlot.scheduled_at >= today_start,
-        models.ScheduledSlot.scheduled_at <= today_end
-    ).order_by(models.ScheduledSlot.scheduled_at.asc()).all()
+    user_tz = current_user.timezone or "Asia/Dhaka"
+    today_start, today_end = get_today_bounds_utc(user_tz)
+
+    todays_slots = (
+        db.query(models.ScheduledSlot)
+        .join(models.AIPersona)
+        .filter(
+            models.AIPersona.user_id == current_user.id,
+            models.ScheduledSlot.scheduled_at >= today_start,
+            models.ScheduledSlot.scheduled_at <= today_end,
+        )
+        .order_by(models.ScheduledSlot.scheduled_at.asc())
+        .all()
+    )
     
     recent_posts = db.query(models.PostLog).filter(
         models.PostLog.user_id == current_user.id,
@@ -372,9 +305,10 @@ async def get_dashboard(
             {
                 "id": str(slot.id),
                 "persona_name": slot.persona.persona_name if slot.persona else "Unknown",
-                "scheduled_at_local": convert_to_user_timezone(slot.scheduled_at, current_user.timezone),
+                "scheduled_at_local": convert_to_user_timezone(slot.scheduled_at, user_tz),
                 "status": _effective_slot_status(slot, db),
-                "error_message": slot.error_message
+                "error_message": slot.error_message,
+                "qstash_scheduled": bool(slot.qstash_message_id),
             }
             for slot in todays_slots
         ],

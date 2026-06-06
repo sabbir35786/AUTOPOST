@@ -676,6 +676,9 @@ async def run_scheduled_posts() -> None:
             db.commit()
             await publish_post_to_facebook(db, post_log, connection)
 
+        from app.services.schedule_service import process_due_persona_slots
+        await process_due_persona_slots(db)
+
         schedules = db.query(models.Schedule).filter(models.Schedule.active.is_(True)).all()
         for schedule in schedules:
             should_post, local_today = schedule_matches_now(schedule, now_utc)
