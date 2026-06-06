@@ -133,9 +133,12 @@ def setup_midnight_schedule():
         print(f"[Scheduler] ✗ Failed to create midnight job: {e}")
 
 
-def schedule_post_delivery(persona_id: str, scheduled_at_utc: datetime) -> str | None:
+def schedule_post_delivery(*, persona_id: str | None = None, post_id: str | None = None, scheduled_at_utc: datetime) -> str | None:
     """
     Register a post for delivery at a specific UTC datetime via QStash.
+    
+    For the new slot-based system, pass persona_id.
+    For legacy manual post scheduling, pass post_id.
     Returns the QStash message ID for tracking, or None on failure.
     """
     client = get_qstash_client()
@@ -157,12 +160,25 @@ def schedule_post_delivery(persona_id: str, scheduled_at_utc: datetime) -> str |
         return None
 
     callback_url = f"{BACKEND_URL.rstrip('/')}/api/webhooks/publish-post"
+    
+    # Build payload based on which ID was provided
+    if persona_id:
+        payload = {"persona_id": persona_id, "scheduled_at": scheduled_at_utc.isoformat()}
+        label = f"persona {persona_id}"
+    elif post_id:
+        # Legacy: the old webhook reads post_id from the body
+        callback_url = f"{BACKEND_URL.rstrip('/')}/api/webhooks/publish-post-old"
+        payload = {"post_id": post_id}
+        label = f"post {post_id}"
+    else:
+        print("schedule_post_delivery called without persona_id or post_id — skipping.")
+        return None
 
     try:
         # Use the v2 SDK: client.message.publish_json(...)
         response = client.message.publish_json(
             url=callback_url,
-            body={"persona_id": persona_id, "scheduled_at": scheduled_at_utc.isoformat()},
+            body=payload,
             delay=delay_seconds,
         )
         # SDK v2 returns an object with .message_id; fall back for older versions
@@ -170,21 +186,21 @@ def schedule_post_delivery(persona_id: str, scheduled_at_utc: datetime) -> str |
             getattr(response, "message_id", None)
             or (response.get("messageId") if hasattr(response, "get") else None)
         )
-        print(f"QStash message scheduled: {message_id} for persona {persona_id} at {scheduled_at_utc}")
+        print(f"QStash message scheduled: {message_id} for {label} at {scheduled_at_utc}")
         return message_id
     except AttributeError:
         # Older SDK: client.publish_json(...)
         try:
             response = client.publish_json(
                 url=callback_url,
-                body={"persona_id": persona_id, "scheduled_at": scheduled_at_utc.isoformat()},
+                body=payload,
                 delay=delay_seconds,
             )
             message_id = (
                 getattr(response, "message_id", None)
                 or (response.get("messageId") if hasattr(response, "get") else None)
             )
-            print(f"QStash message scheduled (legacy API): {message_id} for persona {persona_id}")
+            print(f"QStash message scheduled (legacy API): {message_id} for {label}")
             return message_id
         except Exception as exc2:
             print(f"Failed to schedule post delivery via QStash (legacy fallback): {exc2}")

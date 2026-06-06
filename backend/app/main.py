@@ -1081,63 +1081,46 @@ VALID_PRIORITIES = ["High", "Normal", "Low"]
 
 def _schedule_persona_posts(db: Session, persona: models.AIPersona, user: models.User) -> None:
     """
-    Schedule the next 7 posts for a persona using QStash.
-    This implements Phase 1 of the QStash workflow.
+    Upsert the PersonaSchedule for this persona and register today's slots.
+    Uses the new 'today's slots only' architecture.
     """
     if not persona.assigned_days or not persona.posting_time_slots:
         return
     
-    # Cancel existing scheduled posts for this persona
-    existing_posts = (
-        db.query(models.PostLog)
-        .filter(
-            models.PostLog.ai_persona_id == persona.id,
-            models.PostLog.status == "scheduled",
-            models.PostLog.scheduled_at > datetime.now(timezone.utc),
-        )
-        .all()
-    )
-    for post in existing_posts:
-        if post.qstash_message_id:
-            cancel_scheduled_post(post.qstash_message_id)
-        post.qstash_message_id = None
-        post.delivery_status = "cancelled"
-    db.commit()
-    
-    # Calculate next 7 posting datetimes
     assigned_days_list = [day.strip() for day in persona.assigned_days.split(",") if day.strip()]
-    posting_datetimes = calculate_next_posting_datetimes(
-        assigned_days=assigned_days_list,
-        posting_time_slots=persona.posting_time_slots or ["09:00"],
-        timezone_str=user.timezone,
-        count=7,
-    )
     
-    # Create post entries and schedule with QStash
-    for scheduled_at in posting_datetimes:
-        post_log = models.PostLog(
-            user_id=persona.user_id,
-            facebook_connection_id=persona.page_connection_id,
-            ai_persona_id=persona.id,
-            content="",  # Will be generated at posting time
-            status="scheduled",
-            scheduled_at=scheduled_at,
-            delivery_status="pending",
+    # Upsert PersonaSchedule
+    schedule = db.query(models.PersonaSchedule).filter_by(persona_id=persona.id).first()
+    if schedule:
+        schedule.days_of_week = assigned_days_list
+        schedule.post_times = persona.posting_time_slots or ["09:00"]
+        schedule.timezone = user.timezone
+        schedule.is_active = persona.is_active
+        schedule.updated_at = datetime.now(timezone.utc)
+    else:
+        schedule = models.PersonaSchedule(
+            persona_id=persona.id,
+            days_of_week=assigned_days_list,
+            post_times=persona.posting_time_slots or ["09:00"],
+            timezone=user.timezone,
+            is_active=persona.is_active,
         )
-        db.add(post_log)
-        db.flush()
-        
-        # Schedule with QStash
-        qstash_id = schedule_post_delivery(post_id=str(post_log.id), scheduled_at_utc=scheduled_at)
-        if qstash_id:
-            post_log.qstash_message_id = qstash_id
-            post_log.delivery_status = "pending"
-        else:
-            post_log.delivery_status = "failed"
-            post_log.error_message = "Failed to schedule with QStash"
-    
+        db.add(schedule)
     db.commit()
-    print(f"Scheduled {len(posting_datetimes)} posts for persona {persona.persona_name}")
+    
+    # Cancel any existing pending slots for today, then re-register
+    from app.services.schedule_service import register_todays_slots
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(register_todays_slots(str(persona.id), db))
+        else:
+            loop.run_until_complete(register_todays_slots(str(persona.id), db))
+    except RuntimeError:
+        asyncio.run(register_todays_slots(str(persona.id), db))
+    
+    print(f"Schedule saved and today's slots registered for persona {persona.persona_name}")
 
 
 def _serialize_ai_persona(persona: models.AIPersona) -> dict:
@@ -1730,9 +1713,12 @@ def create_ai_persona(
     db.commit()
     db.refresh(persona)
     
-    # Schedule next 7 posts with QStash if persona has schedule
+    # Keep persona saves independent from external scheduler/QStash failures.
     if assigned_days and posting_time_slots and persona.is_active:
-        _schedule_persona_posts(db, persona, current_user)
+        try:
+            _schedule_persona_posts(db, persona, current_user)
+        except Exception as exc:
+            print(f"Persona saved, but schedule registration failed for persona {persona.id}: {exc}")
     
     return _serialize_ai_persona(persona)
 
@@ -1776,9 +1762,12 @@ def update_ai_persona(
     db.commit()
     db.refresh(persona)
     
-    # Schedule next 7 posts with QStash if persona has schedule
+    # Keep persona saves independent from external scheduler/QStash failures.
     if assigned_days and posting_time_slots and persona.is_active:
-        _schedule_persona_posts(db, persona, current_user)
+        try:
+            _schedule_persona_posts(db, persona, current_user)
+        except Exception as exc:
+            print(f"Persona saved, but schedule registration failed for persona {persona.id}: {exc}")
     
     return _serialize_ai_persona(persona)
 

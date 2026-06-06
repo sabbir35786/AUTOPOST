@@ -271,6 +271,8 @@ def _ensure_product_blueprint_columns() -> None:
             "image_prompt_source": "varchar default 'persona_prompt' not null",
             "image_fallback_policy": "varchar default 'text_only' not null",
             "image_max_wait_seconds": "integer default 120 not null",
+            "template_image_generation_enabled": "boolean default false not null",
+            "template_logo_url": "text",
         },
     )
     _add_missing_columns(
@@ -292,6 +294,16 @@ def _ensure_product_blueprint_columns() -> None:
         "image_templates",
         {
             "creation_method": "varchar default 'extracted' not null",
+            "updated_at": "timestamp",
+        },
+    )
+    _add_missing_columns(
+        "image_prompt_settings",
+        {
+            "reference_image_url": "text",
+            "template_layers_json": "json",
+            "template_analyzed_at": "timestamp",
+            "template_logo_url": "text",
         },
     )
     _add_missing_columns(
@@ -444,6 +456,8 @@ def _migrate_ai_page_settings_to_personas() -> None:
             "image_prompt_source": "varchar default 'persona_prompt' not null",
             "image_fallback_policy": "varchar default 'text_only' not null",
             "image_max_wait_seconds": "integer default 120 not null",
+            "template_image_generation_enabled": "boolean default false not null",
+            "template_logo_url": "text",
         },
     )
 
