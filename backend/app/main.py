@@ -345,6 +345,11 @@ async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(g
                 detail="Post not found",
             )
 
+        # Fetch persona if available
+        persona = None
+        if post_log.ai_persona_id:
+            persona = db.get(models.AIPersona, post_log.ai_persona_id)
+
         # 5. Idempotency guard — do not double-publish
         if post_log.status in ["published", "success"]:
             print(f"QStash webhook: Post {post_id} already published — returning 200 (idempotent)")
@@ -366,46 +371,225 @@ async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(g
 
         # 7. Generate content if empty (on-the-fly generation)
         if not post_log.content or not post_log.content.strip():
-            if post_log.ai_persona_id:
-                persona = db.get(models.AIPersona, post_log.ai_persona_id)
-                if persona:
-                    try:
-                        # Fetch recent topics for variety
-                        recent_topics = [
-                            row[0]
-                            for row in db.query(models.PostLog.topic)
-                            .filter(
-                                models.PostLog.facebook_connection_id == connection.id,
-                                models.PostLog.topic.isnot(None),
+            if persona:
+                try:
+                    # Fetch recent topics for variety
+                    recent_topics = [
+                        row[0]
+                        for row in db.query(models.PostLog.topic)
+                        .filter(
+                            models.PostLog.facebook_connection_id == connection.id,
+                            models.PostLog.topic.isnot(None),
+                        )
+                        .order_by(models.PostLog.created_at.desc())
+                        .limit(5)
+                        .all()
+                    ]
+                    
+                    content = generate_persona_post_with_user_model(
+                        db=db,
+                        settings=persona,
+                        recent_topics=recent_topics,
+                    )
+                    post_log.content = content
+                    
+                    # Extract topic for learning
+                    from app.mistral_service import extract_post_topic
+                    post_log.topic = extract_post_topic(content)
+                    
+                    db.commit()
+                    print(f"Generated content for persona {persona.persona_name}")
+                except Exception as e:
+                    print(f"Failed to generate content: {e}")
+                    post_log.status = "failed"
+                    post_log.error_message = f"Content generation failed: {str(e)}"
+                    post_log.delivery_status = "failed"
+                    db.commit()
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Content generation failed",
+                    )
+
+        # 7.5. Optional: Image Generation Layer
+        if persona and persona.include_image and not post_log.media_library_id and not post_log.image_url:
+            import time
+            import asyncio
+            import uuid
+            from app.routers.images import async_upload_to_supabase, generate_template_layered_image
+            from app.providers.image_providers import get_image_provider_for_user
+
+            user = db.get(models.User, persona.user_id)
+            if user:
+                local_now = datetime.now(timezone.utc).astimezone(ZoneInfo(user.timezone))
+                
+                # Check frequency
+                total_posts = persona.total_posts_published
+                should_generate = False
+                freq = persona.image_frequency
+                if freq == "every_post":
+                    should_generate = True
+                elif freq == "every_other" and total_posts % 2 == 0:
+                    should_generate = True
+                elif freq == "1_in_3" and total_posts % 3 == 2:
+                    should_generate = True
+                elif freq == "1_in_5" and total_posts % 5 == 4:
+                    should_generate = True
+                elif freq == "weekends_only" and local_now.weekday() >= 5:
+                    should_generate = True
+
+                if should_generate:
+                    # Check if template-based generation is enabled
+                    if persona.template_image_generation_enabled:
+                        template_settings = db.query(models.ImagePromptSettings).filter(
+                            models.ImagePromptSettings.persona_id == persona.id
+                        ).first()
+
+                        if template_settings and template_settings.template_layers_json:
+                            try:
+                                media_id, image_url = await generate_template_layered_image(
+                                    persona_id=persona.id,
+                                    post_text=post_log.content,
+                                    topic_hint=post_log.topic,
+                                    db=db,
+                                    user_id=persona.user_id
+                                )
+                                post_log.media_library_id = media_id
+                                print(f"Template image generation for persona {persona.persona_name}: status=success")
+                            except Exception as e:
+                                print(f"Template image generation for persona {persona.persona_name}: status=failed error={str(e)}")
+                                if persona.image_fallback_policy == "skip_post":
+                                    post_log.status = "missed"
+                                    post_log.error_message = f"template_image_generation_failed: {str(e)}"
+                                    post_log.delivery_status = "failed"
+                                    db.commit()
+                                    
+                                    # Register next occurrence so rolling window continues
+                                    if persona.assigned_days and persona.posting_time_slots and persona.is_active:
+                                        _register_next_occurrence(db, persona, user, post_log.scheduled_at)
+                                    return {"status": "skipped", "message": "Post skipped due to image generation failure fallback policy"}
+                                elif persona.image_fallback_policy == "use_library":
+                                    any_unused = db.query(models.MediaLibrary).filter(
+                                        models.MediaLibrary.user_id == persona.user_id,
+                                        models.MediaLibrary.is_used == False
+                                    ).order_by(models.MediaLibrary.created_at.asc()).first()
+                                    if any_unused:
+                                        post_log.media_library_id = str(any_unused.id)
+                        else:
+                            print(f"Template not analyzed for persona {persona.persona_name}, falling back to simple generation")
+
+                    if not post_log.media_library_id:
+                        # Simple image generation
+                        image_prompt = None
+                        if persona.image_prompt_source == "persona_prompt":
+                            psettings = db.query(models.ImagePromptSettings).filter(models.ImagePromptSettings.persona_id == persona.id).first()
+                            if psettings and psettings.assembled_prompt:
+                                image_prompt = psettings.assembled_prompt
+                        elif persona.image_prompt_source == "generate_from_post":
+                            sys_p = "You are an expert at writing prompts for AI image generation. Given a social media post text, write a detailed image generation prompt that would create the perfect visual to accompany that post. The image should enhance the post's message without containing any text. Return only the image generation prompt, nothing else, maximum 150 words."
+                            image_prompt = generate_text_for_user(
+                                user_id=persona.user_id,
+                                task_category="image_prompt_generation",
+                                prompt=post_log.content,
+                                system_prompt=sys_p,
+                                db=db,
+                                temperature=0.7,
+                                max_tokens=200,
                             )
-                            .order_by(models.PostLog.created_at.desc())
-                            .limit(5)
-                            .all()
-                        ]
-                        
-                        content = generate_persona_post_with_user_model(
-                            db=db,
-                            settings=persona,
-                            recent_topics=recent_topics,
-                        )
-                        post_log.content = content
-                        
-                        # Extract topic for learning
-                        from app.mistral_service import extract_post_topic
-                        post_log.topic = extract_post_topic(content)
-                        
-                        db.commit()
-                        print(f"Generated content for persona {persona.persona_name}")
-                    except Exception as e:
-                        print(f"Failed to generate content: {e}")
-                        post_log.status = "failed"
-                        post_log.error_message = f"Content generation failed: {str(e)}"
-                        post_log.delivery_status = "failed"
-                        db.commit()
-                        raise HTTPException(
-                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail="Content generation failed",
-                        )
+                            if image_prompt:
+                                image_prompt = image_prompt.strip()
+                        elif persona.image_prompt_source == "library_image":
+                            oldest_unused = db.query(models.MediaLibrary).filter(
+                                models.MediaLibrary.persona_id == persona.id,
+                                models.MediaLibrary.is_used == False
+                            ).order_by(models.MediaLibrary.created_at.asc()).first()
+                            if oldest_unused:
+                                post_log.media_library_id = str(oldest_unused.id)
+                            else:
+                                sys_p = "You are an expert at writing prompts for AI image generation. Given a social media post text, write a detailed image generation prompt that would create the perfect visual to accompany that post. The image should enhance the post's message without containing any text. Return only the image generation prompt, nothing else, maximum 150 words."
+                                image_prompt = generate_text_for_user(
+                                    user_id=persona.user_id,
+                                    task_category="image_prompt_generation",
+                                    prompt=post_log.content,
+                                    system_prompt=sys_p,
+                                    db=db,
+                                    temperature=0.7,
+                                    max_tokens=200,
+                                )
+                                if image_prompt:
+                                    image_prompt = image_prompt.strip()
+
+                        if image_prompt and not post_log.media_library_id:
+                            provider_inst, model_name, api_key = get_image_provider_for_user(persona.user_id, db)
+                            provider_name = provider_inst.__class__.__name__.replace('Provider', '').lower()
+                            start_img_t = time.time()
+                            try:
+                                async def _gen():
+                                    return await asyncio.to_thread(
+                                        provider_inst.generate,
+                                        prompt=image_prompt,
+                                        negative_prompt="",
+                                        aspect_ratio="1:1",
+                                        model_name=model_name,
+                                        api_key=api_key,
+                                    )
+                                img_bytes = await asyncio.wait_for(
+                                    _gen(),
+                                    timeout=max(10, min(persona.image_max_wait_seconds or 120, 180)),
+                                )
+                                job_id_str = str(uuid.uuid4())
+                                filename = f"{persona.user_id}/{job_id_str}.png"
+                                pub_url = await async_upload_to_supabase(filename, img_bytes)
+
+                                media = models.MediaLibrary(
+                                    user_id=persona.user_id,
+                                    persona_id=persona.id,
+                                    image_url=pub_url,
+                                    storage_path=filename,
+                                    generation_prompt=image_prompt,
+                                    provider=provider_name,
+                                    model_name=model_name,
+                                )
+                                db.add(media)
+                                db.flush()
+                                post_log.media_library_id = str(media.id)
+                                elapsed = int(time.time() - start_img_t)
+                                print(f"Webhook image generation for persona {persona.persona_name}: provider={provider_name} status=success seconds={elapsed}")
+                            except asyncio.TimeoutError:
+                                elapsed = int(time.time() - start_img_t)
+                                print(f"Webhook image generation for persona {persona.persona_name}: provider={provider_name} status=timeout seconds={elapsed}")
+                                if persona.image_fallback_policy == "skip_post":
+                                    post_log.status = "missed"
+                                    post_log.error_message = "image_generation_failed (timeout)"
+                                    post_log.delivery_status = "failed"
+                                    db.commit()
+                                    if persona.assigned_days and persona.posting_time_slots and persona.is_active:
+                                        _register_next_occurrence(db, persona, user, post_log.scheduled_at)
+                                    return {"status": "skipped", "message": "Post skipped due to image generation timeout fallback policy"}
+                                elif persona.image_fallback_policy == "use_library":
+                                    any_unused = db.query(models.MediaLibrary).filter(
+                                        models.MediaLibrary.user_id == persona.user_id,
+                                        models.MediaLibrary.is_used == False
+                                    ).order_by(models.MediaLibrary.created_at.asc()).first()
+                                    if any_unused:
+                                        post_log.media_library_id = str(any_unused.id)
+                            except Exception as e:
+                                elapsed = int(time.time() - start_img_t)
+                                print(f"Webhook image generation for persona {persona.persona_name}: provider={provider_name} status=failed error={e} seconds={elapsed}")
+                                if persona.image_fallback_policy == "skip_post":
+                                    post_log.status = "missed"
+                                    post_log.error_message = f"image_generation_failed (error): {e}"
+                                    post_log.delivery_status = "failed"
+                                    db.commit()
+                                    if persona.assigned_days and persona.posting_time_slots and persona.is_active:
+                                        _register_next_occurrence(db, persona, user, post_log.scheduled_at)
+                                    return {"status": "skipped", "message": "Post skipped due to image generation error fallback policy"}
+                                elif persona.image_fallback_policy == "use_library":
+                                    any_unused = db.query(models.MediaLibrary).filter(
+                                        models.MediaLibrary.user_id == persona.user_id,
+                                        models.MediaLibrary.is_used == False
+                                    ).order_by(models.MediaLibrary.created_at.asc()).first()
+                                    if any_unused:
+                                        post_log.media_library_id = str(any_unused.id)
 
         # 8. Publish
         post_log.status = "publishing"
@@ -420,9 +604,8 @@ async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(g
             print(f"QStash webhook: Post {post_id} published successfully")
             
             # Phase 5: Rolling Window - Register next occurrence
-            if post_log.ai_persona_id:
-                persona = db.get(models.AIPersona, post_log.ai_persona_id)
-                if persona and persona.assigned_days and persona.posting_time_slots and persona.is_active:
+            if persona:
+                if persona.assigned_days and persona.posting_time_slots and persona.is_active:
                     user = db.get(models.User, persona.user_id)
                     if user:
                         _register_next_occurrence(db, persona, user, post_log.scheduled_at)

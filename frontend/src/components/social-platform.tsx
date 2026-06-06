@@ -80,6 +80,7 @@ type Post = {
   reach_count?: number
   engagement_score?: number
   low_engagement?: boolean
+  facebook_post_id?: string | null
 }
 
 type AIPersona = {
@@ -2155,7 +2156,30 @@ function Stat({ label, value, tone = "blue" }: { label: string; value: number; t
 
 function PostRow({ post, timezone }: { post: Post; timezone: string }) {
   const imageUrl = post.image_url || post.media_urls?.[0]
-  return <div className="grid gap-2 rounded-md border p-3"><div className="flex items-center justify-between gap-2"><div className="flex flex-wrap gap-2"><span className={cn("rounded-full px-2 py-1 text-xs font-medium", badgeClass(post.status))}>{post.status}</span>{post.ai_generated ? <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2 py-1 text-xs font-medium text-purple-700"><Sparkles className="size-3" /> AI Generated</span> : null}{post.image_status && post.image_status !== "completed" ? <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700">{post.image_status}</span> : null}</div><span className="text-xs text-slate-500">{formatDate(post.posted_at || post.scheduled_at || null, timezone)}</span></div><p className="text-sm text-slate-600 whitespace-pre-wrap break-words overflow-visible">{post.content}</p>{imageUrl ? <img alt="" className="h-24 w-32 rounded-md object-cover" src={imageUrl} /> : null}</div>
+  return (
+    <div className="grid gap-2 rounded-md border p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap gap-2">
+          <span className={cn("rounded-full px-2 py-1 text-xs font-medium", badgeClass(post.status))}>{post.status}</span>
+          {post.ai_generated ? <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2 py-1 text-xs font-medium text-purple-700"><Sparkles className="size-3" /> AI Generated</span> : null}
+          {post.image_status && post.image_status !== "completed" ? <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700">{post.image_status}</span> : null}
+          {post.facebook_post_id ? (
+            <a
+              href={`https://www.facebook.com/${post.facebook_post_id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 hover:underline"
+            >
+              View on Facebook
+            </a>
+          ) : null}
+        </div>
+        <span className="text-xs text-slate-500">{formatDate(post.posted_at || post.scheduled_at || null, timezone)}</span>
+      </div>
+      <p className="text-sm text-slate-600 whitespace-pre-wrap break-words overflow-visible">{post.content}</p>
+      {imageUrl ? <img alt="" className="h-24 w-32 rounded-md object-cover" src={imageUrl} /> : null}
+    </div>
+  )
 }
 
 function Empty({ text, action }: { text: string; action: string }) {
