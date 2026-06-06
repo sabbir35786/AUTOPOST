@@ -103,8 +103,37 @@ async def schedule_scheduler_endpoint() -> bool:
         print(f"Failed to create QStash scheduler: {exc}")
         return False
 
+def setup_midnight_schedule():
+    client = get_qstash_client()
+    if client is None:
+        print("[Scheduler] ✗ QStash client not available, skipping midnight job setup")
+        return
+    
+    destination_url = f"{BACKEND_URL.rstrip('/')}/api/internal/register-daily-slots"
+    try:
+        schedules = client.schedule.list()
+        already_exists = False
+        for s in schedules or []:
+            dest = getattr(s, "destination", None) or (
+                s.get("destination", "") if hasattr(s, "get") else ""
+            )
+            if destination_url in str(dest):
+                already_exists = True
+                break
+                
+        if not already_exists:
+            client.schedule.create(
+                destination=destination_url,
+                cron="0 0 * * *"  # midnight UTC every day
+            )
+            print("[Scheduler] ✓ Midnight daily slot registration job created in QStash")
+        else:
+            print("[Scheduler] ✓ Midnight job already exists in QStash")
+    except Exception as e:
+        print(f"[Scheduler] ✗ Failed to create midnight job: {e}")
 
-def schedule_post_delivery(post_id: str, scheduled_at_utc: datetime) -> str | None:
+
+def schedule_post_delivery(persona_id: str, scheduled_at_utc: datetime) -> str | None:
     """
     Register a post for delivery at a specific UTC datetime via QStash.
     Returns the QStash message ID for tracking, or None on failure.
@@ -133,7 +162,7 @@ def schedule_post_delivery(post_id: str, scheduled_at_utc: datetime) -> str | No
         # Use the v2 SDK: client.message.publish_json(...)
         response = client.message.publish_json(
             url=callback_url,
-            body={"post_id": post_id},
+            body={"persona_id": persona_id, "scheduled_at": scheduled_at_utc.isoformat()},
             delay=delay_seconds,
         )
         # SDK v2 returns an object with .message_id; fall back for older versions
@@ -141,21 +170,21 @@ def schedule_post_delivery(post_id: str, scheduled_at_utc: datetime) -> str | No
             getattr(response, "message_id", None)
             or (response.get("messageId") if hasattr(response, "get") else None)
         )
-        print(f"QStash message scheduled: {message_id} for post {post_id} at {scheduled_at_utc}")
+        print(f"QStash message scheduled: {message_id} for persona {persona_id} at {scheduled_at_utc}")
         return message_id
     except AttributeError:
         # Older SDK: client.publish_json(...)
         try:
             response = client.publish_json(
                 url=callback_url,
-                body={"post_id": post_id},
+                body={"persona_id": persona_id, "scheduled_at": scheduled_at_utc.isoformat()},
                 delay=delay_seconds,
             )
             message_id = (
                 getattr(response, "message_id", None)
                 or (response.get("messageId") if hasattr(response, "get") else None)
             )
-            print(f"QStash message scheduled (legacy API): {message_id} for post {post_id}")
+            print(f"QStash message scheduled (legacy API): {message_id} for persona {persona_id}")
             return message_id
         except Exception as exc2:
             print(f"Failed to schedule post delivery via QStash (legacy fallback): {exc2}")

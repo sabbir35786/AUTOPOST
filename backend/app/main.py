@@ -79,6 +79,7 @@ from app.routers import images, models as models_router
 from app.routers.settings_models import router as settings_models_router
 from app.routers.persona_image_templates import router as persona_image_templates_router
 from app.routers.brand_automation import router as brand_automation_router
+from app.routers.schedule_routes import router as schedule_routes_router
 from app.mistral_service import (
     suggest_prompt_improvement,
     synthesize_learned_strategy,
@@ -100,6 +101,7 @@ from app.qstash import (
     cancel_scheduled_post,
     verify_qstash_signature,
     calculate_next_posting_datetimes,
+    setup_midnight_schedule,
 )
 
 pending_facebook_credentials: dict[int, dict] = {}
@@ -260,6 +262,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_ensure_supabase_storage_bucket())
     if QSTASH_TOKEN:
         asyncio.create_task(schedule_scheduler_endpoint())
+        setup_midnight_schedule()
     _print_health_check_summary()
     try:
         yield
@@ -273,6 +276,7 @@ app.include_router(models_router.router)
 app.include_router(settings_models_router)
 app.include_router(persona_image_templates_router)
 app.include_router(brand_automation_router)
+app.include_router(schedule_routes_router)
 
 _allowed_origins = [
     FRONTEND_URL,
@@ -313,7 +317,7 @@ def api_health_check():
     return {"status": "ok"}
 
 
-@app.post("/api/webhooks/publish-post")
+@app.post("/api/webhooks/publish-post-old")
 async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(get_db)):
     """
     Webhook endpoint for QStash to trigger scheduled post delivery.
@@ -1788,21 +1792,20 @@ def delete_ai_persona(
     if not persona:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persona not found")
     
-    # Cancel all QStash jobs for this persona
-    scheduled_posts = (
-        db.query(models.PostLog)
-        .filter(
-            models.PostLog.ai_persona_id == persona_id,
-            models.PostLog.status == "scheduled",
-            models.PostLog.qstash_message_id.isnot(None),
-        )
-        .all()
-    )
-    for post in scheduled_posts:
-        if post.qstash_message_id:
-            cancel_scheduled_post(post.qstash_message_id)
-            post.qstash_message_id = None
-            post.delivery_status = "cancelled"
+    # Cancel all pending QStash slots for this persona
+    pending_slots = db.query(models.ScheduledSlot).filter(
+        models.ScheduledSlot.persona_id == persona_id,
+        models.ScheduledSlot.status == 'pending'
+    ).all()
+    for slot in pending_slots:
+        if slot.qstash_message_id:
+            cancel_scheduled_post(slot.qstash_message_id)
+        slot.status = 'cancelled'
+    
+    schedule = db.query(models.PersonaSchedule).filter_by(persona_id=persona_id).first()
+    if schedule:
+        db.delete(schedule)
+        
     db.commit()
     
     delete_persona_dependencies(db, persona_id)

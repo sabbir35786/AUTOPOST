@@ -327,33 +327,98 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
   )
 }
 
-function HomeView({ pages, posts, onConnected, timezone }: { pages: PageConnection[]; posts: Post[]; onConnected: () => void; timezone: string }) {
-  const [intel, setIntel] = React.useState<DashboardIntelligence | null>(null)
-  React.useEffect(() => {
-    api.get<DashboardIntelligence>("/api/dashboard/intelligence").then((response) => setIntel(response.data)).catch(() => setIntel(null))
+function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; posts: Post[]; onConnected: () => void; timezone: string }) {
+  const [dashboardData, setDashboardData] = React.useState<{ todays_slots: any[], recent_posts: any[] } | null>(null)
+  
+  const fetchDashboard = React.useCallback(async () => {
+    try {
+      const response = await api.get("/api/dashboard")
+      setDashboardData(response.data)
+    } catch (err) {
+      console.error("Failed to load dashboard data:", err)
+    }
   }, [])
-  const published = posts.filter((post) => post.status === "published" || post.status === "success").length
-  const scheduled = posts.filter((post) => post.status === "scheduled").length
-  const failed = posts.filter((post) => post.status.includes("failed")).length
-  const onboardingDone = intel?.onboarding_steps.every((step) => step.done)
+
+  React.useEffect(() => {
+    fetchDashboard()
+    const interval = setInterval(fetchDashboard, 30000) // 30s auto-refresh
+    return () => clearInterval(interval)
+  }, [fetchDashboard])
+
+  if (!pages.length) return (
+    <>
+      <PageTitle title="Dashboard" subtitle="Connect your Facebook page to get started." />
+      <ConnectEmpty onConnected={onConnected} />
+    </>
+  )
+
   return (
     <>
-      <PageTitle title="Smart Dashboard" subtitle="Live status, learned patterns, and the next best action." />
-      {intel?.warnings.map((warning) => <div key={warning.text} className={cn("rounded-md border p-4 text-sm", warning.level === "red" ? "border-red-200 bg-red-50 text-red-700" : "border-amber-200 bg-amber-50 text-amber-700")}><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><span>{warning.text}</span><Button asChild variant="outline"><Link href={warning.href}>Fix Now</Link></Button></div></div>)}
-      <DashboardHintsCard />
-      {!pages.length ? <ConnectEmpty onConnected={onConnected} /> : <ConnectedPagesSection pages={pages} onConnected={onConnected} />}
-      <section className="grid gap-4 md:grid-cols-3">
-        <Stat label="Posts Published This Month" value={published} tone="green" />
-        <Stat label="Posts Scheduled" value={scheduled} tone="amber" />
-        <Stat label="Posts Failed" value={failed} tone="red" />
-      </section>
-      {intel ? <section className="grid gap-4 lg:grid-cols-3">
-        <Card><CardHeader><CardTitle>What Is Happening Right Now</CardTitle></CardHeader><CardContent className="grid gap-3 text-sm"><div><p className="font-medium">Next scheduled post</p><p className="text-slate-500">{intel.next_scheduled_post ? `Publishes in ${intel.next_scheduled_post.minutes_until} minutes` : "No scheduled post"}</p></div><div><p className="font-medium">Last published post</p><p className="text-slate-500 whitespace-pre-wrap break-words overflow-visible">{intel.last_published_post?.content || "No published posts yet"}</p>{intel.last_published_post ? <p className="mt-1 text-xs text-slate-500">Likes {intel.last_published_post.likes_count} · Comments {intel.last_published_post.comments_count} · Shares {intel.last_published_post.shares_count} · Score {intel.last_published_post.engagement_score.toFixed(1)}</p> : null}</div><div><p className="font-medium">System health</p><p className={cn("flex items-center gap-2", intel.cron_health.ok ? "text-green-700" : "text-red-700")}><span className={cn("size-2 rounded-full", intel.cron_health.ok ? "bg-green-600" : "bg-red-600")} />Cron {intel.cron_health.ok ? "healthy" : "needs attention"}</p><p className="text-xs text-slate-500">{intel.facebook_connections.every((page) => page.status === "connected") ? "Facebook connections healthy" : "A Facebook page needs attention"}</p></div></CardContent></Card>
-        {!onboardingDone ? <Card><CardHeader><CardTitle>Contextual Onboarding</CardTitle></CardHeader><CardContent className="grid gap-2">{intel.onboarding_steps.map((step, index) => <div key={step.label} className="flex items-center justify-between gap-3 rounded-md border p-2 text-sm"><span className={step.done ? "text-slate-500 line-through" : "font-medium"}>{index + 1}. {step.label}</span>{step.done ? <span className="text-green-700">Done</span> : <Button asChild size="sm" variant="outline"><Link href={step.href}>Do this now</Link></Button>}</div>)}</CardContent></Card> : <LearnedInsightsPanel insights={intel.learned_insights} />}
-        <Card><CardHeader><CardTitle>What You Should Do Next</CardTitle></CardHeader><CardContent className="grid gap-3">{intel.action_items.map((item) => <div key={item.id} className="grid gap-2 rounded-md border p-3 text-sm"><p>{item.text}</p><Button asChild className="w-fit bg-blue-700 hover:bg-blue-800"><Link href={item.href}>{item.action_label}</Link></Button></div>)}{!intel.action_items.length ? <p className="text-sm text-slate-500">No urgent actions. Keep publishing and let the system gather more signal.</p> : null}</CardContent></Card>
-      </section> : null}
-      {intel && onboardingDone ? <LearnedInsightsPanel insights={intel.learned_insights} wide /> : null}
-      <Card><CardHeader><CardTitle>Recent Activity</CardTitle></CardHeader><CardContent className="grid gap-3">{posts.slice(0, 10).map((post) => <PostRow key={post.id} post={post} timezone={timezone} />)} {!posts.length ? <Empty text="No activity yet." action="/dashboard/create" /> : null}</CardContent></Card>
+      <PageTitle title="Dashboard" subtitle="Today's schedule and recent activity." />
+      
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between">
+              <span>Today's Schedule</span>
+              <Button variant="ghost" size="icon" onClick={fetchDashboard} title="Refresh">
+                <RefreshCw className="size-4" />
+              </Button>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            {!dashboardData?.todays_slots?.length ? (
+              <p className="text-sm text-slate-500 py-4 text-center">No slots scheduled for today.</p>
+            ) : (
+              dashboardData.todays_slots.map((slot: any) => (
+                <div key={slot.id} className="flex items-center justify-between p-3 rounded-md border">
+                  <div>
+                    <p className="font-medium text-sm">{slot.persona_name}</p>
+                    <p className="text-xs text-slate-500">{slot.scheduled_at_local}</p>
+                  </div>
+                  <div className="flex flex-col items-end">
+                    <span className={cn(
+                      "text-xs px-2 py-1 rounded-full font-medium",
+                      slot.status === "pending" ? "bg-amber-100 text-amber-700" :
+                      slot.status === "generating" ? "bg-blue-100 text-blue-700" :
+                      slot.status === "publishing" ? "bg-purple-100 text-purple-700" :
+                      slot.status === "published" ? "bg-green-100 text-green-700" :
+                      "bg-red-100 text-red-700"
+                    )}>
+                      {slot.status}
+                    </span>
+                    {slot.error_message && <span className="text-[10px] text-red-500 max-w-[120px] truncate" title={slot.error_message}>{slot.error_message}</span>}
+                  </div>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle>Recent Published Posts</CardTitle></CardHeader>
+          <CardContent className="grid gap-3">
+            {!dashboardData?.recent_posts?.length ? (
+              <p className="text-sm text-slate-500 py-4 text-center">No recent posts.</p>
+            ) : (
+              dashboardData.recent_posts.map((post: any) => (
+                <div key={post.id} className="flex gap-3 p-3 rounded-md border">
+                  {post.image_url && <img src={post.image_url} alt="Post" className="size-16 rounded object-cover" />}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between mb-1">
+                      <p className="font-medium text-xs text-slate-500">{post.persona_name}</p>
+                      {post.facebook_post_url && (
+                        <a href={post.facebook_post_url} target="_blank" rel="noreferrer" className="text-xs text-blue-600 hover:underline">View</a>
+                      )}
+                    </div>
+                    <p className="text-sm line-clamp-2">{post.content_preview}</p>
+                  </div>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </>
   )
 }

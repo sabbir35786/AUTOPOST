@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone
 import uuid
 
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, Uuid
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
@@ -630,3 +630,32 @@ class FontAsset(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     name: Mapped[str | None] = mapped_column(String, nullable=True)
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PersonaSchedule(Base):
+    __tablename__ = "persona_schedules"
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    persona_id: Mapped[int] = mapped_column(ForeignKey("ai_personas.id", ondelete="CASCADE"), unique=True, index=True, nullable=False)
+    days_of_week: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    post_times: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    timezone: Mapped[str] = mapped_column(String, default="Asia/Dhaka", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class ScheduledSlot(Base):
+    __tablename__ = "scheduled_slots"
+
+    id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    persona_id: Mapped[int] = mapped_column(ForeignKey("ai_personas.id", ondelete="CASCADE"), index=True, nullable=False)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    qstash_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="pending", nullable=False)
+    post_id: Mapped[int | None] = mapped_column(ForeignKey("posts.id", ondelete="SET NULL"), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    persona: Mapped["AIPersona"] = relationship("AIPersona")
