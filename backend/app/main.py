@@ -339,7 +339,7 @@ async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(g
                 detail="Missing QStash signature",
             )
 
-        webhook_url = f"{BACKEND_URL.rstrip('/')}/api/webhooks/publish-post"
+        webhook_url = f"{BACKEND_URL.rstrip('/')}/api/webhooks/publish-post-old"
         if not verify_qstash_signature(raw_body, signature, webhook_url):
             print("QStash webhook: Signature verification failed — rejecting request")
             raise HTTPException(
@@ -3126,13 +3126,20 @@ async def publish_composer_post(
         db.commit()
         db.refresh(post_log)
         
-        # Schedule with QStash if it's a scheduled post
         if payload.scheduled_at and not payload.save_as_draft:
             qstash_id = schedule_post_delivery(post_id=str(post_log.id), scheduled_at_utc=payload.scheduled_at)
-            if qstash_id:
-                post_log.qstash_message_id = qstash_id
-                post_log.delivery_status = "pending"
+            if not qstash_id:
+                post_log.status = "schedule_failed"
+                post_log.delivery_status = "failed"
+                post_log.error_message = "Scheduling failed. Check QStash configuration and choose a time at least 30 seconds in the future."
                 db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=post_log.error_message,
+                )
+            post_log.qstash_message_id = qstash_id
+            post_log.delivery_status = "pending"
+            db.commit()
         
         return {"success": True, "id": post_log.id, "status": post_log.status}
 
@@ -3339,7 +3346,7 @@ def list_posts(
         query = query.filter(models.PostLog.status.in_(["published", "success"]))
     elif status_filter:
         if status_filter == "scheduled":
-            query = query.filter(models.PostLog.status.in_(["scheduled", "missed"]))
+            query = query.filter(models.PostLog.status.in_(["scheduled", "missed", "schedule_failed"]))
             today_start, tomorrow_start = _today_bounds_utc(current_user.timezone)
             query = query.filter(
                 models.PostLog.scheduled_at >= today_start,

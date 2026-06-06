@@ -318,7 +318,7 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
         {!loading && view === "style-analyzer" ? <StyleAnalyzerView pages={pages} /> : null}
         {!loading && view === "page-tracker" ? <PageTrackerView pages={pages} /> : null}
         {!loading && view === "templates" ? <TemplateLibraryView /> : null}
-        {!loading && view === "scheduled" ? <PostList title="Scheduled Posts" posts={posts.filter((post) => post.status === "scheduled" || post.status === "missed")} emptyAction="/dashboard/create" emptyText="No scheduled slots for today." timezone={timezone} onChanged={load} /> : null}
+        {!loading && view === "scheduled" ? <PostList title="Scheduled Posts" posts={posts.filter((post) => post.status === "scheduled" || post.status === "missed" || post.status === "schedule_failed")} emptyAction="/dashboard/create" emptyText="No scheduled slots for today." timezone={timezone} onChanged={load} /> : null}
         {!loading && view === "published" ? <PostList title="Published Posts" posts={posts.filter((post) => post.status === "published" || post.status === "success")} emptyAction="/dashboard/create" emptyText="No published posts yet." timezone={timezone} published onChanged={load} /> : null}
         {!loading && view === "analytics" ? <AnalyticsView analytics={analytics} setAnalytics={setAnalytics} /> : null}
         {!loading && view === "settings" ? <SettingsView pages={pages} timezone={timezone} onChanged={load} /> : null}
@@ -653,8 +653,8 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
         scheduled_at: scheduleLater && scheduledAt ? new Date(scheduledAt).toISOString() : null,
         save_as_draft: saveAsDraft,
       })
-      if (!response.data.success && !saveAsDraft && !scheduleLater) {
-        toast.error(response.data.error_message || "Publishing failed. Please try again.")
+      if (!response.data.success && !saveAsDraft) {
+        toast.error(response.data.error_message || (scheduleLater ? "Scheduling failed. Please try again." : "Publishing failed. Please try again."))
         onSaved()
         return
       }
@@ -663,7 +663,7 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
       onSaved()
       router.push(scheduleLater ? "/dashboard/scheduled" : "/dashboard")
     } catch (error: any) {
-      toast.error(getApiErrorMessage(error, "Publishing failed. Please try again."))
+      toast.error(getApiErrorMessage(error, scheduleLater ? "Scheduling failed. Please try again." : "Publishing failed. Please try again."))
     } finally {
       setSaving(false)
     }

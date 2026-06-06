@@ -146,7 +146,12 @@ def schedule_post_delivery(*, persona_id: str | None = None, post_id: str | None
         print("QStash client not available — post delivery will not be scheduled.")
         return None
 
-    delay_seconds = int((scheduled_at_utc - datetime.utcnow()).total_seconds())
+    if scheduled_at_utc.tzinfo is None:
+        scheduled_at_utc = scheduled_at_utc.replace(tzinfo=timezone.utc)
+    else:
+        scheduled_at_utc = scheduled_at_utc.astimezone(timezone.utc)
+
+    delay_seconds = int((scheduled_at_utc - datetime.now(timezone.utc)).total_seconds())
 
     if delay_seconds < 0:
         print(f"Scheduled time is in the past ({delay_seconds}s) — cannot schedule.")

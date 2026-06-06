@@ -218,12 +218,27 @@ async def get_dashboard(
         models.ScheduledSlot.scheduled_at <= today_end
     ).order_by(models.ScheduledSlot.scheduled_at.asc()).all()
     
-    # Last 10 published posts
-    recent_posts = db.query(models.PostLog).join(models.AIPersona).filter(
-        models.AIPersona.user_id == current_user.id,
-        models.PostLog.status == 'published'
-    ).order_by(models.PostLog.created_at.desc()).limit(10).all()
+    recent_posts = db.query(models.PostLog).filter(
+        models.PostLog.user_id == current_user.id,
+        models.PostLog.status.in_(["published", "success"])
+    ).order_by(
+        models.PostLog.posted_at.desc().nullslast(),
+        models.PostLog.created_at.desc()
+    ).limit(10).all()
     
+    recent_post_items = []
+    for post in recent_posts:
+        persona = db.get(models.AIPersona, post.ai_persona_id) if post.ai_persona_id else None
+        recent_post_items.append({
+            "id": str(post.id),
+            "persona_name": persona.persona_name if persona else "Manual post",
+            "content_preview": post.content[:120] if post.content else "",
+            "image_url": post.image_url,
+            "published_at": post.posted_at or post.created_at,
+            "facebook_post_url": post.link_url,
+            "status": post.status,
+        })
+
     return {
         "todays_slots": [
             {
@@ -235,16 +250,5 @@ async def get_dashboard(
             }
             for slot in todays_slots
         ],
-        "recent_posts": [
-            {
-                "id": str(post.id),
-                "persona_name": post.persona.persona_name if hasattr(post, 'persona') and post.persona else "Unknown",
-                "content_preview": post.content[:120] if post.content else "",
-                "image_url": post.image_url,
-                "published_at": post.posted_at or post.created_at,
-                "facebook_post_url": post.link_url,
-                "status": post.status
-            }
-            for post in recent_posts
-        ]
+        "recent_posts": recent_post_items
     }
