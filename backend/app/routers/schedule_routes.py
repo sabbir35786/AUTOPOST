@@ -17,9 +17,10 @@ from datetime import timezone
 router = APIRouter()
 
 class ScheduleInput(BaseModel):
-    days_of_week: list[str]
-    post_times: list[str]
     timezone: str
+    active_days: list[str]
+    default_times: list[str]
+    day_overrides: dict[str, list[str]]
 
 @router.post("/api/internal/register-daily-slots")
 async def register_daily_slots(request: Request, db: Session = Depends(get_db)):
@@ -58,11 +59,19 @@ async def publish_post_webhook(request: Request, db: Session = Depends(get_db)):
         
     persona_id = int(persona_id_str)
     
-    # Find the slot
-    slot = db.query(models.ScheduledSlot).filter(
+    # Find the slot - fix: use scheduled_at from payload to find the exact slot
+    scheduled_at = datetime.fromisoformat(scheduled_at_str) if scheduled_at_str else None
+    
+    slot_query = db.query(models.ScheduledSlot).filter(
         models.ScheduledSlot.persona_id == persona_id,
         models.ScheduledSlot.status == 'pending'
-    ).order_by(models.ScheduledSlot.scheduled_at.asc()).first()
+    )
+    
+    # If we have the scheduled_at time, use it to find the exact slot
+    if scheduled_at:
+        slot_query = slot_query.filter(models.ScheduledSlot.scheduled_at == scheduled_at)
+    
+    slot = slot_query.order_by(models.ScheduledSlot.scheduled_at.asc()).first()
     
     if not slot:
         return {"status": "skipped", "reason": "No pending slot found"}
@@ -106,24 +115,18 @@ async def publish_post_webhook(request: Request, db: Session = Depends(get_db)):
         success = await publish_post_to_facebook(db, post_log, connection)
         
         if not success:
-            raise Exception(f"Facebook publish failed: {post_log.publish_error}")
+            raise Exception(f"Facebook publish failed: {post_log.error_message}")
             
+        # publish_post_to_facebook already updates post_log status to published
+        
+        # Update post_log first
         post_log.status = "published"
         post_log.delivery_status = "delivered"
+        db.commit()
         
-        # 4. Save post to DB
-        new_post = models.Post(
-            status='published',
-            published_at=datetime.utcnow(),
-            facebook_post_id=post_log.facebook_post_id,
-            facebook_post_url=post_log.link_url
-        )
-        db.add(new_post)
-        db.flush()
-        
-        # 5. Update slot
+        # 5. Update slot - link it to the PostLog that was just created
         slot.status = 'published'
-        slot.post_id = new_post.id
+        slot.post_id = post_log.id  # Use post_log.id instead of creating a separate Post
         db.commit()
         
         print(f"[Publish] ✓ Successfully published for persona {persona_id}")
@@ -148,17 +151,23 @@ async def save_persona_schedule(
     # Upsert schedule
     schedule = db.query(models.PersonaSchedule).filter_by(persona_id=persona_id).first()
     if schedule:
-        schedule.days_of_week = schedule_data.days_of_week
-        schedule.post_times = schedule_data.post_times
         schedule.timezone = schedule_data.timezone
         schedule.is_active = True
+        schedule.schedule_data = {
+            "active_days": schedule_data.active_days,
+            "default_times": schedule_data.default_times,
+            "day_overrides": schedule_data.day_overrides
+        }
         schedule.updated_at = datetime.utcnow()
     else:
         schedule = models.PersonaSchedule(
             persona_id=persona_id,
-            days_of_week=schedule_data.days_of_week,
-            post_times=schedule_data.post_times,
-            timezone=schedule_data.timezone
+            timezone=schedule_data.timezone,
+            schedule_data={
+                "active_days": schedule_data.active_days,
+                "default_times": schedule_data.default_times,
+                "day_overrides": schedule_data.day_overrides
+            }
         )
         db.add(schedule)
     db.commit()

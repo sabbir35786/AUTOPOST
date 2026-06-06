@@ -9,6 +9,7 @@ def get_todays_slots_for_persona(schedule: PersonaSchedule) -> list[datetime]:
     """
     Returns list of UTC datetimes for today's remaining posting slots.
     Only returns slots that are still in the future.
+    Implements the new schedule logic with default times and day overrides.
     """
     try:
         tz = ZoneInfo(schedule.timezone)
@@ -16,14 +17,26 @@ def get_todays_slots_for_persona(schedule: PersonaSchedule) -> list[datetime]:
         tz = timezone.utc
     
     now = datetime.now(tz)
-    today_names = {now.strftime('%A').lower(), now.strftime('%a').lower()}
+    today = now.strftime('%A').lower()  # full day name: monday, tuesday, etc.
     
-    days = [d.lower() for d in schedule.days_of_week]
-    if not any(day in today_names for day in days):
+    # Get schedule data
+    schedule_data = schedule.schedule_data
+    active_days = [d.lower() for d in schedule_data.get('active_days', [])]
+    default_times = schedule_data.get('default_times', [])
+    day_overrides = schedule_data.get('day_overrides', {})
+    
+    # Check if today is an active day
+    if today not in active_days:
         return []
     
+    # Determine which times to use
+    if today in day_overrides:
+        times_to_use = day_overrides[today]
+    else:
+        times_to_use = default_times
+    
     slots = []
-    for time_str in schedule.post_times:
+    for time_str in times_to_use:
         hour, minute = map(int, time_str.split(':'))
         slot_local = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if slot_local > now:  # only future slots

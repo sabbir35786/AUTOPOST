@@ -637,10 +637,9 @@ class PersonaSchedule(Base):
 
     id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     persona_id: Mapped[int] = mapped_column(ForeignKey("ai_personas.id", ondelete="CASCADE"), unique=True, index=True, nullable=False)
-    days_of_week: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    post_times: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     timezone: Mapped[str] = mapped_column(String, default="Asia/Dhaka", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    schedule_data: Mapped[dict] = mapped_column(JSON, default=lambda: {"active_days": [], "default_times": [], "day_overrides": {}}, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
