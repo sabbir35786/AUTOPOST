@@ -12,16 +12,7 @@ CREATE TABLE IF NOT EXISTS image_templates (
 ALTER TABLE image_templates
     ADD COLUMN IF NOT EXISTS template_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_name = 'image_templates' AND column_name = 'layers_json'
-    ) THEN
-        EXECUTE 'UPDATE image_templates SET template_json = COALESCE(template_json, layers_json::jsonb, ''{}''::jsonb)';
-    END IF;
-END $$;
+UPDATE image_templates SET template_json = '{}'::jsonb WHERE template_json IS NULL;
 
 CREATE TABLE IF NOT EXISTS persona_image_template_assignments (
     persona_id INTEGER PRIMARY KEY REFERENCES ai_personas(id) ON DELETE CASCADE,

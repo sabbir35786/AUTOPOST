@@ -390,6 +390,7 @@ class UserSettings(Base):
     post_generation_model: Mapped[str] = mapped_column(String, default="gpt-4o", nullable=False)
     image_generation_provider: Mapped[str] = mapped_column(String, default="gemini", nullable=False)
     image_generation_model: Mapped[str] = mapped_column(String, default="imagen-3.0-generate-001", nullable=False)
+    timezone: Mapped[str] = mapped_column(String, default="UTC", nullable=False)
 
 
 class ImageGenerationJob(Base):
@@ -583,3 +584,49 @@ class PostImageAssets(Base):
     assets_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class Post(Base):
+    __tablename__ = "posts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    status: Mapped[str | None] = mapped_column(String, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    facebook_post_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    facebook_post_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    publish_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ScheduledPost(Base):
+    __tablename__ = "scheduled_posts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    qstash_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    delivery_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_recurring: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    recurrence_rule: Mapped[str | None] = mapped_column(String, nullable=True)
+    retry_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class PersonaImageSetting(Base):
+    __tablename__ = "persona_image_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_template_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), nullable=True)
+
+
+class BackgroundAsset(Base):
+    __tablename__ = "background_assets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str | None] = mapped_column(String, nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class FontAsset(Base):
+    __tablename__ = "font_assets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str | None] = mapped_column(String, nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)

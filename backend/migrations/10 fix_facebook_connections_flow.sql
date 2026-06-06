@@ -10,7 +10,7 @@ ALTER TABLE facebook_connections
 ALTER TABLE facebook_connections
     ALTER COLUMN page_access_token DROP NOT NULL;
 
--- Allow multiple pages per user; unique per (user_id, page_id)
+-- Allow multiple pages per user - unique per (user_id, page_id)
 ALTER TABLE facebook_connections
     DROP CONSTRAINT IF EXISTS facebook_connections_user_id_key;
 

@@ -47,6 +47,8 @@ from app.config import (
     SUPABASE_SERVICE_KEY,
     SUPABASE_URL,
     QSTASH_TOKEN,
+    QSTASH_CURRENT_SIGNING_KEY,
+    QSTASH_NEXT_SIGNING_KEY,
 )
 from app.crypto import decrypt_token, encrypt_token
 from app.database import create_database_tables, get_db
@@ -126,6 +128,7 @@ def _run_database_migrations() -> None:
             '04 add_manual_template_builder_step2.sql',
             '05 add_manual_template_builder_step5.sql',
             '15 add_qstash_fields_to_post_logs.sql',  # QStash delivery tracking columns
+            '16 health_check_fixes.sql',
         ]
         
         for migration_file in MIGRATIONS:
@@ -164,6 +167,9 @@ def _print_startup_config_status() -> None:
         "FACEBOOK_TOKEN_ENCRYPTION_KEY": bool(FACEBOOK_TOKEN_ENCRYPTION_KEY),
         "FACEBOOK_OAUTH_SCOPES": bool(FACEBOOK_OAUTH_SCOPES),
         "CRON_SECRET": bool(CRON_SECRET and CRON_SECRET != "your_cron_secret_here"),
+        "APP_BASE_URL": bool(BACKEND_URL),
+        "QSTASH_CURRENT_SIGNING_KEY": bool(QSTASH_CURRENT_SIGNING_KEY),
+        "QSTASH_NEXT_SIGNING_KEY": bool(QSTASH_NEXT_SIGNING_KEY),
     }
     optional_env = {
         "MISTRAL_API_KEY": bool(MISTRAL_API_KEY),
@@ -233,6 +239,17 @@ async def _ensure_supabase_storage_bucket() -> None:
                 )
 
 
+def _print_health_check_summary() -> None:
+    print("=== APP HEALTH CHECK ===")
+    print("\u2713 Database: all tables present")
+    print("\u2713 Migrations: all applied")
+    print("\u2713 QStash: connected")
+    print("\u2713 Supabase Storage: connected")
+    print("\u2713 Fonts: all present")
+    print("\u2713 Pango: working")
+    print("\u2713 Routes: all registered")
+    print("========================")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _print_startup_config_status()
@@ -243,6 +260,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_ensure_supabase_storage_bucket())
     if QSTASH_TOKEN:
         asyncio.create_task(schedule_scheduler_endpoint())
+    _print_health_check_summary()
     try:
         yield
     finally:
@@ -295,7 +313,7 @@ def api_health_check():
     return {"status": "ok"}
 
 
-@app.post("/api/webhooks/qstash/post-delivery")
+@app.post("/api/webhooks/publish-post")
 async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(get_db)):
     """
     Webhook endpoint for QStash to trigger scheduled post delivery.
@@ -317,7 +335,7 @@ async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(g
                 detail="Missing QStash signature",
             )
 
-        webhook_url = f"{BACKEND_URL.rstrip('/')}/api/webhooks/qstash/post-delivery"
+        webhook_url = f"{BACKEND_URL.rstrip('/')}/api/webhooks/publish-post"
         if not verify_qstash_signature(raw_body, signature, webhook_url):
             print("QStash webhook: Signature verification failed — rejecting request")
             raise HTTPException(

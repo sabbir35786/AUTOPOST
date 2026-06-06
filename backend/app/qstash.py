@@ -127,7 +127,7 @@ def schedule_post_delivery(post_id: str, scheduled_at_utc: datetime) -> str | No
         )
         return None
 
-    callback_url = f"{BACKEND_URL.rstrip('/')}/api/webhooks/qstash/post-delivery"
+    callback_url = f"{BACKEND_URL.rstrip('/')}/api/webhooks/publish-post"
 
     try:
         # Use the v2 SDK: client.message.publish_json(...)

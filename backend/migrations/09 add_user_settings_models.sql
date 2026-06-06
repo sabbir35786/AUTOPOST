@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
   image_generation_model TEXT DEFAULT 'imagen-3.0-generate-001' NOT NULL
 );
 
--- 2) Add missing columns (Postgres syntax; ignore failures on SQLite)
+-- 2) Add missing columns (Postgres syntax - ignore failures on SQLite)
 ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS post_generation_provider TEXT DEFAULT 'openai' NOT NULL;
 ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS post_generation_model TEXT DEFAULT 'gpt-4o' NOT NULL;
 ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS image_generation_provider TEXT DEFAULT 'gemini' NOT NULL;

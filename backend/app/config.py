@@ -23,6 +23,7 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://autopost-woad.vercel.app").rstrip("/")
 BACKEND_URL = os.getenv("BACKEND_URL", "https://autopost-1-ax2p.onrender.com").rstrip("/")
+APP_BASE_URL = os.getenv("APP_BASE_URL", BACKEND_URL)
 CRON_SECRET = os.getenv("CRON_SECRET", "your_cron_secret_here")
 
 

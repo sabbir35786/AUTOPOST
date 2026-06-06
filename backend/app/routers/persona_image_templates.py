@@ -158,8 +158,10 @@ def register_fonts_with_fontconfig():
     
     with open(conf_path, 'w') as f:
         f.write(conf_content)
-    
     import subprocess
+    if os.name == 'nt':
+        print(f"[OK] Fonts registered with fontconfig from {fonts_dir} (skipped fc-cache on Windows)")
+        return
     try:
         subprocess.run(['fc-cache', '-f', fonts_dir], capture_output=True)
         print(f"[OK] Fonts registered with fontconfig from {fonts_dir}")
