@@ -8,20 +8,13 @@ from app.posts import generate_persona_post_with_user_model, publish_post_to_fac
 from app.services.publish_image_service import maybe_generate_image_for_post
 
 
-async def execute_slot_publish(db: Session, slot: models.ScheduledSlot) -> dict:
+async def prepare_slot_publish(db: Session, slot: models.ScheduledSlot) -> dict:
     """
-    Generate content, optional image, publish to Facebook, update slot + post_log.
-    Idempotent if slot is already published.
+    Generate content and optional image ahead of time.
+    Sets slot status to 'generated'.
     """
-    if slot.status == "published":
-        return {"status": "already_published", "slot_id": str(slot.id)}
-
-    if slot.post_id:
-        existing_post = db.get(models.PostLog, slot.post_id)
-        if existing_post and existing_post.status in ("published", "success"):
-            slot.status = "published"
-            db.commit()
-            return {"status": "already_published", "post_id": existing_post.id}
+    if slot.status != "pending":
+        return {"status": "skipped", "reason": f"Slot is in {slot.status} status"}
 
     persona_id = slot.persona_id
     persona = db.get(models.AIPersona, persona_id)
@@ -41,9 +34,8 @@ async def execute_slot_publish(db: Session, slot: models.ScheduledSlot) -> dict:
     slot.status = "generating"
     db.commit()
 
-    post_log = None
     try:
-        print(f"[Publish] Generating post for persona {persona_id} slot {slot.id}")
+        print(f"[Publish] Pre-generating post for persona {persona_id} slot {slot.id}")
         post_content = generate_persona_post_with_user_model(db, persona, [])
 
         post_log = models.PostLog(
@@ -51,8 +43,8 @@ async def execute_slot_publish(db: Session, slot: models.ScheduledSlot) -> dict:
             facebook_connection_id=persona.page_connection_id,
             ai_persona_id=persona.id,
             content=post_content,
-            status="publishing",
-            delivery_status="delivering",
+            status="scheduled",
+            delivery_status="pending",
             auto_generated=True,
             ai_generated=True,
         )
@@ -61,9 +53,76 @@ async def execute_slot_publish(db: Session, slot: models.ScheduledSlot) -> dict:
 
         skip_reason = await maybe_generate_image_for_post(db, persona, post_log)
         if skip_reason:
-            # Image generation failed — log it but continue publishing without an image
             print(f"[Publish] Image generation skipped for persona {persona_id}: {skip_reason} — continuing without image")
 
+        slot.status = "generated"
+        slot.post_id = post_log.id
+        slot.error_message = None
+        db.commit()
+        return {"status": "generated", "post_id": post_log.id}
+
+    except Exception as exc:
+        db.rollback()
+        slot = db.get(models.ScheduledSlot, slot.id)
+        slot.status = "failed"
+        slot.error_message = f"Preparation failed: {exc}"
+        db.commit()
+        print(f"[Publish] Failed preparing persona {persona_id} slot {slot.id}: {exc}")
+        return {"status": "failed", "reason": str(exc)}
+
+
+async def execute_slot_publish(db: Session, slot: models.ScheduledSlot) -> dict:
+    """
+    Publish to Facebook immediately.
+    If the slot was not prepared ahead of time, it prepares it first.
+    Idempotent if slot is already published.
+    """
+    if slot.status == "published":
+        return {"status": "already_published", "slot_id": str(slot.id)}
+
+    if slot.post_id:
+        existing_post = db.get(models.PostLog, slot.post_id)
+        if existing_post and existing_post.status in ("published", "success"):
+            slot.status = "published"
+            db.commit()
+            return {"status": "already_published", "post_id": existing_post.id}
+
+    if slot.status == "pending":
+        res = await prepare_slot_publish(db, slot)
+        if res.get("status") == "failed":
+            return res
+        slot = db.get(models.ScheduledSlot, slot.id)
+
+    if slot.status != "generated" and slot.post_id is None:
+        return {"status": "failed", "reason": f"Slot is in {slot.status} state without a post_id"}
+
+    persona_id = slot.persona_id
+    persona = db.get(models.AIPersona, persona_id)
+    if not persona:
+        slot.status = "failed"
+        slot.error_message = "Persona not found"
+        db.commit()
+        return {"status": "failed", "reason": "Persona not found"}
+
+    connection = db.get(models.FacebookConnection, persona.page_connection_id)
+    if not connection or connection.connection_status != "connected":
+        slot.status = "failed"
+        slot.error_message = "Facebook page is not connected"
+        db.commit()
+        return {"status": "failed", "reason": slot.error_message}
+
+    post_log = db.get(models.PostLog, slot.post_id)
+    if not post_log:
+        slot.status = "failed"
+        slot.error_message = "Prepared post not found"
+        db.commit()
+        return {"status": "failed", "reason": "Prepared post not found"}
+
+    post_log.status = "publishing"
+    post_log.delivery_status = "delivering"
+    db.commit()
+
+    try:
         print(f"[Publish] Publishing to Facebook for persona {persona_id}")
         success = await publish_post_to_facebook(db, post_log, connection)
         if not success:
@@ -75,7 +134,6 @@ async def execute_slot_publish(db: Session, slot: models.ScheduledSlot) -> dict:
         persona.last_auto_post_at = datetime.now(timezone.utc)
 
         slot.status = "published"
-        slot.post_id = post_log.id
         slot.error_message = None
         db.commit()
 
@@ -97,5 +155,5 @@ async def execute_slot_publish(db: Session, slot: models.ScheduledSlot) -> dict:
         slot.status = "failed"
         slot.error_message = str(exc)
         db.commit()
-        print(f"[Publish] Failed persona {persona_id} slot {slot.id}: {exc}")
+        print(f"[Publish] Failed publishing persona {persona_id} slot {slot.id}: {exc}")
         return {"status": "failed", "reason": str(exc)}

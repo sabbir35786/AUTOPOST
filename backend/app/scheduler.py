@@ -3,13 +3,22 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.services.schedule_service import process_due_persona_slots, register_all_todays_slots
+from app.services.schedule_service import process_due_persona_slots, register_all_todays_slots, prepare_upcoming_persona_slots
 
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
 
 def setup_scheduler():
+    scheduler.add_job(
+        prepare_upcoming_persona_slots,
+        IntervalTrigger(minutes=5),
+        id="prepare_upcoming_slots",
+        name="Prepare upcoming persona slots",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     scheduler.add_job(
         process_due_persona_slots,
         IntervalTrigger(minutes=1),

@@ -163,6 +163,40 @@ async def register_all_todays_slots(db: Session = None):
         if close_db:
             db.close()
 
+async def prepare_upcoming_persona_slots(db: Session = None):
+    from app.services.slot_publish_service import prepare_slot_publish
+    
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+
+    try:
+        now_utc = datetime.now(timezone.utc)
+        thirty_mins_from_now = now_utc + timedelta(minutes=30)
+
+        upcoming_slots = (
+            db.query(ScheduledSlot)
+            .filter(
+                ScheduledSlot.status == "pending",
+                ScheduledSlot.scheduled_at <= thirty_mins_from_now,
+                ScheduledSlot.scheduled_at > now_utc,
+            )
+            .order_by(ScheduledSlot.scheduled_at.asc())
+            .all()
+        )
+
+        processed = 0
+        for slot in upcoming_slots:
+            logger.info(f"[Scheduler] Preparing upcoming slot {slot.id} for persona {slot.persona_id}")
+            await prepare_slot_publish(db, slot)
+            processed += 1
+        return processed
+    finally:
+        if close_db:
+            db.close()
+
+
 async def process_due_persona_slots(db: Session = None):
     from app.services.slot_publish_service import execute_slot_publish
     
@@ -177,7 +211,7 @@ async def process_due_persona_slots(db: Session = None):
         due_slots = (
             db.query(ScheduledSlot)
             .filter(
-                ScheduledSlot.status == "pending",
+                ScheduledSlot.status.in_(["pending", "generated"]),
                 ScheduledSlot.scheduled_at <= now_utc,
             )
             .order_by(ScheduledSlot.scheduled_at.asc())
