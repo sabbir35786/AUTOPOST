@@ -259,10 +259,20 @@ async def save_persona_schedule(
         db.add(schedule)
     db.commit()
     
+    slots_registered = 0
     if persona.is_active:
-        await register_todays_slots(persona_id, db)
+        try:
+            await register_todays_slots(persona_id, db)
+            slots_registered = 1
+        except Exception as exc:
+            print(f"[Schedule] Persona {persona_id} saved but slot registration failed: {exc}")
+            return {
+                "status": "saved",
+                "message": "Schedule saved; slot registration failed — will retry at midnight.",
+                "warning": str(exc),
+            }
     
-    return {"status": "saved", "message": "Schedule saved and today's slots registered"}
+    return {"status": "saved", "message": "Schedule saved and today's slots registered", "slots_registered": slots_registered}
 
 @router.delete("/api/personas/{persona_id}/schedule")
 async def delete_persona_schedule(

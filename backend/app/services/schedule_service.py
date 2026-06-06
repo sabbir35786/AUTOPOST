@@ -76,14 +76,15 @@ def get_todays_slots_for_persona(schedule: PersonaSchedule) -> list[datetime]:
     
     return slots
 
-async def register_todays_slots(persona_id: str, db: Session):
+async def register_todays_slots(persona_id: int | str, db: Session):
     """
     Registers today's remaining slots for one persona with QStash.
     Cancels any existing pending slots for this persona first.
     """
+    persona_id_int = int(persona_id)
     # Cancel existing pending slots for today
     existing = db.query(ScheduledSlot).filter(
-        ScheduledSlot.persona_id == persona_id,
+        ScheduledSlot.persona_id == persona_id_int,
         ScheduledSlot.status == 'pending',
         func.date(ScheduledSlot.scheduled_at) == date.today()
     ).all()
@@ -96,7 +97,7 @@ async def register_todays_slots(persona_id: str, db: Session):
     
     # Load schedule
     schedule = db.query(PersonaSchedule).filter_by(
-        persona_id=persona_id, is_active=True
+        persona_id=persona_id_int, is_active=True
     ).first()
     
     if not schedule:
@@ -107,19 +108,20 @@ async def register_todays_slots(persona_id: str, db: Session):
     
     for slot_utc in slot_times:
         # Register with QStash
-        delay_seconds = int((slot_utc - datetime.utcnow()).total_seconds())
+        delay_seconds = int((slot_utc - datetime.now(timezone.utc)).total_seconds())
         if delay_seconds < 10:
             continue
         
         message_id = schedule_post_delivery(
-            persona_id=persona_id,
+            persona_id=str(persona_id_int),
             scheduled_at_utc=slot_utc
         )
         
-        # Save to DB
+        # Save to DB — store as timezone-aware UTC
+        slot_aware = slot_utc.replace(tzinfo=timezone.utc) if slot_utc.tzinfo is None else slot_utc
         new_slot = ScheduledSlot(
-            persona_id=persona_id,
-            scheduled_at=slot_utc,
+            persona_id=persona_id_int,
+            scheduled_at=slot_aware,
             qstash_message_id=message_id,
             status='pending'
         )

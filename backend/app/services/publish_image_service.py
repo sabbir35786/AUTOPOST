@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app import models
-from app.mistral_service import generate_text_for_user
+from app.providers.llm_providers import generate_text_for_user
 
 
 async def maybe_generate_image_for_post(

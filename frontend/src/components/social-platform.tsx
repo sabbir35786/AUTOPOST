@@ -1428,12 +1428,19 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
         : await api.post<AIPersona>(`/api/ai/personas/${selectedPage.id}`, payload)
       const saved = response.data
       if (saved.id) {
-        await api.post(`/api/personas/${saved.id}/schedule`, {
-          timezone: scheduleDraft.timezone,
-          active_days: scheduleDraft.active_days,
-          default_times: scheduleDraft.default_times,
-          day_overrides: scheduleDraft.day_overrides,
-        })
+        try {
+          await api.post(`/api/personas/${saved.id}/schedule`, {
+            timezone: scheduleDraft.timezone,
+            active_days: scheduleDraft.active_days,
+            default_times: scheduleDraft.default_times,
+            day_overrides: scheduleDraft.day_overrides,
+          })
+        } catch (scheduleError: any) {
+          console.error("Schedule save failed:", scheduleError)
+          if (showToast) {
+            toast.warning(getApiErrorMessage(scheduleError, "Persona saved, but schedule registration failed. Try saving again."))
+          }
+        }
       }
       setEditing(saved)
       await loadPersonas()
