@@ -646,6 +646,7 @@ async def run_scheduled_posts() -> None:
             .filter(
                 models.PostLog.status == "scheduled",
                 models.PostLog.scheduled_at <= now_utc,
+                (models.PostLog.qstash_message_id == None) | (models.PostLog.qstash_message_id == ""),
             )
             .all()
         )
@@ -704,7 +705,8 @@ async def run_scheduled_posts() -> None:
             finally:
                 release_user_posting(schedule.user_id)
 
-        await run_auto_ai_posts(db, now_utc)
+        # Active personas are now scheduled and processed via QStash webhook instead of polling.
+        # await run_auto_ai_posts(db, now_utc)
     finally:
         db.close()
 

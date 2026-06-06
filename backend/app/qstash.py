@@ -232,6 +232,87 @@ def calculate_next_scheduled_time(rule: str, from_time: datetime) -> datetime | 
     return None
 
 
+def calculate_next_posting_datetimes(
+    assigned_days: list[str],
+    posting_time_slots: list[str],
+    timezone_str: str,
+    count: int = 7,
+    from_time: datetime | None = None,
+) -> list[datetime]:
+    """
+    Calculate the next N posting datetimes based on persona schedule.
+    
+    Args:
+        assigned_days: List of day names (e.g., ["Mon", "Wed", "Fri"])
+        posting_time_slots: List of time strings (e.g., ["09:00"])
+        timezone_str: Timezone string (e.g., "Asia/Dhaka")
+        count: Number of datetimes to calculate (default 7)
+        from_time: Starting time (defaults to now)
+    
+    Returns:
+        List of UTC datetimes for the next N posting slots
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    from datetime import time as dt_time
+    
+    if from_time is None:
+        from_time = datetime.utcnow()
+    
+    try:
+        tz = ZoneInfo(timezone_str)
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+    
+    # Convert to local timezone
+    local_from = from_time.replace(tzinfo=timezone.utc).astimezone(tz)
+    
+    # Parse time slots
+    time_slots = []
+    for slot in posting_time_slots:
+        try:
+            time_slots.append(dt_time.fromisoformat(slot))
+        except ValueError:
+            continue
+    
+    if not time_slots:
+        time_slots = [dt_time(9, 0)]  # Default to 9:00 AM
+    
+    # Map day names to weekday numbers
+    day_map = {
+        "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6,
+    }
+    target_days = [day_map[d.lower()] for d in assigned_days if d.lower() in day_map]
+    
+    if not target_days:
+        target_days = [0, 1, 2, 3, 4, 5, 6]  # Default to all days
+    
+    # Calculate next N datetimes
+    datetimes = []
+    current = local_from + timedelta(minutes=1)  # Start from next minute
+    
+    while len(datetimes) < count:
+        # Check if current day is a target day
+        if current.weekday() in target_days:
+            # Check each time slot
+            for slot in time_slots:
+                slot_time = current.replace(hour=slot.hour, minute=slot.minute, second=0, microsecond=0)
+                
+                # Only add if slot time is in the future
+                if slot_time > local_from:
+                    # Convert back to UTC
+                    utc_time = slot_time.astimezone(timezone.utc).replace(tzinfo=None)
+                    datetimes.append(utc_time)
+                    
+                    if len(datetimes) >= count:
+                        break
+        
+        # Move to next day
+        current = (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    return datetimes
+
+
 def _print_qstash_config_status() -> None:
     print("QStash configuration:")
     token_ok = "OK" if QSTASH_TOKEN else "MISSING"
