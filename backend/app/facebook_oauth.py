@@ -246,7 +246,8 @@ def _resume_paused_posts(db: Session, connection: models.FacebookConnection) -> 
         post.status = "missed"
         post.updated_at = now
 
-    resumed = (
+    # Get posts to resume
+    posts_to_resume = (
         db.query(models.PostLog)
         .filter(
             models.PostLog.facebook_connection_id == connection.id,
@@ -254,14 +255,27 @@ def _resume_paused_posts(db: Session, connection: models.FacebookConnection) -> 
             models.PostLog.scheduled_at.isnot(None),
             models.PostLog.scheduled_at > now,
         )
-        .update(
-            {"status": "scheduled", "updated_at": now},
-            synchronize_session=False,
-        )
+        .all()
     )
-    if resumed:
-        logger.info("Resumed %s paused posts for page %s", resumed, connection.page_name)
-    return resumed
+    
+    resumed_count = 0
+    for post in posts_to_resume:
+        post.status = "scheduled"
+        post.updated_at = now
+        
+        # Schedule with QStash
+        from app.qstash import schedule_post_delivery
+        qstash_id = schedule_post_delivery(post_id=str(post.id), scheduled_at_utc=post.scheduled_at)
+        if qstash_id:
+            post.qstash_message_id = qstash_id
+            post.delivery_status = "pending"
+            resumed_count += 1
+    
+    if resumed_count:
+        logger.info("Resumed %s paused posts for page %s", resumed_count, connection.page_name)
+        db.commit()
+    
+    return resumed_count
 
 
 def save_or_update_page_connection(

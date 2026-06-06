@@ -28,6 +28,7 @@ from app.auth import (
 from app.chat import create_chat_reply
 from app.config import (
     ALGORITHM,
+    BACKEND_URL,
     FACEBOOK_APP_ID,
     FACEBOOK_APP_SECRET,
     FACEBOOK_GRAPH_API_BASE_URL,
@@ -90,7 +91,13 @@ from app.learning.service import (
     run_weekly_learning_job,
     user_has_learning_access,
 )
-from app.qstash import schedule_scheduler_endpoint, _print_qstash_config_status
+from app.qstash import (
+    schedule_scheduler_endpoint,
+    _print_qstash_config_status,
+    schedule_post_delivery,
+    cancel_scheduled_post,
+    verify_qstash_signature,
+)
 
 pending_facebook_credentials: dict[int, dict] = {}
 last_scheduler_run_at: datetime | None = None
@@ -106,17 +113,18 @@ def _run_database_migrations() -> None:
         
         # Migration files to run in order (priority order)
         MIGRATIONS = [
-            'fix_image_templates_schema.sql',  # Critical fix for schema issues
-            'add_image_generation_tables.sql',
-            'add_template_image_generation.sql',
-            'add_user_settings_models.sql',
-            'add_sessions_table.sql',
-            'add_media_library_id_to_post_logs.sql',
-            'fix_facebook_connections_flow.sql',
-            'rebuild_image_templates_system.sql',
-            'add_manual_template_builder_step1.sql',
-            'add_manual_template_builder_step2.sql',
-            'add_manual_template_builder_step5.sql',
+            '11 fix_image_templates_schema.sql',   # Critical fix for schema issues
+            '02 add_image_generation_tables.sql',
+            '08 add_template_image_generation.sql',
+            '09 add_user_settings_models.sql',
+            '07 add_sessions_table.sql',
+            '06 add_media_library_id_to_post_logs.sql',
+            '10 fix_facebook_connections_flow.sql',
+            '12 rebuild_image_templates_system.sql',
+            '03 add_manual_template_builder_step1.sql',
+            '04 add_manual_template_builder_step2.sql',
+            '05 add_manual_template_builder_step5.sql',
+            '15 add_qstash_fields_to_post_logs.sql',  # QStash delivery tracking columns
         ]
         
         for migration_file in MIGRATIONS:
@@ -276,12 +284,115 @@ def read_root():
 
 @app.get("/health")
 def health_check():
-    return "ok"
+    """UptimeRobot pings this every 5 minutes to keep the Render free instance awake."""
+    return {"status": "ok"}
 
 
 @app.get("/api/health")
 def api_health_check():
-    return "ok"
+    """Secondary health check for API prefix consumers."""
+    return {"status": "ok"}
+
+
+@app.post("/api/webhooks/qstash/post-delivery")
+async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Webhook endpoint for QStash to trigger scheduled post delivery.
+    Verifies QStash HMAC signature, then publishes the post to Facebook.
+    Returns HTTP 500 on publish failure so QStash retries automatically.
+    """
+    import json as _json
+
+    try:
+        # 1. Read raw body FIRST (needed for signature verification before json parsing)
+        raw_body = await request.body()
+
+        # 2. Verify QStash signature — reject anything without a valid signature
+        signature = request.headers.get("Upstash-Signature")
+        if not signature:
+            print("QStash webhook: Missing Upstash-Signature header — rejecting request")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing QStash signature",
+            )
+
+        webhook_url = f"{BACKEND_URL.rstrip('/')}/api/webhooks/qstash/post-delivery"
+        if not verify_qstash_signature(raw_body, signature, webhook_url):
+            print("QStash webhook: Signature verification failed — rejecting request")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid QStash signature",
+            )
+
+        # 3. Parse body after verification
+        body = _json.loads(raw_body)
+        post_id = body.get("post_id")
+
+        if not post_id:
+            print("QStash webhook: Missing post_id in request body")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing post_id",
+            )
+
+        # 4. Fetch post
+        post_log = db.query(models.PostLog).filter(models.PostLog.id == int(post_id)).first()
+        if not post_log:
+            print(f"QStash webhook: Post {post_id} not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Post not found",
+            )
+
+        # 5. Idempotency guard — do not double-publish
+        if post_log.status in ["published", "success"]:
+            print(f"QStash webhook: Post {post_id} already published — returning 200 (idempotent)")
+            return {"status": "ok", "message": "Post already published"}
+
+        # 6. Check Facebook connection
+        connection = db.get(models.FacebookConnection, post_log.facebook_connection_id)
+        if not connection or connection.connection_status != "connected":
+            print(f"QStash webhook: Facebook connection not available for post {post_id}")
+            post_log.status = "failed"
+            post_log.error_message = "Facebook page is not connected"
+            post_log.delivery_status = "failed"
+            db.commit()
+            # Return 503 so QStash retries — the page may reconnect soon
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Facebook connection not available — will retry",
+            )
+
+        # 7. Publish
+        post_log.status = "publishing"
+        post_log.delivery_status = "delivering"
+        db.commit()
+
+        success = await publish_post_to_facebook(db, post_log, connection)
+
+        if success:
+            post_log.delivery_status = "delivered"
+            db.commit()
+            print(f"QStash webhook: Post {post_id} published successfully")
+            return {"status": "ok", "message": "Post published successfully"}
+        else:
+            post_log.delivery_status = "failed"
+            db.commit()
+            print(f"QStash webhook: Post {post_id} publish failed — returning 500 for QStash retry")
+            # Return 500 so QStash retries automatically
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Post publish failed — will retry",
+            )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"QStash webhook unexpected error: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
 
 
 @app.get("/api/internal/run-scheduler")
@@ -2622,6 +2733,15 @@ async def publish_composer_post(
         db.add(post_log)
         db.commit()
         db.refresh(post_log)
+        
+        # Schedule with QStash if it's a scheduled post
+        if payload.scheduled_at and not payload.save_as_draft:
+            qstash_id = schedule_post_delivery(post_id=str(post_log.id), scheduled_at_utc=payload.scheduled_at)
+            if qstash_id:
+                post_log.qstash_message_id = qstash_id
+                post_log.delivery_status = "pending"
+                db.commit()
+        
         return {"success": True, "id": post_log.id, "status": post_log.status}
 
     await verify_page_connection_for_publish(db, connection)
@@ -2863,8 +2983,21 @@ def update_post(
     if payload.media_urls is not None:
         post.media_urls = payload.media_urls
     if payload.scheduled_at is not None:
+        # Cancel existing QStash message if rescheduling
+        if post.qstash_message_id and post.scheduled_at != payload.scheduled_at:
+            cancel_scheduled_post(post.qstash_message_id)
+            post.qstash_message_id = None
+            post.delivery_status = "pending"
+        
         post.scheduled_at = payload.scheduled_at
         post.status = "scheduled"
+        
+        # Schedule new delivery with QStash
+        if payload.scheduled_at:
+            qstash_id = schedule_post_delivery(post_id=str(post.id), scheduled_at_utc=payload.scheduled_at)
+            if qstash_id:
+                post.qstash_message_id = qstash_id
+                post.delivery_status = "pending"
     if payload.link_url is not None:
         post.link_url = payload.link_url
     if payload.link_preview_data is not None:
@@ -2895,6 +3028,11 @@ def delete_post(
             {"post_id": post.id, "content": post.content[:1000], "status": post.status},
             -1.0,
         )
+    
+    # Cancel QStash message if post is scheduled
+    if post.qstash_message_id:
+        cancel_scheduled_post(post.qstash_message_id)
+    
     db.delete(post)
     db.commit()
     return {"success": True}
