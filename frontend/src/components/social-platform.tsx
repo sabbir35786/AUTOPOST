@@ -318,12 +318,93 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
         {!loading && view === "style-analyzer" ? <StyleAnalyzerView pages={pages} /> : null}
         {!loading && view === "page-tracker" ? <PageTrackerView pages={pages} /> : null}
         {!loading && view === "templates" ? <TemplateLibraryView /> : null}
-        {!loading && view === "scheduled" ? <PostList title="Scheduled Posts" posts={posts.filter((post) => post.status === "scheduled" || post.status === "missed" || post.status === "schedule_failed")} emptyAction="/dashboard/create" emptyText="No scheduled slots for today." timezone={timezone} onChanged={load} /> : null}
+        {!loading && view === "scheduled" ? <ScheduledSlotsView timezone={timezone} /> : null}
         {!loading && view === "published" ? <PostList title="Published Posts" posts={posts.filter((post) => post.status === "published" || post.status === "success")} emptyAction="/dashboard/create" emptyText="No published posts yet." timezone={timezone} published onChanged={load} /> : null}
         {!loading && view === "analytics" ? <AnalyticsView analytics={analytics} setAnalytics={setAnalytics} /> : null}
         {!loading && view === "settings" ? <SettingsView pages={pages} timezone={timezone} onChanged={load} /> : null}
       </main>
     </div>
+  )
+}
+
+type ScheduledSlotItem = {
+  id: string
+  type: "persona_slot" | "manual_post"
+  persona_name: string
+  content_preview?: string | null
+  scheduled_at: string
+  scheduled_at_local: string
+  status: string
+  error_message?: string | null
+}
+
+function slotStatusClass(status: string) {
+  if (status === "pending" || status === "scheduled") return "bg-amber-100 text-amber-700"
+  if (status === "generating" || status === "publishing") return "bg-blue-100 text-blue-700"
+  if (status === "published") return "bg-green-100 text-green-700"
+  return "bg-red-100 text-red-700"
+}
+
+function ScheduledSlotsView({ timezone }: { timezone: string }) {
+  const [slots, setSlots] = React.useState<ScheduledSlotItem[]>([])
+  const [loading, setLoading] = React.useState(true)
+
+  const load = React.useCallback(async () => {
+    setLoading(true)
+    try {
+      const response = await api.get<{ slots: ScheduledSlotItem[] }>("/api/scheduled-slots")
+      setSlots(response.data.slots || [])
+    } catch {
+      setSlots([])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    load()
+    const interval = setInterval(load, 30000)
+    return () => clearInterval(interval)
+  }, [load])
+
+  return (
+    <>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <PageTitle title="Scheduled Posts" subtitle="Upcoming auto-post slots and manually scheduled posts." />
+        <Button variant="outline" onClick={load} disabled={loading}>
+          <RefreshCw className={cn("size-4 mr-2", loading && "animate-spin")} /> Refresh
+        </Button>
+      </div>
+      <Card>
+        <CardContent className="grid gap-3 p-5">
+          {loading && !slots.length ? (
+            <div className="flex justify-center py-8"><Loader2 className="size-5 animate-spin text-slate-400" /></div>
+          ) : !slots.length ? (
+            <div className="py-8 text-center">
+              <p className="text-sm text-slate-500">No upcoming scheduled slots.</p>
+              <Button asChild className="mt-3 bg-blue-700 hover:bg-blue-800"><Link href="/dashboard/ai-settings">Set up a persona schedule</Link></Button>
+            </div>
+          ) : (
+            slots.map((slot) => (
+              <div key={`${slot.type}-${slot.id}`} className="flex items-start justify-between gap-3 rounded-md border p-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium text-sm">{slot.persona_name}</p>
+                    <span className="text-[10px] uppercase tracking-wide text-slate-400">{slot.type === "manual_post" ? "Manual" : "Auto"}</span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-0.5">{slot.scheduled_at_local || formatDate(slot.scheduled_at, timezone)}</p>
+                  {slot.content_preview ? <p className="text-sm text-slate-600 mt-1 line-clamp-2">{slot.content_preview}</p> : null}
+                  {slot.error_message ? <p className="text-xs text-red-500 mt-1">{slot.error_message}</p> : null}
+                </div>
+                <span className={cn("text-xs px-2 py-1 rounded-full font-medium shrink-0", slotStatusClass(slot.status))}>
+                  {slot.status}
+                </span>
+              </div>
+            ))
+          )}
+        </CardContent>
+      </Card>
+    </>
   )
 }
 
@@ -1038,6 +1119,47 @@ function MiniBars({ items }: { items: { label: string; value: number }[] }) {
 const toneOptions = ["Friendly", "Professional", "Bold", "Witty", "Empathetic", "Authoritative", "Casual", "Luxury", "Rebellious", "Minimalist", "Energetic", "Calm"]
 const languages = ["English", "Bengali", "Hindi", "Arabic", "Spanish", "French", "Indonesian", "Portuguese", "Auto-detect from examples"]
 const dayOptions = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+const scheduleDayKeys = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] as const
+const dayAbbrevToFull: Record<string, string> = {
+  Mon: "monday", Tue: "tuesday", Wed: "wednesday", Thu: "thursday",
+  Fri: "friday", Sat: "saturday", Sun: "sunday",
+}
+const dayFullToAbbrev: Record<string, string> = Object.fromEntries(
+  Object.entries(dayAbbrevToFull).map(([abbrev, full]) => [full, abbrev])
+)
+
+type PersonaScheduleData = {
+  timezone: string
+  active_days: string[]
+  default_times: string[]
+  day_overrides: Record<string, string[]>
+}
+
+function emptySchedule(timezone: string): PersonaScheduleData {
+  return { timezone, active_days: [], default_times: ["09:00"], day_overrides: {} }
+}
+
+function scheduleDayLabel(day: string) {
+  const abbrev = dayFullToAbbrev[day.toLowerCase()] || day.slice(0, 3)
+  return dayName(abbrev)
+}
+
+function activeDaysToAbbrev(days: string[]): string[] {
+  return days.map((day) => dayFullToAbbrev[day.toLowerCase()] || day).filter(Boolean)
+}
+
+function abbrevDaysToFull(days: string[]): string[] {
+  return days.map((day) => dayAbbrevToFull[day] || day.toLowerCase()).filter(Boolean)
+}
+
+function scheduleFromLegacyPersona(persona: AIPersona, timezone: string): PersonaScheduleData {
+  return {
+    timezone,
+    active_days: abbrevDaysToFull(persona.assigned_days || []),
+    default_times: persona.posting_time_slots?.length ? persona.posting_time_slots : ["09:00"],
+    day_overrides: {},
+  }
+}
 const personaColors = ["bg-blue-50 text-blue-800 border-blue-200", "bg-emerald-50 text-emerald-800 border-emerald-200", "bg-amber-50 text-amber-800 border-amber-200", "bg-rose-50 text-rose-800 border-rose-200", "bg-violet-50 text-violet-800 border-violet-200"]
 const templateNames = ["Custom (blank)", "E-commerce Product Page", "Personal Brand / Creator", "Local Restaurant", "Real Estate Agent", "Fitness Coach", "Educational Content", "News and Commentary", "Motivational Page", "Tech and Startup"]
 const goalOptions = ["Educate my audience", "Sell a product or service", "Build a community", "Entertain", "Inspire and motivate", "Drive traffic to my website"]
@@ -1165,9 +1287,12 @@ function applyTemplate(persona: AIPersona, template: string): AIPersona {
 }
 
 function AISettingsView({ pages }: { pages: PageConnection[] }) {
+  const { user } = useAuth()
+  const userTimezone = user?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
   const [selectedPageId, setSelectedPageId] = React.useState<number | null>(pages[0]?.id ?? null)
   const [personas, setPersonas] = React.useState<AIPersona[]>([])
   const [editing, setEditing] = React.useState<AIPersona | null>(null)
+  const [scheduleDraft, setScheduleDraft] = React.useState<PersonaScheduleData>(emptySchedule(userTimezone))
   const [saving, setSaving] = React.useState(false)
   const [sample, setSample] = React.useState("")
   const [previewTab, setPreviewTab] = React.useState<"simple" | "raw">("simple")
@@ -1196,6 +1321,29 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
   }, [selectedPage?.id])
 
   React.useEffect(() => { loadPersonas() }, [loadPersonas])
+
+  React.useEffect(() => {
+    if (!editing) return
+    if (!editing.id) {
+      setScheduleDraft(emptySchedule(userTimezone))
+      return
+    }
+    api.get<PersonaScheduleData>(`/api/personas/${editing.id}/schedule`)
+      .then((res) => {
+        const data = res.data
+        if (data.active_days?.length || data.default_times?.length) {
+          setScheduleDraft({
+            timezone: data.timezone || userTimezone,
+            active_days: data.active_days || [],
+            default_times: data.default_times?.length ? data.default_times : ["09:00"],
+            day_overrides: data.day_overrides || {},
+          })
+        } else {
+          setScheduleDraft(scheduleFromLegacyPersona(editing, userTimezone))
+        }
+      })
+      .catch(() => setScheduleDraft(scheduleFromLegacyPersona(editing, userTimezone)))
+  }, [editing?.id, userTimezone])
 
   // Pre-fill persona from Style Analyzer redirect
   React.useEffect(() => {
@@ -1263,16 +1411,34 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
     if (!draft.persona_name.trim()) throw new Error("Persona name is required.")
     if (!draft.niche.trim()) throw new Error("What is your page about? is required.")
     if (!draft.tone_tags.length) throw new Error("Select at least one tone.")
-    const payload = { ...draft, prompt_config: config, custom_prompt: rawPrompt }
+    if (!scheduleDraft.active_days.length) throw new Error("Select at least one active day in the schedule.")
+    if (!scheduleDraft.default_times.length) throw new Error("Add at least one default posting time.")
+    const abbrevDays = activeDaysToAbbrev(scheduleDraft.active_days)
+    const payload = {
+      ...draft,
+      assigned_days: abbrevDays,
+      posting_time_slots: scheduleDraft.default_times,
+      prompt_config: config,
+      custom_prompt: rawPrompt,
+    }
     setSaving(true)
     try {
       const response = draft.id
         ? await api.put<AIPersona>(`/api/ai/personas/${draft.id}`, payload)
         : await api.post<AIPersona>(`/api/ai/personas/${selectedPage.id}`, payload)
-      setEditing(response.data)
+      const saved = response.data
+      if (saved.id) {
+        await api.post(`/api/personas/${saved.id}/schedule`, {
+          timezone: scheduleDraft.timezone,
+          active_days: scheduleDraft.active_days,
+          default_times: scheduleDraft.default_times,
+          day_overrides: scheduleDraft.day_overrides,
+        })
+      }
+      setEditing(saved)
       await loadPersonas()
-      if (showToast) toast.success("AI persona saved.")
-      return response.data
+      if (showToast) toast.success("AI persona and schedule saved.")
+      return saved
     } finally {
       setSaving(false)
     }
@@ -1372,7 +1538,7 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
         </div>
       </CardContent></Card>)}{personas.length < 5 ? <Button variant="outline" className="min-h-36 border-dashed" onClick={() => setEditing({ ...emptyPersona(), persona_name: `Persona ${personas.length + 1}` })}><Plus className="size-4" /> Add New Persona</Button> : null}</div>
     <PerformanceInsightsPanel insights={insights} personas={personas} timezone={Intl.DateTimeFormat().resolvedOptions().timeZone} />
-  </div>}{editing ? <PromptStudioModal draft={draft} config={config} simplePrompt={simplePrompt} rawPrompt={rawPrompt} previewTab={previewTab} saving={saving} strategy={strategy} fromStyleAnalyzer={prefilled} onStrategyDecision={handleStrategyDecision} onPreviewTab={setPreviewTab} onChange={setEditing} onConfig={updateConfig} onToggleTone={toggleTone} onToggleDay={toggleDay} onToggleConfigList={toggleConfigList} onAddTag={addTag} onSave={saveSettings} onTest={testSample} onResetLearning={resetLearning} onClose={() => { setEditing(null); setPrefilled(false) }} /> : null}{sample ? <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4"><Card className="max-w-xl"><CardHeader><CardTitle>Sample AI Post</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="whitespace-pre-wrap text-sm text-slate-700">{sample}</p><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={() => setSample("")}>Close</Button></CardContent></Card></div> : null}
+  </div>}{editing ? <PromptStudioModal draft={draft} config={config} simplePrompt={simplePrompt} rawPrompt={rawPrompt} previewTab={previewTab} saving={saving} strategy={strategy} fromStyleAnalyzer={prefilled} schedule={scheduleDraft} onScheduleChange={setScheduleDraft} onStrategyDecision={handleStrategyDecision} onPreviewTab={setPreviewTab} onChange={setEditing} onConfig={updateConfig} onToggleTone={toggleTone} onToggleDay={toggleDay} onToggleConfigList={toggleConfigList} onAddTag={addTag} onSave={saveSettings} onTest={testSample} onResetLearning={resetLearning} onClose={() => { setEditing(null); setPrefilled(false) }} /> : null}{sample ? <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4"><Card className="max-w-xl"><CardHeader><CardTitle>Sample AI Post</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="whitespace-pre-wrap text-sm text-slate-700">{sample}</p><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={() => setSample("")}>Close</Button></CardContent></Card></div> : null}
   {testingFullFlow ? (
     <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4 overflow-y-auto">
       <Card className="max-w-3xl w-full my-8 flex flex-col max-h-[90vh]">
@@ -1434,7 +1600,159 @@ function dayName(day: string) {
   return { Mon: "Monday", Tue: "Tuesday", Wed: "Wednesday", Thu: "Thursday", Fri: "Friday", Sat: "Saturday", Sun: "Sunday" }[day] || day
 }
 
-function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab, saving, onPreviewTab, onChange, onConfig, onToggleTone, onToggleDay, onToggleConfigList, onAddTag, onSave, onTest, onResetLearning, onClose, strategy, onStrategyDecision, fromStyleAnalyzer }: {
+function PersonaScheduleEditor({ schedule, onChange }: { schedule: PersonaScheduleData; onChange: (schedule: PersonaScheduleData) => void }) {
+  const [overridePick, setOverridePick] = React.useState("")
+  const overrideDays = Object.keys(schedule.day_overrides)
+  const availableOverrideDays = scheduleDayKeys.filter((day) => !overrideDays.includes(day))
+
+  function toggleActiveDay(day: string) {
+    const active = schedule.active_days.includes(day)
+      ? schedule.active_days.filter((d) => d !== day)
+      : [...schedule.active_days, day]
+    onChange({ ...schedule, active_days: active })
+  }
+
+  function addDefaultTime() {
+    onChange({ ...schedule, default_times: [...schedule.default_times, "09:00"] })
+  }
+
+  function updateDefaultTime(index: number, value: string) {
+    onChange({
+      ...schedule,
+      default_times: schedule.default_times.map((t, i) => (i === index ? value : t)),
+    })
+  }
+
+  function removeDefaultTime(index: number) {
+    onChange({ ...schedule, default_times: schedule.default_times.filter((_, i) => i !== index) })
+  }
+
+  function addDayOverride(day: string) {
+    if (!day) return
+    onChange({
+      ...schedule,
+      day_overrides: { ...schedule.day_overrides, [day]: ["09:00"] },
+    })
+  }
+
+  function removeDayOverride(day: string) {
+    const next = { ...schedule.day_overrides }
+    delete next[day]
+    onChange({ ...schedule, day_overrides: next })
+  }
+
+  function addOverrideTime(day: string) {
+    const times = schedule.day_overrides[day] || []
+    onChange({
+      ...schedule,
+      day_overrides: { ...schedule.day_overrides, [day]: [...times, "09:00"] },
+    })
+  }
+
+  function updateOverrideTime(day: string, index: number, value: string) {
+    const times = schedule.day_overrides[day] || []
+    onChange({
+      ...schedule,
+      day_overrides: {
+        ...schedule.day_overrides,
+        [day]: times.map((t, i) => (i === index ? value : t)),
+      },
+    })
+  }
+
+  function removeOverrideTime(day: string, index: number) {
+    const times = schedule.day_overrides[day] || []
+    onChange({
+      ...schedule,
+      day_overrides: { ...schedule.day_overrides, [day]: times.filter((_, i) => i !== index) },
+    })
+  }
+
+  return (
+    <div className="grid gap-4 rounded-md border p-4">
+      <div>
+        <h2 className="font-semibold">Posting Schedule</h2>
+        <p className="text-xs text-slate-500 mt-1">Default times apply to all active days unless a day has its own override.</p>
+      </div>
+
+      <div className="grid gap-2">
+        <Label>Default Times</Label>
+        <p className="text-xs text-slate-500">Used on every active day that does not have an override.</p>
+        {schedule.default_times.map((time, index) => (
+          <div key={`default-${index}`} className="flex items-center gap-2">
+            <Input type="time" value={time} onChange={(e) => updateDefaultTime(index, e.target.value)} className="max-w-[160px]" />
+            <Button type="button" variant="ghost" size="icon" onClick={() => removeDefaultTime(index)} disabled={schedule.default_times.length <= 1}>
+              <Trash2 className="size-4" />
+            </Button>
+          </div>
+        ))}
+        <Button type="button" variant="outline" size="sm" className="w-fit" onClick={addDefaultTime}>
+          <Plus className="size-4 mr-1" /> Add Time
+        </Button>
+      </div>
+
+      <div className="grid gap-2">
+        <Label>Day Overrides</Label>
+        <p className="text-xs text-slate-500">Override a day to use custom times instead of the defaults.</p>
+        {overrideDays.map((day) => (
+          <div key={day} className="rounded-md border p-3 grid gap-2">
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-sm">{scheduleDayLabel(day)}</span>
+              <Button type="button" variant="ghost" size="sm" onClick={() => removeDayOverride(day)}>Remove override</Button>
+            </div>
+            {(schedule.day_overrides[day] || []).map((time, index) => (
+              <div key={`${day}-${index}`} className="flex items-center gap-2">
+                <Input type="time" value={time} onChange={(e) => updateOverrideTime(day, index, e.target.value)} className="max-w-[160px]" />
+                <Button type="button" variant="ghost" size="icon" onClick={() => removeOverrideTime(day, index)} disabled={(schedule.day_overrides[day] || []).length <= 1}>
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
+            ))}
+            <Button type="button" variant="outline" size="sm" className="w-fit" onClick={() => addOverrideTime(day)}>
+              <Plus className="size-4 mr-1" /> Add Time
+            </Button>
+          </div>
+        ))}
+        {availableOverrideDays.length ? (
+          <Select
+            className="max-w-xs"
+            value={overridePick}
+            onChange={(e) => {
+              const val = e.target.value
+              if (val) addDayOverride(val)
+              setOverridePick("")
+            }}
+          >
+            <option value="">Override a Day...</option>
+            {availableOverrideDays.map((day) => (
+              <option key={day} value={day}>{scheduleDayLabel(day)}</option>
+            ))}
+          </Select>
+        ) : null}
+      </div>
+
+      <div className="grid gap-2">
+        <Label>Active Days</Label>
+        <p className="text-xs text-slate-500">Only checked days will have posts. Unchecked days are skipped entirely.</p>
+        <div className="flex flex-wrap gap-2">
+          {scheduleDayKeys.map((day) => (
+            <Button
+              key={day}
+              type="button"
+              variant={schedule.active_days.includes(day) ? "default" : "outline"}
+              className={schedule.active_days.includes(day) ? "bg-blue-700 hover:bg-blue-800" : ""}
+              onClick={() => toggleActiveDay(day)}
+            >
+              {dayFullToAbbrev[day] || day.slice(0, 3)}
+            </Button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab, saving, onPreviewTab, onChange, onConfig, onToggleTone, onToggleDay, onToggleConfigList, onAddTag, onSave, onTest, onResetLearning, onClose, strategy, onStrategyDecision, fromStyleAnalyzer, schedule, onScheduleChange }: {
   draft: AIPersona
   config: PromptStudioConfig
   simplePrompt: string
@@ -1455,6 +1773,8 @@ function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab,
   onClose: () => void
   strategy: any
   onStrategyDecision: (action: string, prompt?: string) => void
+  schedule: PersonaScheduleData
+  onScheduleChange: (schedule: PersonaScheduleData) => void
 }) {
   const [typedPrompt, setTypedPrompt] = React.useState("")
   const [savedTemplates, setSavedTemplates] = React.useState<any[]>([])
@@ -1517,7 +1837,7 @@ function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab,
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '150ms' }}><h2 className="font-semibold">Identity Questions</h2><div className="grid gap-2"><Label>What is this page about?</Label><Input value={draft.niche} onChange={(event) => onChange({ ...draft, niche: event.target.value })} placeholder="personal finance tips for young professionals in Bangladesh" /></div><div className="grid gap-2"><Label>Who is your audience?</Label><Input value={config.audience} onChange={(event) => onConfig({ audience: event.target.value })} /></div><div className="grid gap-2"><Label>What is the main goal of your posts?</Label><Select value={config.goal} onChange={(event) => onConfig({ goal: event.target.value })}>{goalOptions.map((goal) => <option key={goal}>{goal}</option>)}<option>Other</option></Select></div><div className="grid gap-2"><Label>What is your brand personality?</Label><div className="flex flex-wrap gap-2">{toneOptions.map((tone) => <Button key={tone} type="button" variant={draft.tone_tags.includes(tone) ? "default" : "outline"} className={draft.tone_tags.includes(tone) ? "bg-blue-700 hover:bg-blue-800" : ""} onClick={() => onToggleTone(tone)}>{draft.tone_tags.includes(tone) ? <Check className="size-4" /> : null}{tone}</Button>)}</div><p className="text-xs text-slate-500">Select up to 4.</p></div></div>
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '300ms' }}><h2 className="font-semibold">Content Rules</h2><TagInput label="What topics should the AI always write about?" values={config.always_topics} onAdd={(value) => onAddTag("always_topics", value)} onRemove={(value) => onConfig({ always_topics: config.always_topics.filter((item) => item !== value) })} /><TagInput label="What topics should the AI NEVER write about?" values={config.never_topics} onAdd={(value) => onAddTag("never_topics", value)} onRemove={(value) => onConfig({ never_topics: config.never_topics.filter((item) => item !== value) })} /><div className="grid gap-2"><Label>What should every post include?</Label><div className="flex flex-wrap gap-2">{includeOptions.map((item) => <Button key={item} type="button" variant={config.every_post_includes.includes(item) ? "default" : "outline"} onClick={() => onToggleConfigList("every_post_includes", item)}>{item}</Button>)}</div></div><div className="grid gap-2"><Label>What should posts NEVER do?</Label><div className="flex flex-wrap gap-2">{neverOptions.map((item) => <Button key={item} type="button" variant={config.never_do.includes(item) ? "default" : "outline"} onClick={() => onToggleConfigList("never_do", item)}>{item}</Button>)}</div></div><div className="grid gap-2"><Label>How long should posts be?</Label><input type="range" min={0} max={2} value={["Short", "Medium", "Long"].indexOf(config.length)} onChange={(event) => onConfig({ length: (["Short", "Medium", "Long"] as const)[Number(event.target.value)] })} /><div className="flex justify-between text-xs text-slate-500"><span>Short</span><span>Medium</span><span>Long</span></div></div></div>
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '450ms' }}><h2 className="font-semibold">Format and Style Rules</h2><div className="grid gap-2"><Label>How should posts be structured?</Label><Select value={config.structure} onChange={(event) => onConfig({ structure: event.target.value })}>{structureOptions.map((item) => <option key={item}>{item}</option>)}</Select></div><div className="grid gap-2"><Label>What writing style examples do you love?</Label><Textarea className="min-h-28" value={config.examples} onChange={(event) => onConfig({ examples: event.target.value })} placeholder="Paste example posts that feel like what you want. The AI will study these." /></div><div className="grid gap-2"><Label>What language should posts be written in?</Label><Select value={draft.language} onChange={(event) => onChange({ ...draft, language: event.target.value })}>{languages.map((language) => <option key={language}>{language}</option>)}</Select></div></div>
-      <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '600ms' }}><h2 className="font-semibold">Advanced Control</h2><div className="grid gap-2"><Label>Write any additional instructions in your own words</Label><Textarea className="min-h-28" value={draft.custom_instructions || ""} onChange={(event) => onChange({ ...draft, custom_instructions: event.target.value })} /></div><div className="grid gap-2"><Label>Rate how creative vs safe you want the AI to be: {draft.creativity_level}/10</Label><input type="range" min={1} max={10} value={draft.creativity_level} onChange={(event) => onChange({ ...draft, creativity_level: Number(event.target.value) })} /><div className="flex justify-between text-xs text-slate-500"><span>Very safe, predictable, consistent.</span><span>Very creative, experimental, surprising.</span></div></div><div className="grid gap-3 md:grid-cols-2"><div className="grid gap-2"><Label>Assigned Days</Label><div className="flex flex-wrap gap-2">{dayOptions.map((day) => <Button key={day} type="button" variant={draft.assigned_days.includes(day) ? "default" : "outline"} onClick={() => onToggleDay(day)}>{day}</Button>)}</div></div><div className="grid gap-2"><Label>Posting Times</Label>{draft.posting_time_slots.map((slot, index) => <Input key={`${slot}-${index}`} type="time" value={slot} onChange={(event) => onChange({ ...draft, posting_time_slots: draft.posting_time_slots.map((item, itemIndex) => itemIndex === index ? event.target.value : item) })} />)}</div></div><div className="flex items-center justify-between rounded-md border p-3"><Label>Learning Mode</Label><Switch checked={draft.learning_mode_enabled} onCheckedChange={(checked) => onChange({ ...draft, learning_mode_enabled: checked })} /></div>{draft.learned_patterns_summary ? <p className="text-sm text-slate-500">{draft.learned_patterns_summary}</p> : null}</div>
+      <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '600ms' }}><h2 className="font-semibold">Advanced Control</h2><div className="grid gap-2"><Label>Write any additional instructions in your own words</Label><Textarea className="min-h-28" value={draft.custom_instructions || ""} onChange={(event) => onChange({ ...draft, custom_instructions: event.target.value })} /></div><div className="grid gap-2"><Label>Rate how creative vs safe you want the AI to be: {draft.creativity_level}/10</Label><input type="range" min={1} max={10} value={draft.creativity_level} onChange={(event) => onChange({ ...draft, creativity_level: Number(event.target.value) })} /><div className="flex justify-between text-xs text-slate-500"><span>Very safe, predictable, consistent.</span><span>Very creative, experimental, surprising.</span></div></div><PersonaScheduleEditor schedule={schedule} onChange={onScheduleChange} /><div className="flex items-center justify-between rounded-md border p-3"><Label>Learning Mode</Label><Switch checked={draft.learning_mode_enabled} onCheckedChange={(checked) => onChange({ ...draft, learning_mode_enabled: checked })} /></div>{draft.learned_patterns_summary ? <p className="text-sm text-slate-500">{draft.learned_patterns_summary}</p> : null}</div>
       <div className="grid gap-3 rounded-md border p-4 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-backwards" style={{ animationDelay: '750ms' }}><h2 className="font-semibold flex items-center gap-2"><LayoutTemplate className="size-4" /> Image Template</h2><div className="grid gap-2"><Label>Assigned template</Label><p className="text-sm text-slate-600">{assignedTemplate.name || "None assigned"}</p>{assignedTemplate.image_template_id ? <Button variant="outline" onClick={unassignTemplate} disabled={assigningTemplate}>Unassign</Button> : null}</div><div className="grid gap-2"><Label>Select template</Label><Select value={assignedTemplate.image_template_id || ""} onChange={(event) => assignTemplate(event.target.value)}><option value="">Choose a saved template</option>{savedTemplates.map((tpl) => <option key={tpl.id} value={tpl.id}>{tpl.name}</option>)}</Select><p className="text-xs text-slate-500">Manage templates in the Templates page.</p></div></div>
     </div>
     <aside className="grid h-fit gap-3 rounded-md border bg-slate-50 p-4 lg:sticky lg:top-4 overflow-y-auto max-h-[85vh]">

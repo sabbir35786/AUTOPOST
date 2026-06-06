@@ -5,6 +5,36 @@ from sqlalchemy import func
 from app.models import PersonaSchedule, ScheduledSlot
 from app.qstash import schedule_post_delivery, cancel_scheduled_post
 
+DAY_ABBREV_TO_FULL = {
+    "mon": "monday",
+    "tue": "tuesday",
+    "wed": "wednesday",
+    "thu": "thursday",
+    "fri": "friday",
+    "sat": "saturday",
+    "sun": "sunday",
+    "monday": "monday",
+    "tuesday": "tuesday",
+    "wednesday": "wednesday",
+    "thursday": "thursday",
+    "friday": "friday",
+    "saturday": "saturday",
+    "sunday": "sunday",
+}
+
+
+def normalize_day_name(day: str) -> str:
+    """Convert 'Mon', 'monday', etc. to full lowercase day name."""
+    key = day.strip().lower()
+    if key in DAY_ABBREV_TO_FULL:
+        return DAY_ABBREV_TO_FULL[key]
+    return DAY_ABBREV_TO_FULL.get(key[:3], key)
+
+
+def normalize_active_days(days: list[str]) -> list[str]:
+    return [normalize_day_name(d) for d in days if d.strip()]
+
+
 def get_todays_slots_for_persona(schedule: PersonaSchedule) -> list[datetime]:
     """
     Returns list of UTC datetimes for today's remaining posting slots.
@@ -21,14 +51,15 @@ def get_todays_slots_for_persona(schedule: PersonaSchedule) -> list[datetime]:
     
     # Get schedule data
     schedule_data = schedule.schedule_data
-    active_days = [d.lower() for d in schedule_data.get('active_days', [])]
+    active_days = normalize_active_days(schedule_data.get('active_days', []))
     default_times = schedule_data.get('default_times', [])
-    day_overrides = schedule_data.get('day_overrides', {})
-    
+    raw_overrides = schedule_data.get('day_overrides', {})
+    day_overrides = {normalize_day_name(k): v for k, v in raw_overrides.items()}
+
     # Check if today is an active day
     if today not in active_days:
         return []
-    
+
     # Determine which times to use
     if today in day_overrides:
         times_to_use = day_overrides[today]

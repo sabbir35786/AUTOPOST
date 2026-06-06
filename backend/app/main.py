@@ -485,10 +485,6 @@ async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(g
                                     post_log.error_message = f"template_image_generation_failed: {str(e)}"
                                     post_log.delivery_status = "failed"
                                     db.commit()
-                                    
-                                    # Register next occurrence so rolling window continues
-                                    if persona.assigned_days and persona.posting_time_slots and persona.is_active:
-                                        _register_next_occurrence(db, persona, user, post_log.scheduled_at)
                                     return {"status": "skipped", "message": "Post skipped due to image generation failure fallback policy"}
                                 elif persona.image_fallback_policy == "use_library":
                                     any_unused = db.query(models.MediaLibrary).filter(
@@ -585,8 +581,6 @@ async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(g
                                     post_log.error_message = "image_generation_failed (timeout)"
                                     post_log.delivery_status = "failed"
                                     db.commit()
-                                    if persona.assigned_days and persona.posting_time_slots and persona.is_active:
-                                        _register_next_occurrence(db, persona, user, post_log.scheduled_at)
                                     return {"status": "skipped", "message": "Post skipped due to image generation timeout fallback policy"}
                                 elif persona.image_fallback_policy == "use_library":
                                     any_unused = db.query(models.MediaLibrary).filter(
@@ -603,8 +597,6 @@ async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(g
                                     post_log.error_message = f"image_generation_failed (error): {e}"
                                     post_log.delivery_status = "failed"
                                     db.commit()
-                                    if persona.assigned_days and persona.posting_time_slots and persona.is_active:
-                                        _register_next_occurrence(db, persona, user, post_log.scheduled_at)
                                     return {"status": "skipped", "message": "Post skipped due to image generation error fallback policy"}
                                 elif persona.image_fallback_policy == "use_library":
                                     any_unused = db.query(models.MediaLibrary).filter(
@@ -625,14 +617,6 @@ async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(g
             post_log.delivery_status = "delivered"
             db.commit()
             print(f"QStash webhook: Post {post_id} published successfully")
-            
-            # Phase 5: Rolling Window - Register next occurrence
-            if persona:
-                if persona.assigned_days and persona.posting_time_slots and persona.is_active:
-                    user = db.get(models.User, persona.user_id)
-                    if user:
-                        _register_next_occurrence(db, persona, user, post_log.scheduled_at)
-            
             return {"status": "ok", "message": "Post published successfully"}
         else:
             post_log.delivery_status = "failed"
@@ -653,62 +637,6 @@ async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(g
             detail=str(exc),
         )
 
-
-def _register_next_occurrence(db: Session, persona: models.AIPersona, user: models.User, last_scheduled_at: datetime) -> None:
-    """
-    Register the next posting occurrence with QStash (Rolling Window - Phase 5).
-    This ensures there are always 7 future slots registered.
-    """
-    # Count existing scheduled posts for this persona
-    scheduled_count = (
-        db.query(models.PostLog)
-        .filter(
-            models.PostLog.ai_persona_id == persona.id,
-            models.PostLog.status == "scheduled",
-            models.PostLog.scheduled_at > datetime.now(timezone.utc),
-        )
-        .count()
-    )
-    
-    # If we have fewer than 7 scheduled posts, add more
-    if scheduled_count < 7:
-        needed = 7 - scheduled_count
-        assigned_days_list = [day.strip() for day in persona.assigned_days.split(",") if day.strip()]
-        
-        # Calculate next datetimes starting from the last scheduled time
-        posting_datetimes = calculate_next_posting_datetimes(
-            assigned_days=assigned_days_list,
-            posting_time_slots=persona.posting_time_slots or ["09:00"],
-            timezone_str=user.timezone,
-            count=needed,
-            from_time=last_scheduled_at,
-        )
-        
-        # Create and schedule new posts
-        for scheduled_at in posting_datetimes:
-            post_log = models.PostLog(
-                user_id=persona.user_id,
-                facebook_connection_id=persona.page_connection_id,
-                ai_persona_id=persona.id,
-                content="",  # Will be generated at posting time
-                status="scheduled",
-                scheduled_at=scheduled_at,
-                delivery_status="pending",
-            )
-            db.add(post_log)
-            db.flush()
-            
-            # Schedule with QStash
-            qstash_id = schedule_post_delivery(post_id=str(post_log.id), scheduled_at_utc=scheduled_at)
-            if qstash_id:
-                post_log.qstash_message_id = qstash_id
-                post_log.delivery_status = "pending"
-            else:
-                post_log.delivery_status = "failed"
-                post_log.error_message = "Failed to schedule with QStash"
-        
-        db.commit()
-        print(f"Registered {len(posting_datetimes)} new occurrences for persona {persona.persona_name} (rolling window)")
 
 
 @app.post("/api/internal/run-scheduler")
@@ -1087,30 +1015,34 @@ def _schedule_persona_posts(db: Session, persona: models.AIPersona, user: models
     """
     if not persona.assigned_days or not persona.posting_time_slots:
         return
-    
+
+    from app.services.schedule_service import register_todays_slots, normalize_active_days
+
     assigned_days_list = [day.strip() for day in persona.assigned_days.split(",") if day.strip()]
-    
-    # Upsert PersonaSchedule
-    schedule = db.query(models.PersonaSchedule).filter_by(persona_id=persona.id).first()
+    existing = db.query(models.PersonaSchedule).filter_by(persona_id=persona.id).first()
+    existing_overrides = (existing.schedule_data or {}).get("day_overrides", {}) if existing else {}
+    schedule_data = {
+        "active_days": normalize_active_days(assigned_days_list),
+        "default_times": persona.posting_time_slots or ["09:00"],
+        "day_overrides": existing_overrides,
+    }
+
+    schedule = existing
     if schedule:
-        schedule.days_of_week = assigned_days_list
-        schedule.post_times = persona.posting_time_slots or ["09:00"]
-        schedule.timezone = user.timezone
+        schedule.schedule_data = schedule_data
+        schedule.timezone = user.timezone or "Asia/Dhaka"
         schedule.is_active = persona.is_active
         schedule.updated_at = datetime.now(timezone.utc)
     else:
         schedule = models.PersonaSchedule(
             persona_id=persona.id,
-            days_of_week=assigned_days_list,
-            post_times=persona.posting_time_slots or ["09:00"],
-            timezone=user.timezone,
+            timezone=user.timezone or "Asia/Dhaka",
             is_active=persona.is_active,
+            schedule_data=schedule_data,
         )
         db.add(schedule)
     db.commit()
-    
-    # Cancel any existing pending slots for today, then re-register
-    from app.services.schedule_service import register_todays_slots
+
     import asyncio
     try:
         loop = asyncio.get_event_loop()
@@ -1120,7 +1052,7 @@ def _schedule_persona_posts(db: Session, persona: models.AIPersona, user: models
             loop.run_until_complete(register_todays_slots(str(persona.id), db))
     except RuntimeError:
         asyncio.run(register_todays_slots(str(persona.id), db))
-    
+
     print(f"Schedule saved and today's slots registered for persona {persona.persona_name}")
 
 
@@ -1777,6 +1709,19 @@ def update_ai_persona(
             _schedule_persona_posts(db, persona, current_user)
         except Exception as exc:
             print(f"Persona saved, but schedule registration failed for persona {persona.id}: {exc}")
+    elif not persona.is_active:
+        pending_slots = db.query(models.ScheduledSlot).filter(
+            models.ScheduledSlot.persona_id == persona_id,
+            models.ScheduledSlot.status == "pending",
+        ).all()
+        for slot in pending_slots:
+            if slot.qstash_message_id:
+                cancel_scheduled_post(slot.qstash_message_id)
+            slot.status = "cancelled"
+        schedule = db.query(models.PersonaSchedule).filter_by(persona_id=persona_id).first()
+        if schedule:
+            schedule.is_active = False
+        db.commit()
     
     return _serialize_ai_persona(persona)
 
@@ -2279,6 +2224,17 @@ def dashboard_intelligence(
         snapshot = latest_snapshots.get(post.id)
         post.latest_comments_count = snapshot.comments_count if snapshot else 0
 
+    next_slot = (
+        db.query(models.ScheduledSlot)
+        .join(models.AIPersona)
+        .filter(
+            models.AIPersona.user_id == current_user.id,
+            models.ScheduledSlot.status.in_(["pending", "generating"]),
+            models.ScheduledSlot.scheduled_at >= now,
+        )
+        .order_by(models.ScheduledSlot.scheduled_at.asc())
+        .first()
+    )
     next_post = (
         db.query(models.PostLog)
         .filter(
@@ -2289,6 +2245,18 @@ def dashboard_intelligence(
         .order_by(models.PostLog.scheduled_at.asc())
         .first()
     )
+    next_scheduled_at = None
+    next_scheduled_content = None
+    next_scheduled_id = None
+    if next_slot and (not next_post or (next_slot.scheduled_at and next_post.scheduled_at and next_slot.scheduled_at <= next_post.scheduled_at)):
+        next_scheduled_at = next_slot.scheduled_at
+        next_scheduled_id = next_slot.id
+        persona_for_slot = db.get(models.AIPersona, next_slot.persona_id)
+        next_scheduled_content = f"Auto post for {persona_for_slot.persona_name}" if persona_for_slot else "Scheduled auto post"
+    elif next_post:
+        next_scheduled_at = next_post.scheduled_at
+        next_scheduled_id = next_post.id
+        next_scheduled_content = next_post.content
     last_post = next((post for post in posts if post.status in ("published", "success")), None)
     last_snapshot = latest_snapshots.get(last_post.id) if last_post else None
 
@@ -2375,11 +2343,11 @@ def dashboard_intelligence(
 
     return {
         "now": now,
-        "next_scheduled_post": None if not next_post else {
-            "id": next_post.id,
-            "content": next_post.content,
-            "scheduled_at": next_post.scheduled_at,
-            "minutes_until": max(0, int(((next_post.scheduled_at or now) - now).total_seconds() // 60)),
+        "next_scheduled_post": None if not next_scheduled_at else {
+            "id": next_scheduled_id,
+            "content": next_scheduled_content,
+            "scheduled_at": next_scheduled_at,
+            "minutes_until": max(0, int(((next_scheduled_at or now) - now).total_seconds() // 60)),
         },
         "last_published_post": None if not last_post else {
             "id": last_post.id,
