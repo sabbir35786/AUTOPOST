@@ -15,7 +15,7 @@ anthropic
 mistralai
 python-multipart
 itsdangerous
-qstash
+APScheduler==3.10.4
 pillow
 pycairo
 PyGObject==3.48.2

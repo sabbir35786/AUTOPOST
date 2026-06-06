@@ -46,9 +46,6 @@ from app.config import (
     CRON_SECRET,
     SUPABASE_SERVICE_KEY,
     SUPABASE_URL,
-    QSTASH_TOKEN,
-    QSTASH_CURRENT_SIGNING_KEY,
-    QSTASH_NEXT_SIGNING_KEY,
 )
 from app.crypto import decrypt_token, encrypt_token
 from app.database import create_database_tables, get_db
@@ -94,15 +91,7 @@ from app.learning.service import (
     run_weekly_learning_job,
     user_has_learning_access,
 )
-from app.qstash import (
-    schedule_scheduler_endpoint,
-    _print_qstash_config_status,
-    schedule_post_delivery,
-    cancel_scheduled_post,
-    verify_qstash_signature,
-    calculate_next_posting_datetimes,
-    setup_midnight_schedule,
-)
+
 
 pending_facebook_credentials: dict[int, dict] = {}
 last_scheduler_run_at: datetime | None = None
@@ -171,8 +160,6 @@ def _print_startup_config_status() -> None:
         "FACEBOOK_OAUTH_SCOPES": bool(FACEBOOK_OAUTH_SCOPES),
         "CRON_SECRET": bool(CRON_SECRET and CRON_SECRET != "your_cron_secret_here"),
         "APP_BASE_URL": bool(BACKEND_URL),
-        "QSTASH_CURRENT_SIGNING_KEY": bool(QSTASH_CURRENT_SIGNING_KEY),
-        "QSTASH_NEXT_SIGNING_KEY": bool(QSTASH_NEXT_SIGNING_KEY),
     }
     optional_env = {
         "MISTRAL_API_KEY": bool(MISTRAL_API_KEY),
@@ -180,9 +167,7 @@ def _print_startup_config_status() -> None:
         "STABILITY_API_KEY": bool(STABILITY_API_KEY),
         "OPENAI_API_KEY": bool(OPENAI_API_KEY),
         "GEMINI_API_KEY": bool(GEMINI_API_KEY),
-        "SUPABASE_URL": bool(SUPABASE_URL),
         "SUPABASE_SERVICE_KEY": bool(SUPABASE_SERVICE_KEY),
-        "QSTASH_TOKEN": bool(QSTASH_TOKEN),
     }
     print("Environment configuration:")
     for name, loaded in required_env.items():
@@ -244,10 +229,10 @@ async def _ensure_supabase_storage_bucket() -> None:
 
 def _print_health_check_summary() -> None:
     print("=== APP HEALTH CHECK ===")
-    print("\u2713 Database: all tables present")
-    print("\u2713 Migrations: all applied")
-    print("\u2713 QStash: connected")
-    print("\u2713 Supabase Storage: connected")
+    print("✓ Database: all tables present")
+    print("✓ Migrations: all applied")
+    print("✓ APScheduler: running")
+    print("✓ Supabase Storage: connected")
     print("\u2713 Fonts: all present")
     print("\u2713 Pango: working")
     print("\u2713 Routes: all registered")
@@ -256,19 +241,24 @@ def _print_health_check_summary() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _print_startup_config_status()
-    _print_qstash_config_status()
     create_database_tables()
     _run_database_migrations()  # Run pending migrations after creating tables
     clear_all_user_posting_locks()
     asyncio.create_task(_ensure_supabase_storage_bucket())
-    if QSTASH_TOKEN:
-        asyncio.create_task(schedule_scheduler_endpoint())
-        setup_midnight_schedule()
+    
+    # Start APScheduler
+    from app.scheduler import start_scheduler, stop_scheduler
+    from app.services.schedule_service import register_all_todays_slots
+    start_scheduler()
+    
+    # Run immediate registration
+    asyncio.create_task(register_all_todays_slots())
+    
     _print_health_check_summary()
     try:
         yield
     finally:
-        pass
+        stop_scheduler()
 
 
 app = FastAPI(title="Auto Poster API", lifespan=lifespan)
@@ -318,324 +308,6 @@ def api_health_check():
     return {"status": "ok"}
 
 
-@app.post("/api/webhooks/publish-post-old")
-async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(get_db)):
-    """
-    Webhook endpoint for QStash to trigger scheduled post delivery.
-    Verifies QStash HMAC signature, then publishes the post to Facebook.
-    Returns HTTP 500 on publish failure so QStash retries automatically.
-    """
-    import json as _json
-
-    try:
-        # 1. Read raw body FIRST (needed for signature verification before json parsing)
-        raw_body = await request.body()
-
-        # 2. Verify QStash signature — reject anything without a valid signature
-        signature = request.headers.get("Upstash-Signature")
-        if not signature:
-            print("QStash webhook: Missing Upstash-Signature header — rejecting request")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Missing QStash signature",
-            )
-
-        webhook_url = f"{BACKEND_URL.rstrip('/')}/api/webhooks/publish-post-old"
-        if not verify_qstash_signature(raw_body, signature, webhook_url):
-            print("QStash webhook: Signature verification failed — rejecting request")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid QStash signature",
-            )
-
-        # 3. Parse body after verification
-        body = _json.loads(raw_body)
-        post_id = body.get("post_id")
-
-        if not post_id:
-            print("QStash webhook: Missing post_id in request body")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Missing post_id",
-            )
-
-        # 4. Fetch post
-        post_log = db.query(models.PostLog).filter(models.PostLog.id == int(post_id)).first()
-        if not post_log:
-            print(f"QStash webhook: Post {post_id} not found")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Post not found",
-            )
-
-        # Fetch persona if available
-        persona = None
-        if post_log.ai_persona_id:
-            persona = db.get(models.AIPersona, post_log.ai_persona_id)
-
-        # 5. Idempotency guard — do not double-publish
-        if post_log.status in ["published", "success"]:
-            print(f"QStash webhook: Post {post_id} already published — returning 200 (idempotent)")
-            return {"status": "ok", "message": "Post already published"}
-
-        # 6. Check Facebook connection
-        connection = db.get(models.FacebookConnection, post_log.facebook_connection_id)
-        if not connection or connection.connection_status != "connected":
-            print(f"QStash webhook: Facebook connection not available for post {post_id}")
-            post_log.status = "failed"
-            post_log.error_message = "Facebook page is not connected"
-            post_log.delivery_status = "failed"
-            db.commit()
-            # Return 503 so QStash retries — the page may reconnect soon
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Facebook connection not available — will retry",
-            )
-
-        # 7. Generate content if empty (on-the-fly generation)
-        if not post_log.content or not post_log.content.strip():
-            if persona:
-                try:
-                    # Fetch recent topics for variety
-                    recent_topics = [
-                        row[0]
-                        for row in db.query(models.PostLog.topic)
-                        .filter(
-                            models.PostLog.facebook_connection_id == connection.id,
-                            models.PostLog.topic.isnot(None),
-                        )
-                        .order_by(models.PostLog.created_at.desc())
-                        .limit(5)
-                        .all()
-                    ]
-                    
-                    content = generate_persona_post_with_user_model(
-                        db=db,
-                        settings=persona,
-                        recent_topics=recent_topics,
-                    )
-                    post_log.content = content
-                    
-                    # Extract topic for learning
-                    from app.mistral_service import extract_post_topic
-                    post_log.topic = extract_post_topic(content)
-                    
-                    db.commit()
-                    print(f"Generated content for persona {persona.persona_name}")
-                except Exception as e:
-                    print(f"Failed to generate content: {e}")
-                    post_log.status = "failed"
-                    post_log.error_message = f"Content generation failed: {str(e)}"
-                    post_log.delivery_status = "failed"
-                    db.commit()
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="Content generation failed",
-                    )
-
-        # 7.5. Optional: Image Generation Layer
-        if persona and persona.include_image and not post_log.media_library_id and not post_log.image_url:
-            import time
-            import asyncio
-            import uuid
-            from app.routers.images import async_upload_to_supabase, generate_template_layered_image
-            from app.providers.image_providers import get_image_provider_for_user
-
-            user = db.get(models.User, persona.user_id)
-            if user:
-                local_now = datetime.now(timezone.utc).astimezone(ZoneInfo(user.timezone))
-                
-                # Check frequency
-                total_posts = persona.total_posts_published
-                should_generate = False
-                freq = persona.image_frequency
-                if freq == "every_post":
-                    should_generate = True
-                elif freq == "every_other" and total_posts % 2 == 0:
-                    should_generate = True
-                elif freq == "1_in_3" and total_posts % 3 == 2:
-                    should_generate = True
-                elif freq == "1_in_5" and total_posts % 5 == 4:
-                    should_generate = True
-                elif freq == "weekends_only" and local_now.weekday() >= 5:
-                    should_generate = True
-
-                if should_generate:
-                    # Check if template-based generation is enabled
-                    if persona.template_image_generation_enabled:
-                        template_settings = db.query(models.ImagePromptSettings).filter(
-                            models.ImagePromptSettings.persona_id == persona.id
-                        ).first()
-
-                        if template_settings and template_settings.template_layers_json:
-                            try:
-                                media_id, image_url = await generate_template_layered_image(
-                                    persona_id=persona.id,
-                                    post_text=post_log.content,
-                                    topic_hint=post_log.topic,
-                                    db=db,
-                                    user_id=persona.user_id
-                                )
-                                post_log.media_library_id = media_id
-                                print(f"Template image generation for persona {persona.persona_name}: status=success")
-                            except Exception as e:
-                                print(f"Template image generation for persona {persona.persona_name}: status=failed error={str(e)}")
-                                if persona.image_fallback_policy == "skip_post":
-                                    post_log.status = "missed"
-                                    post_log.error_message = f"template_image_generation_failed: {str(e)}"
-                                    post_log.delivery_status = "failed"
-                                    db.commit()
-                                    return {"status": "skipped", "message": "Post skipped due to image generation failure fallback policy"}
-                                elif persona.image_fallback_policy == "use_library":
-                                    any_unused = db.query(models.MediaLibrary).filter(
-                                        models.MediaLibrary.user_id == persona.user_id,
-                                        models.MediaLibrary.is_used == False
-                                    ).order_by(models.MediaLibrary.created_at.asc()).first()
-                                    if any_unused:
-                                        post_log.media_library_id = str(any_unused.id)
-                        else:
-                            print(f"Template not analyzed for persona {persona.persona_name}, falling back to simple generation")
-
-                    if not post_log.media_library_id:
-                        # Simple image generation
-                        image_prompt = None
-                        if persona.image_prompt_source == "persona_prompt":
-                            psettings = db.query(models.ImagePromptSettings).filter(models.ImagePromptSettings.persona_id == persona.id).first()
-                            if psettings and psettings.assembled_prompt:
-                                image_prompt = psettings.assembled_prompt
-                        elif persona.image_prompt_source == "generate_from_post":
-                            sys_p = "You are an expert at writing prompts for AI image generation. Given a social media post text, write a detailed image generation prompt that would create the perfect visual to accompany that post. The image should enhance the post's message without containing any text. Return only the image generation prompt, nothing else, maximum 150 words."
-                            image_prompt = generate_text_for_user(
-                                user_id=persona.user_id,
-                                task_category="image_prompt_generation",
-                                prompt=post_log.content,
-                                system_prompt=sys_p,
-                                db=db,
-                                temperature=0.7,
-                                max_tokens=200,
-                            )
-                            if image_prompt:
-                                image_prompt = image_prompt.strip()
-                        elif persona.image_prompt_source == "library_image":
-                            oldest_unused = db.query(models.MediaLibrary).filter(
-                                models.MediaLibrary.persona_id == persona.id,
-                                models.MediaLibrary.is_used == False
-                            ).order_by(models.MediaLibrary.created_at.asc()).first()
-                            if oldest_unused:
-                                post_log.media_library_id = str(oldest_unused.id)
-                            else:
-                                sys_p = "You are an expert at writing prompts for AI image generation. Given a social media post text, write a detailed image generation prompt that would create the perfect visual to accompany that post. The image should enhance the post's message without containing any text. Return only the image generation prompt, nothing else, maximum 150 words."
-                                image_prompt = generate_text_for_user(
-                                    user_id=persona.user_id,
-                                    task_category="image_prompt_generation",
-                                    prompt=post_log.content,
-                                    system_prompt=sys_p,
-                                    db=db,
-                                    temperature=0.7,
-                                    max_tokens=200,
-                                )
-                                if image_prompt:
-                                    image_prompt = image_prompt.strip()
-
-                        if image_prompt and not post_log.media_library_id:
-                            provider_inst, model_name, api_key = get_image_provider_for_user(persona.user_id, db)
-                            provider_name = provider_inst.__class__.__name__.replace('Provider', '').lower()
-                            start_img_t = time.time()
-                            try:
-                                async def _gen():
-                                    return await asyncio.to_thread(
-                                        provider_inst.generate,
-                                        prompt=image_prompt,
-                                        negative_prompt="",
-                                        aspect_ratio="1:1",
-                                        model_name=model_name,
-                                        api_key=api_key,
-                                    )
-                                img_bytes = await asyncio.wait_for(
-                                    _gen(),
-                                    timeout=max(10, min(persona.image_max_wait_seconds or 120, 180)),
-                                )
-                                job_id_str = str(uuid.uuid4())
-                                filename = f"{persona.user_id}/{job_id_str}.png"
-                                pub_url = await async_upload_to_supabase(filename, img_bytes)
-
-                                media = models.MediaLibrary(
-                                    user_id=persona.user_id,
-                                    persona_id=persona.id,
-                                    image_url=pub_url,
-                                    storage_path=filename,
-                                    generation_prompt=image_prompt,
-                                    provider=provider_name,
-                                    model_name=model_name,
-                                )
-                                db.add(media)
-                                db.flush()
-                                post_log.media_library_id = str(media.id)
-                                elapsed = int(time.time() - start_img_t)
-                                print(f"Webhook image generation for persona {persona.persona_name}: provider={provider_name} status=success seconds={elapsed}")
-                            except asyncio.TimeoutError:
-                                elapsed = int(time.time() - start_img_t)
-                                print(f"Webhook image generation for persona {persona.persona_name}: provider={provider_name} status=timeout seconds={elapsed}")
-                                if persona.image_fallback_policy == "skip_post":
-                                    post_log.status = "missed"
-                                    post_log.error_message = "image_generation_failed (timeout)"
-                                    post_log.delivery_status = "failed"
-                                    db.commit()
-                                    return {"status": "skipped", "message": "Post skipped due to image generation timeout fallback policy"}
-                                elif persona.image_fallback_policy == "use_library":
-                                    any_unused = db.query(models.MediaLibrary).filter(
-                                        models.MediaLibrary.user_id == persona.user_id,
-                                        models.MediaLibrary.is_used == False
-                                    ).order_by(models.MediaLibrary.created_at.asc()).first()
-                                    if any_unused:
-                                        post_log.media_library_id = str(any_unused.id)
-                            except Exception as e:
-                                elapsed = int(time.time() - start_img_t)
-                                print(f"Webhook image generation for persona {persona.persona_name}: provider={provider_name} status=failed error={e} seconds={elapsed}")
-                                if persona.image_fallback_policy == "skip_post":
-                                    post_log.status = "missed"
-                                    post_log.error_message = f"image_generation_failed (error): {e}"
-                                    post_log.delivery_status = "failed"
-                                    db.commit()
-                                    return {"status": "skipped", "message": "Post skipped due to image generation error fallback policy"}
-                                elif persona.image_fallback_policy == "use_library":
-                                    any_unused = db.query(models.MediaLibrary).filter(
-                                        models.MediaLibrary.user_id == persona.user_id,
-                                        models.MediaLibrary.is_used == False
-                                    ).order_by(models.MediaLibrary.created_at.asc()).first()
-                                    if any_unused:
-                                        post_log.media_library_id = str(any_unused.id)
-
-        # 8. Publish
-        post_log.status = "publishing"
-        post_log.delivery_status = "delivering"
-        db.commit()
-
-        success = await publish_post_to_facebook(db, post_log, connection)
-
-        if success:
-            post_log.delivery_status = "delivered"
-            db.commit()
-            print(f"QStash webhook: Post {post_id} published successfully")
-            return {"status": "ok", "message": "Post published successfully"}
-        else:
-            post_log.delivery_status = "failed"
-            db.commit()
-            print(f"QStash webhook: Post {post_id} publish failed — returning 500 for QStash retry")
-            # Return 500 so QStash retries automatically
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Post publish failed — will retry",
-            )
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        print(f"QStash webhook unexpected error: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
-        )
 
 
 
@@ -1020,25 +692,27 @@ def _schedule_persona_posts(db: Session, persona: models.AIPersona, user: models
 
     assigned_days_list = [day.strip() for day in persona.assigned_days.split(",") if day.strip()]
     existing = db.query(models.PersonaSchedule).filter_by(persona_id=persona.id).first()
-    existing_overrides = (existing.schedule_data or {}).get("day_overrides", {}) if existing else {}
-    schedule_data = {
-        "active_days": normalize_active_days(assigned_days_list),
-        "default_times": persona.posting_time_slots or ["09:00"],
-        "day_overrides": existing_overrides,
-    }
+    existing_overrides = (existing.day_overrides or {}) if existing else {}
+    active_days = normalize_active_days(assigned_days_list)
+    default_times = persona.posting_time_slots or ["09:00"]
+    user_tz = user.timezone or "UTC"
 
     schedule = existing
     if schedule:
-        schedule.schedule_data = schedule_data
-        schedule.timezone = user.timezone or "Asia/Dhaka"
+        schedule.active_days = active_days
+        schedule.default_times = default_times
+        schedule.day_overrides = existing_overrides
+        schedule.timezone = user_tz
         schedule.is_active = persona.is_active
         schedule.updated_at = datetime.now(timezone.utc)
     else:
         schedule = models.PersonaSchedule(
             persona_id=persona.id,
-            timezone=user.timezone or "Asia/Dhaka",
+            timezone=user_tz,
             is_active=persona.is_active,
-            schedule_data=schedule_data,
+            active_days=active_days,
+            default_times=default_times,
+            day_overrides=existing_overrides,
         )
         db.add(schedule)
     db.commit()
@@ -1708,7 +1382,7 @@ def update_ai_persona(
     db.commit()
     db.refresh(persona)
     
-    # Keep persona saves independent from external scheduler/QStash failures.
+    # Keep persona saves independent from APScheduler.
     if assigned_days and posting_time_slots and persona.is_active:
         try:
             _schedule_persona_posts(db, persona, current_user)
@@ -1720,8 +1394,6 @@ def update_ai_persona(
             models.ScheduledSlot.status == "pending",
         ).all()
         for slot in pending_slots:
-            if slot.qstash_message_id:
-                cancel_scheduled_post(slot.qstash_message_id)
             slot.status = "cancelled"
         schedule = db.query(models.PersonaSchedule).filter_by(persona_id=persona_id).first()
         if schedule:
@@ -1740,14 +1412,12 @@ def delete_ai_persona(
     if not persona:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persona not found")
     
-    # Cancel all pending QStash slots for this persona
+    # Cancel all pending slots for this persona (APScheduler will skip them)
     pending_slots = db.query(models.ScheduledSlot).filter(
         models.ScheduledSlot.persona_id == persona_id,
         models.ScheduledSlot.status == 'pending'
     ).all()
     for slot in pending_slots:
-        if slot.qstash_message_id:
-            cancel_scheduled_post(slot.qstash_message_id)
         slot.status = 'cancelled'
     
     schedule = db.query(models.PersonaSchedule).filter_by(persona_id=persona_id).first()
@@ -3109,17 +2779,6 @@ async def publish_composer_post(
         db.refresh(post_log)
         
         if payload.scheduled_at and not payload.save_as_draft:
-            qstash_id = schedule_post_delivery(post_id=str(post_log.id), scheduled_at_utc=payload.scheduled_at)
-            if not qstash_id:
-                post_log.status = "schedule_failed"
-                post_log.delivery_status = "failed"
-                post_log.error_message = "Scheduling failed. Check QStash configuration and choose a time at least 30 seconds in the future."
-                db.commit()
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=post_log.error_message,
-                )
-            post_log.qstash_message_id = qstash_id
             post_log.delivery_status = "pending"
             db.commit()
         
@@ -3364,21 +3023,9 @@ def update_post(
     if payload.media_urls is not None:
         post.media_urls = payload.media_urls
     if payload.scheduled_at is not None:
-        # Cancel existing QStash message if rescheduling
-        if post.qstash_message_id and post.scheduled_at != payload.scheduled_at:
-            cancel_scheduled_post(post.qstash_message_id)
-            post.qstash_message_id = None
-            post.delivery_status = "pending"
-        
         post.scheduled_at = payload.scheduled_at
         post.status = "scheduled"
-        
-        # Schedule new delivery with QStash
-        if payload.scheduled_at:
-            qstash_id = schedule_post_delivery(post_id=str(post.id), scheduled_at_utc=payload.scheduled_at)
-            if qstash_id:
-                post.qstash_message_id = qstash_id
-                post.delivery_status = "pending"
+        post.delivery_status = "pending"
     if payload.link_url is not None:
         post.link_url = payload.link_url
     if payload.link_preview_data is not None:
@@ -3409,10 +3056,6 @@ def delete_post(
             {"post_id": post.id, "content": post.content[:1000], "status": post.status},
             -1.0,
         )
-    
-    # Cancel QStash message if post is scheduled
-    if post.qstash_message_id:
-        cancel_scheduled_post(post.qstash_message_id)
     
     db.delete(post)
     db.commit()

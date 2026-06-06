@@ -61,13 +61,8 @@ async def execute_slot_publish(db: Session, slot: models.ScheduledSlot) -> dict:
 
         skip_reason = await maybe_generate_image_for_post(db, persona, post_log)
         if skip_reason:
-            post_log.status = "missed"
-            post_log.error_message = skip_reason
-            post_log.delivery_status = "failed"
-            slot.status = "failed"
-            slot.error_message = skip_reason
-            db.commit()
-            return {"status": "skipped", "reason": skip_reason}
+            # Image generation failed — log it but continue publishing without an image
+            print(f"[Publish] Image generation skipped for persona {persona_id}: {skip_reason} — continuing without image")
 
         print(f"[Publish] Publishing to Facebook for persona {persona_id}")
         success = await publish_post_to_facebook(db, post_log, connection)

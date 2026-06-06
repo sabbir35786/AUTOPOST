@@ -261,15 +261,9 @@ def _resume_paused_posts(db: Session, connection: models.FacebookConnection) -> 
     resumed_count = 0
     for post in posts_to_resume:
         post.status = "scheduled"
+        post.delivery_status = "pending"
         post.updated_at = now
-        
-        # Schedule with QStash
-        from app.qstash import schedule_post_delivery
-        qstash_id = schedule_post_delivery(post_id=str(post.id), scheduled_at_utc=post.scheduled_at)
-        if qstash_id:
-            post.qstash_message_id = qstash_id
-            post.delivery_status = "pending"
-            resumed_count += 1
+        resumed_count += 1
     
     if resumed_count:
         logger.info("Resumed %s paused posts for page %s", resumed_count, connection.page_name)

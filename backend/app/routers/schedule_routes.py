@@ -1,12 +1,10 @@
-import json
-from datetime import datetime, date, timedelta
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from datetime import datetime, date, timezone
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app import models, schemas
+from app import models
 from app.database import get_db
-from app.config import APP_BASE_URL, BACKEND_URL
 from app.services.schedule_service import (
     register_all_todays_slots,
     register_todays_slots,
@@ -15,10 +13,8 @@ from app.services.schedule_service import (
     get_today_bounds_utc,
 )
 from app.services.slot_publish_service import execute_slot_publish
-from app.qstash import cancel_scheduled_post, verify_qstash_signature
 from pydantic import BaseModel
 from zoneinfo import ZoneInfo
-from datetime import timezone
 
 router = APIRouter()
 
@@ -29,85 +25,7 @@ class ScheduleInput(BaseModel):
     day_overrides: dict[str, list[str]]
 
 
-def _normalize_scheduled_at(dt: datetime) -> datetime:
-    """Normalize to UTC naive for consistent DB comparison."""
-    if dt.tzinfo is None:
-        return dt
-    return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
-
-def _find_slot_for_webhook(db: Session, persona_id: int, scheduled_at_str: str | None):
-    """Find the scheduled slot matching this webhook payload."""
-    base_query = db.query(models.ScheduledSlot).filter(
-        models.ScheduledSlot.persona_id == persona_id,
-    )
-
-    if scheduled_at_str:
-        scheduled_at = datetime.fromisoformat(scheduled_at_str)
-        scheduled_at = _normalize_scheduled_at(scheduled_at)
-        window_start = scheduled_at - timedelta(seconds=60)
-        window_end = scheduled_at + timedelta(seconds=60)
-        return (
-            base_query.filter(
-                models.ScheduledSlot.scheduled_at >= window_start,
-                models.ScheduledSlot.scheduled_at <= window_end,
-                models.ScheduledSlot.status.in_(["pending", "generating", "published"]),
-            )
-            .order_by(models.ScheduledSlot.scheduled_at.asc())
-            .first()
-        )
-
-    return (
-        base_query.filter(models.ScheduledSlot.status.in_(["pending", "generating"]))
-        .order_by(models.ScheduledSlot.scheduled_at.asc())
-        .first()
-    )
-
-
-@router.post("/api/internal/register-daily-slots")
-async def register_daily_slots(request: Request, db: Session = Depends(get_db)):
-    # Verify QStash signature
-    signature = request.headers.get("upstash-signature", "")
-    body = await request.body()
-    # The URL should match what is registered in QStash
-    webhook_url = f"{BACKEND_URL.rstrip('/')}/api/internal/register-daily-slots"
-    
-    if not verify_qstash_signature(body, signature, webhook_url):
-        raise HTTPException(status_code=401, detail="Invalid signature")
-    
-    await register_all_todays_slots(db)
-    return {"status": "ok", "message": "Daily slots registered"}
-
-@router.post("/api/webhooks/publish-post")
-async def publish_post_webhook(request: Request, db: Session = Depends(get_db)):
-    signature = request.headers.get("upstash-signature", "")
-    body = await request.body()
-    webhook_url = f"{BACKEND_URL.rstrip('/')}/api/webhooks/publish-post"
-
-    if not verify_qstash_signature(body, signature, webhook_url):
-        raise HTTPException(status_code=401, detail="Invalid signature")
-
-    try:
-        data = json.loads(body)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
-
-    persona_id_str = data.get("persona_id")
-    scheduled_at_str = data.get("scheduled_at")
-
-    if not persona_id_str:
-        return {"status": "skipped", "reason": "No persona_id provided"}
-
-    persona_id = int(persona_id_str)
-    slot = _find_slot_for_webhook(db, persona_id, scheduled_at_str)
-
-    if not slot:
-        return {"status": "skipped", "reason": "No matching slot found"}
-
-    result = await execute_slot_publish(db, slot)
-    if result.get("status") == "failed":
-        raise HTTPException(status_code=500, detail=result.get("reason", "Publish failed"))
-    return result
 
 from app.auth import get_current_user
 
@@ -132,18 +50,17 @@ async def get_persona_schedule(
     schedule = db.query(models.PersonaSchedule).filter_by(persona_id=persona_id).first()
     if not schedule:
         return {
-            "timezone": current_user.timezone or "Asia/Dhaka",
+            "timezone": current_user.timezone or "UTC",
             "active_days": [],
             "default_times": [],
             "day_overrides": {},
             "is_active": False,
         }
-    data = schedule.schedule_data or {}
     return {
         "timezone": schedule.timezone,
-        "active_days": data.get("active_days", []),
-        "default_times": data.get("default_times", []),
-        "day_overrides": data.get("day_overrides", {}),
+        "active_days": schedule.active_days or [],
+        "default_times": schedule.default_times or [],
+        "day_overrides": schedule.day_overrides or {},
         "is_active": schedule.is_active,
     }
 
@@ -158,24 +75,27 @@ async def save_persona_schedule(
     persona = _verify_persona_owner(db, persona_id, current_user.id)
     # Upsert schedule
     schedule = db.query(models.PersonaSchedule).filter_by(persona_id=persona_id).first()
-    normalized_data = {
-        "active_days": normalize_active_days(schedule_data.active_days),
-        "default_times": schedule_data.default_times,
-        "day_overrides": {
-            normalize_day_name(k): v for k, v in schedule_data.day_overrides.items()
-        },
+    
+    active_days_norm = normalize_active_days(schedule_data.active_days)
+    day_overrides_norm = {
+        normalize_day_name(k): v for k, v in schedule_data.day_overrides.items()
     }
+    
     if schedule:
         schedule.timezone = schedule_data.timezone
         schedule.is_active = persona.is_active
-        schedule.schedule_data = normalized_data
+        schedule.active_days = active_days_norm
+        schedule.default_times = schedule_data.default_times
+        schedule.day_overrides = day_overrides_norm
         schedule.updated_at = datetime.utcnow()
     else:
         schedule = models.PersonaSchedule(
             persona_id=persona_id,
             timezone=schedule_data.timezone,
             is_active=persona.is_active if persona else True,
-            schedule_data=normalized_data,
+            active_days=active_days_norm,
+            default_times=schedule_data.default_times,
+            day_overrides=day_overrides_norm,
         )
         db.add(schedule)
     db.commit()
@@ -199,6 +119,30 @@ async def save_persona_schedule(
         "slots": slots_registered,
     }
 
+@router.post("/api/scheduled-slots/{slot_id}/retry")
+async def retry_scheduled_slot(
+    slot_id: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    slot = db.query(models.ScheduledSlot).join(models.AIPersona).filter(
+        models.ScheduledSlot.id == slot_id,
+        models.AIPersona.user_id == current_user.id
+    ).first()
+    
+    if not slot:
+        raise HTTPException(status_code=404, detail="Slot not found")
+        
+    if slot.status != "failed":
+        raise HTTPException(status_code=400, detail="Only failed slots can be retried")
+        
+    slot.status = "pending"
+    slot.error_message = None
+    slot.retry_count += 1
+    db.commit()
+    
+    return {"status": "retrying"}
+
 @router.delete("/api/personas/{persona_id}/schedule")
 async def delete_persona_schedule(
     persona_id: int,
@@ -206,15 +150,13 @@ async def delete_persona_schedule(
     current_user = Depends(get_current_user)
 ):
     _verify_persona_owner(db, persona_id, current_user.id)
-    # Cancel all pending QStash messages for this persona
+    # Cancel all pending slots for this persona (APScheduler will skip them)
     pending_slots = db.query(models.ScheduledSlot).filter(
         models.ScheduledSlot.persona_id == persona_id,
         models.ScheduledSlot.status == 'pending'
     ).all()
     
     for slot in pending_slots:
-        if slot.qstash_message_id:
-            cancel_scheduled_post(slot.qstash_message_id)
         slot.status = 'cancelled'
     
     # Deactivate schedule
@@ -303,9 +245,10 @@ async def get_dashboard(
                 "id": str(slot.id),
                 "persona_name": slot.persona.persona_name if slot.persona else "Unknown",
                 "scheduled_at_local": convert_to_user_timezone(slot.scheduled_at, user_tz),
+                "scheduled_at_utc": slot.scheduled_at.isoformat() if slot.scheduled_at else None,
                 "status": _effective_slot_status(slot, db),
                 "error_message": slot.error_message,
-                "qstash_scheduled": bool(slot.qstash_message_id),
+                "retry_count": slot.retry_count,
             }
             for slot in todays_slots
         ],

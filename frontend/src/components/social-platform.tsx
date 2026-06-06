@@ -410,6 +410,7 @@ function ScheduledSlotsView({ timezone }: { timezone: string }) {
 
 function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; posts: Post[]; onConnected: () => void; timezone: string }) {
   const [dashboardData, setDashboardData] = React.useState<{ todays_slots: any[], recent_posts: any[] } | null>(null)
+  const [retrying, setRetrying] = React.useState<string | null>(null)
   
   const fetchDashboard = React.useCallback(async () => {
     try {
@@ -430,6 +431,19 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
     const interval = setInterval(fetchDashboard, intervalMs)
     return () => clearInterval(interval)
   }, [fetchDashboard, hasActiveSlots])
+
+  async function retrySlot(slotId: string) {
+    setRetrying(slotId)
+    try {
+      await api.post(`/api/scheduled-slots/${slotId}/retry`)
+      toast.success("Slot queued for retry — it will run within the next minute.")
+      await fetchDashboard()
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Could not retry slot.")
+    } finally {
+      setRetrying(null)
+    }
+  }
 
   if (!pages.length) return (
     <>
@@ -457,12 +471,15 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
               <p className="text-sm text-slate-500 py-4 text-center">No slots scheduled for today.</p>
             ) : (
               dashboardData.todays_slots.map((slot: any) => (
-                <div key={slot.id} className="flex items-center justify-between p-3 rounded-md border">
-                  <div>
-                    <p className="font-medium text-sm">{slot.persona_name}</p>
+                <div key={slot.id} className="flex items-center justify-between p-3 rounded-md border gap-3">
+                  <div className="min-w-0">
+                    <p className="font-medium text-sm truncate">{slot.persona_name}</p>
                     <p className="text-xs text-slate-500">{slot.scheduled_at_local}</p>
+                    {slot.error_message && (
+                      <p className="text-xs text-red-500 mt-1 truncate max-w-[200px]" title={slot.error_message}>{slot.error_message}</p>
+                    )}
                   </div>
-                  <div className="flex flex-col items-end">
+                  <div className="flex flex-col items-end gap-1 shrink-0">
                     <span className={cn(
                       "text-xs px-2 py-1 rounded-full font-medium capitalize",
                       slot.status === "pending" ? "bg-amber-100 text-amber-700" :
@@ -470,14 +487,25 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
                       slot.status === "publishing" ? "bg-purple-100 text-purple-700" :
                       slot.status === "published" ? "bg-green-100 text-green-700" :
                       slot.status === "failed" ? "bg-red-100 text-red-700" :
+                      slot.status === "cancelled" ? "bg-slate-100 text-slate-500" :
                       "bg-slate-100 text-slate-600"
                     )}>
                       {slot.status}
                     </span>
-                    {!slot.qstash_scheduled && slot.status === "pending" ? (
-                      <span className="text-[10px] text-amber-600">cron fallback</span>
-                    ) : null}
-                    {slot.error_message && <span className="text-[10px] text-red-500 max-w-[120px] truncate" title={slot.error_message}>{slot.error_message}</span>}
+                    {slot.retry_count > 0 && (
+                      <span className="text-[10px] text-slate-500">retry #{slot.retry_count}</span>
+                    )}
+                    {slot.status === "failed" && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 text-xs px-2"
+                        disabled={retrying === slot.id}
+                        onClick={() => retrySlot(slot.id)}
+                      >
+                        {retrying === slot.id ? <Loader2 className="size-3 animate-spin" /> : "Retry"}
+                      </Button>
+                    )}
                   </div>
                 </div>
               ))
@@ -502,6 +530,9 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
                       )}
                     </div>
                     <p className="text-sm line-clamp-2">{post.content_preview}</p>
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      {post.published_at ? new Date(post.published_at).toLocaleString() : ""}
+                    </p>
                   </div>
                 </div>
               ))
@@ -1706,6 +1737,27 @@ function PersonaScheduleEditor({ schedule, onChange }: { schedule: PersonaSchedu
       </div>
 
       <div className="grid gap-2">
+        <Label>Timezone</Label>
+        <Select 
+          value={schedule.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"}
+          onChange={(e) => onChange({ ...schedule, timezone: e.target.value })}
+        >
+          <option value="UTC">UTC</option>
+          <option value="America/New_York">Eastern Time (US & Canada)</option>
+          <option value="America/Chicago">Central Time (US & Canada)</option>
+          <option value="America/Denver">Mountain Time (US & Canada)</option>
+          <option value="America/Los_Angeles">Pacific Time (US & Canada)</option>
+          <option value="Europe/London">London</option>
+          <option value="Europe/Paris">Paris</option>
+          <option value="Asia/Dhaka">Dhaka</option>
+          <option value="Asia/Dubai">Dubai</option>
+          <option value="Asia/Tokyo">Tokyo</option>
+          <option value="Australia/Sydney">Sydney</option>
+          <option value={Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"}>Local ({Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"})</option>
+        </Select>
+      </div>
+
+      <div className="grid gap-2">
         <Label>Default Times</Label>
         <p className="text-xs text-slate-500">Used on every active day that does not have an override.</p>
         {schedule.default_times.map((time, index) => (
@@ -1860,6 +1912,19 @@ function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab,
     }, 15)
     return () => clearInterval(interval)
   }, [simplePrompt, rawPrompt, previewTab])
+
+  async function removeSchedule() {
+    if (!draft.id) return;
+    if (!window.confirm("Remove schedule? The persona will stop auto-posting.")) return;
+    try {
+      await api.delete(`/api/personas/${draft.id}/schedule`)
+      toast.success("Schedule removed")
+      onScheduleChange({ ...schedule, active_days: [], default_times: [], day_overrides: {} })
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Could not remove schedule")
+    }
+  }
+
   return <div className="fixed inset-0 z-50 overflow-y-auto bg-black/40 p-4"><Card className="mx-auto my-6 max-w-6xl"><CardHeader><CardTitle className="flex items-center gap-2">Prompt Studio <Sparkles className="size-4 text-purple-600" /></CardTitle></CardHeader><CardContent className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_420px]">
     <div className="grid gap-5">
       {fromStyleAnalyzer ? <div className="rounded-md border-2 border-purple-400 bg-purple-50 p-4 animate-in fade-in zoom-in duration-300"><div className="flex items-center gap-2 font-semibold text-purple-900 mb-1"><Sparkles className="size-4" /> Persona auto-generated from your posts!</div><p className="text-sm text-purple-800">All fields have been filled in by the AI based on your writing style. Review them, then scroll down to <strong>assign posting days</strong> and hit <strong>Save Prompt</strong>.</p></div> : null}
@@ -1896,9 +1961,10 @@ function PromptStudioModal({ draft, config, simplePrompt, rawPrompt, previewTab,
       <div className="grid gap-2 sm:grid-cols-2">
         <Button className="bg-blue-700 hover:bg-blue-800" onClick={onTest} disabled={saving}>{saving ? "Testing..." : "Test This Prompt"}</Button>
         <Button className="bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-medium shadow-sm transition-all duration-150" onClick={onSave} disabled={saving}>
-          {saving ? <><Loader2 className="size-4 animate-spin mr-2" /> Saving Configuration...</> : "Save Persona & Template Configuration"}
+          {saving ? <><Loader2 className="size-4 animate-spin mr-2" /> Saving Configuration...</> : "Save Persona & Schedule"}
         </Button>
         <Button variant="outline" onClick={() => onChange({ ...emptyPersona(), persona_name: draft.persona_name || "Default Persona" })}><RotateCcw className="size-4" /> Reset to Default</Button>
+        {draft.id ? <Button type="button" variant="outline" className="text-red-600 border-red-200" onClick={removeSchedule}>Remove Schedule</Button> : null}
         {draft.id ? <Button type="button" variant="outline" onClick={onResetLearning}>Reset Learning</Button> : null}
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
       </div>

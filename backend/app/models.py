@@ -632,20 +632,27 @@ class FontAsset(Base):
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+from sqlalchemy import Index
+
 class PersonaSchedule(Base):
     __tablename__ = "persona_schedules"
 
     id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     persona_id: Mapped[int] = mapped_column(ForeignKey("ai_personas.id", ondelete="CASCADE"), unique=True, index=True, nullable=False)
-    timezone: Mapped[str] = mapped_column(String, default="Asia/Dhaka", nullable=False)
+    timezone: Mapped[str] = mapped_column(String, default="UTC", nullable=False)
+    active_days: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    default_times: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    day_overrides: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    schedule_data: Mapped[dict] = mapped_column(JSON, default=lambda: {"active_days": [], "default_times": [], "day_overrides": {}}, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class ScheduledSlot(Base):
     __tablename__ = "scheduled_slots"
+    __table_args__ = (
+        Index("ix_scheduled_slots_status_time", "status", "scheduled_at"),
+    )
 
     id: Mapped[str] = mapped_column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     persona_id: Mapped[int] = mapped_column(ForeignKey("ai_personas.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -654,6 +661,7 @@ class ScheduledSlot(Base):
     status: Mapped[str] = mapped_column(String, default="pending", nullable=False)
     post_id: Mapped[int | None] = mapped_column(ForeignKey("post_logs.id", ondelete="SET NULL"), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
