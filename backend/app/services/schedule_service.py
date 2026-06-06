@@ -75,8 +75,7 @@ def get_todays_slots_for_persona(schedule: PersonaSchedule) -> list[datetime]:
             hour, minute = map(int, time_str.split(":"))
             slot_local = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             slot_utc = slot_local.astimezone(timezone.utc)
-            if slot_utc > now_utc:
-                slots.append(slot_utc)
+            slots.append(slot_utc)
         except ValueError:
             continue
             
