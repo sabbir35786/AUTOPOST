@@ -81,7 +81,7 @@ async def schedule_scheduler_endpoint() -> bool:
     try:
         # Prevent duplicate schedules on every restart
         try:
-            existing = client.schedules.list()
+            existing = client.schedule.list()
             for sched in existing or []:
                 dest = getattr(sched, "destination", None) or (
                     sched.get("destination", "") if hasattr(sched, "get") else ""
@@ -92,7 +92,7 @@ async def schedule_scheduler_endpoint() -> bool:
         except Exception as list_exc:
             print(f"Could not list QStash schedules (will attempt creation): {list_exc}")
 
-        client.schedules.create(
+        client.schedule.create(
             destination=callback_url,
             cron="* * * * *",
             headers={"X-Cron-Secret": CRON_SECRET},
