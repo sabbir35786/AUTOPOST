@@ -16,10 +16,10 @@ def get_todays_slots_for_persona(schedule: PersonaSchedule) -> list[datetime]:
         tz = timezone.utc
     
     now = datetime.now(tz)
-    today_name = now.strftime('%A').lower()  # e.g. "monday"
+    today_names = {now.strftime('%A').lower(), now.strftime('%a').lower()}
     
     days = [d.lower() for d in schedule.days_of_week]
-    if today_name not in days:
+    if not any(day in today_names for day in days):
         return []
     
     slots = []

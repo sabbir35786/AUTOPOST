@@ -131,6 +131,7 @@ def _run_database_migrations() -> None:
             '05 add_manual_template_builder_step5.sql',
             '15 add_qstash_fields_to_post_logs.sql',  # QStash delivery tracking columns
             '16 health_check_fixes.sql',
+            '17 repair_persona_save_and_scheduling_schema.sql',
         ]
         
         for migration_file in MIGRATIONS:
