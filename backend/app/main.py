@@ -277,18 +277,18 @@ app.add_middleware(
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax", https_only=False)
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def read_root():
     return {"message": "Welcome to the Auto Poster API"}
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
     """UptimeRobot pings this every 5 minutes to keep the Render free instance awake."""
     return {"status": "ok"}
 
 
-@app.get("/api/health")
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 def api_health_check():
     """Secondary health check for API prefix consumers."""
     return {"status": "ok"}
@@ -395,7 +395,7 @@ async def qstash_post_delivery_webhook(request: Request, db: Session = Depends(g
         )
 
 
-@app.get("/api/internal/run-scheduler")
+@app.post("/api/internal/run-scheduler")
 async def run_internal_scheduler(request: Request):
     global last_scheduler_run_at
     try:
