@@ -100,6 +100,43 @@ logger = logging.getLogger(__name__)
 
 def _run_database_migrations() -> None:
     """Run pending database migrations on startup."""
+    def _split_sql_statements(sql_script: str) -> list[str]:
+        statements: list[str] = []
+        current: list[str] = []
+        in_single_quote = False
+        in_double_quote = False
+        in_dollar_quote = False
+        i = 0
+
+        while i < len(sql_script):
+            char = sql_script[i]
+            next_char = sql_script[i + 1] if i + 1 < len(sql_script) else ""
+
+            if not in_single_quote and not in_double_quote and sql_script.startswith("$$", i):
+                in_dollar_quote = not in_dollar_quote
+                current.append("$$")
+                i += 2
+                continue
+
+            if not in_double_quote and not in_dollar_quote and char == "'" and next_char != "'":
+                in_single_quote = not in_single_quote
+            elif not in_single_quote and not in_dollar_quote and char == '"':
+                in_double_quote = not in_double_quote
+
+            if char == ";" and not in_single_quote and not in_double_quote and not in_dollar_quote:
+                statement = "".join(current).strip()
+                if statement:
+                    statements.append(statement)
+                current = []
+            else:
+                current.append(char)
+            i += 1
+
+        statement = "".join(current).strip()
+        if statement:
+            statements.append(statement)
+        return statements
+
     try:
         from app.database import engine
         
@@ -121,6 +158,7 @@ def _run_database_migrations() -> None:
             '15 add_qstash_fields_to_post_logs.sql',  # QStash delivery tracking columns
             '16 health_check_fixes.sql',
             '17 repair_persona_save_and_scheduling_schema.sql',
+            '19 drop_legacy_persona_schedule_columns.sql',
         ]
         
         for migration_file in MIGRATIONS:
@@ -134,9 +172,8 @@ def _run_database_migrations() -> None:
                     sql_script = f.read()
                 
                 with engine.begin() as conn:
-                    for statement in sql_script.split(';'):
-                        if statement.strip():
-                            conn.execute(text(statement))
+                    for statement in _split_sql_statements(sql_script):
+                        conn.execute(text(statement))
                 logger.info(f"✅ Migration {migration_file} completed")
             except Exception as e:
                 logger.warning(f"⚠️ Migration {migration_file} skipped or had non-critical error: {e}")

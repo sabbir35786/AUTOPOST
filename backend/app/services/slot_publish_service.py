@@ -41,7 +41,7 @@ async def prepare_slot_publish(db: Session, slot: models.ScheduledSlot) -> dict:
             persona_id=persona_id,
             db=db,
             is_test=True,
-            slot=None,
+            slot=slot,
         )
 
         if result.get("status") == "failed":
