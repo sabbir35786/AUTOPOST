@@ -1,3 +1,4 @@
+import contextlib
 from contextlib import asynccontextmanager
 import asyncio
 import logging
@@ -96,6 +97,7 @@ from app.learning.service import (
 pending_facebook_credentials: dict[int, dict] = {}
 last_scheduler_run_at: datetime | None = None
 logger = logging.getLogger(__name__)
+startup_task: asyncio.Task | None = None
 
 
 def _run_database_migrations() -> None:
@@ -275,28 +277,37 @@ def _print_health_check_summary() -> None:
     print("\u2713 Routes: all registered")
     print("========================")
 
+async def _run_startup_initialization() -> None:
+    """Run non-critical startup work after the server is already listening."""
+    try:
+        await asyncio.to_thread(create_database_tables)
+        await asyncio.to_thread(_run_database_migrations)
+        await asyncio.to_thread(clear_all_user_posting_locks)
+        asyncio.create_task(_ensure_supabase_storage_bucket())
+
+        from app.scheduler import start_scheduler
+        from app.services.schedule_service import register_all_todays_slots
+
+        print("--- START SCHEDULER (background) ---")
+        start_scheduler()
+        asyncio.create_task(register_all_todays_slots())
+        _print_health_check_summary()
+    except Exception as exc:
+        logger.exception("Startup initialization failed: %s", exc)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _print_startup_config_status()
-    create_database_tables()
-    _run_database_migrations()  # Run pending migrations after creating tables
-    clear_all_user_posting_locks()
-    asyncio.create_task(_ensure_supabase_storage_bucket())
-    
-    # Start APScheduler
-    from app.scheduler import start_scheduler, stop_scheduler
-    from app.services.schedule_service import register_all_todays_slots
-    print("--- BEFORE START SCHEDULER ---")
-    start_scheduler()
-    print("--- AFTER START SCHEDULER ---")
-    
-    # Run immediate registration
-    asyncio.create_task(register_all_todays_slots())
-    
-    _print_health_check_summary()
+    global startup_task
+    startup_task = asyncio.create_task(_run_startup_initialization())
     try:
         yield
     finally:
+        if startup_task is not None:
+            startup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await startup_task
+        from app.scheduler import stop_scheduler
         stop_scheduler()
 
 
