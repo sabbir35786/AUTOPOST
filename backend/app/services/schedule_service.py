@@ -145,6 +145,8 @@ async def register_todays_slots(persona_id: int | str, db: Session) -> list[dict
 
 
 async def register_all_todays_slots(db: Session = None):
+    print(f"[Scheduler] register_all_todays_slots called at {datetime.now(timezone.utc).isoformat()}")
+    logger.info(f"[Scheduler] register_all_todays_slots called at {datetime.now(timezone.utc).isoformat()}")
     close_db = False
     if db is None:
         db = SessionLocal()
@@ -153,12 +155,14 @@ async def register_all_todays_slots(db: Session = None):
     try:
         active_schedules = db.query(PersonaSchedule).filter_by(is_active=True).all()
         logger.info(f"[Scheduler] Registering daily slots for {len(active_schedules)} personas")
+        print(f"[Scheduler] Today's slots registered for {len(active_schedules)} personas")
 
         for schedule in active_schedules:
             try:
                 await register_todays_slots(schedule.persona_id, db)
             except Exception as e:
                 logger.error(f"[Scheduler] Persona {schedule.persona_id} failed: {e}")
+        logger.info("[Scheduler] Daily slot registration finished for %s active persona schedule(s)", len(active_schedules))
     finally:
         if close_db:
             db.close()
@@ -198,6 +202,9 @@ async def prepare_upcoming_persona_slots(db: Session = None):
 
 
 async def process_due_persona_slots(db: Session = None):
+    now_utc = datetime.now(timezone.utc)
+    print(f"[Scheduler] Scheduler minute check running at {now_utc.isoformat()}")
+    logger.info(f"[Scheduler] Scheduler minute check running at {now_utc.isoformat()}")
     from app.services.slot_publish_service import execute_slot_publish
     
     close_db = False
@@ -223,6 +230,7 @@ async def process_due_persona_slots(db: Session = None):
             logger.info(f"[Scheduler] Processing due slot {slot.id} for persona {slot.persona_id}")
             await execute_slot_publish(db, slot)
             processed += 1
+        logger.info("[Scheduler] Due slot processing finished. processed=%s due=%s", processed, len(due_slots))
         return processed
     finally:
         if close_db:

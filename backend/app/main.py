@@ -249,7 +249,9 @@ async def lifespan(app: FastAPI):
     # Start APScheduler
     from app.scheduler import start_scheduler, stop_scheduler
     from app.services.schedule_service import register_all_todays_slots
+    print("--- BEFORE START SCHEDULER ---")
     start_scheduler()
+    print("--- AFTER START SCHEDULER ---")
     
     # Run immediate registration
     asyncio.create_task(register_all_todays_slots())
@@ -2107,7 +2109,9 @@ async def test_full_flow(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Test Full Flow: generate post text + image in one call. Returns draft post with caption and image."""
+    """Test Full Flow: generate post text + image via the shared publish pipeline (no Facebook publish)."""
+    from app.services.publish_flow import run_full_publish_flow
+
     if payload.persona_id:
         settings = db.query(models.AIPersona).filter(
             models.AIPersona.id == payload.persona_id,
@@ -2117,101 +2121,91 @@ async def test_full_flow(
             raise HTTPException(status_code=404, detail="Persona not found")
     else:
         settings = _get_ai_settings(db, current_user.id, payload.page_connection_id)
-    recent_topics = [
-        row[0]
-        for row in db.query(models.PostLog.topic)
-        .filter(
-            models.PostLog.facebook_connection_id == payload.page_connection_id,
-            models.PostLog.topic.isnot(None),
-        )
-        .order_by(models.PostLog.created_at.desc())
-        .limit(5)
-        .all()
-    ]
+
     try:
-        print("[TEST-FLOW] Generating post text...")
-        hint_parts = [
-            build_learning_prompt_hint(db, settings) if user_has_learning_access(current_user) else None,
-            build_strategy_prompt_hint(db, settings),
-        ]
-        learning_hint = " ".join(part for part in hint_parts if part)
-        content = generate_persona_post_with_user_model(
-            db,
-            settings,
-            recent_topics=recent_topics,
-            topic_hint=payload.topic_hint,
-            learning_hint=learning_hint,
-        )
-        print(f"[TEST-FLOW] Post text generated ({len(content)} chars)")
-
-        # Create a draft post row so image generation can attach to it
-        post_log = models.PostLog(
-            user_id=current_user.id,
-            facebook_connection_id=payload.page_connection_id,
-            content=content,
-            status="draft",
-            ai_generated=True,
-            auto_generated=False,
-            ai_persona_id=settings.id,
-        )
-        db.add(post_log)
-        db.flush()
-        print(f"[TEST-FLOW] Draft post created: id={post_log.id}")
-
-        # Check if persona has an assigned image template
-        assignment = (
-            db.query(models.PersonaImageTemplateAssignment)
-            .filter(models.PersonaImageTemplateAssignment.persona_id == settings.id)
-            .first()
+        result = await run_full_publish_flow(
+            persona_id=settings.id,
+            db=db,
+            is_test=True,
+            slot=None,
         )
 
-        image_url = None
-        image_error = None
-        template_name = None
-        if assignment:
-            template = db.query(models.ImageTemplate).filter(
-                models.ImageTemplate.id == assignment.image_template_id,
-                models.ImageTemplate.user_id == current_user.id,
-            ).first()
-            template_name = template.name if template else None
-            print(f"[TEST-FLOW] Template assigned: '{template_name}' — starting image generation...")
-            try:
-                from app.routers.persona_image_templates import _run_post_image_generation
-                generation = await _run_post_image_generation(
-                    db, post_log.id, current_user.id,
-                    template_id=assignment.image_template_id,
-                    raise_errors=True,
-                )
-                image_url = generation.final_image_url if generation else None
-                print(f"[TEST-FLOW] Image generated: {image_url}")
-            except Exception as img_exc:
-                image_error = str(getattr(img_exc, "detail", None) or img_exc)
-                print(f"[TEST-FLOW] Image generation failed: {image_error}")
-        else:
-            print("[TEST-FLOW] No image template assigned — skipping image generation")
+        if result.get("status") == "failed":
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result.get("error_message", "Full flow failed")
+            )
 
-        # Get the model preference for meta info
+        # Get model preference for meta info
         model_pref = db.query(models.ModelSettings).filter(
             models.ModelSettings.user_id == current_user.id,
             models.ModelSettings.task_category == "post_generation"
         ).first()
 
-        db.commit()
-        db.refresh(post_log)
+        post_log = db.get(models.PostLog, result.get("post_id"))
 
         return {
-            "post_id": post_log.id,
-            "content": content,
-            "image_url": image_url,
-            "image_error": image_error,
-            "persona_name": settings.persona_name,
-            "template_name": template_name,
+            "post_id": result.get("post_id"),
+            "content": result.get("content"),
+            "image_url": result.get("image_url"),
+            "image_error": result.get("image_error"),
+            "persona_name": result.get("persona_name"),
+            "template_name": result.get("template_name"),
             "model_provider": model_pref.provider_name if model_pref else "default",
             "model_name": model_pref.model_name if model_pref else "default",
-            "timestamp": post_log.created_at.isoformat() if post_log.created_at else None,
+            "timestamp": post_log.created_at.isoformat() if post_log and post_log.created_at else None,
         }
     except ProviderConfigurationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+
+@app.post("/api/personas/{persona_id}/publish-now")
+async def publish_persona_now(
+    persona_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Publish immediately to Facebook using the already-generated post from Test Full Flow.
+    Accepts optional body: { post_id, content, image_url }
+    If post_id is given, publishes that existing PostLog.
+    Otherwise, runs a fresh full flow and publishes.
+    """
+    from app.services.publish_flow import run_full_publish_flow
+
+    persona = db.query(models.AIPersona).filter(
+        models.AIPersona.id == persona_id,
+        models.AIPersona.user_id == current_user.id,
+    ).first()
+    if not persona:
+        raise HTTPException(status_code=404, detail="Persona not found")
+
+    try:
+        result = await run_full_publish_flow(
+            persona_id=persona_id,
+            db=db,
+            is_test=False,
+            slot=None,
+        )
+
+        if result.get("status") == "failed":
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=result.get("error_message", "Publish failed")
+            )
+
+        return {
+            "success": True,
+            "post_id": result.get("post_id"),
+            "facebook_post_id": result.get("facebook_post_id"),
+            "facebook_post_url": result.get("facebook_post_url"),
+            "content": result.get("content"),
+            "image_url": result.get("image_url"),
+        }
     except HTTPException:
         raise
     except Exception as exc:
@@ -2248,7 +2242,19 @@ async def publish_test_to_facebook(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=post_log.error_message or "Facebook rejected the post.",
             )
-        return {"success": success, "post_id": post_log.id, "status": post_log.status, "error_message": post_log.error_message}
+        facebook_post_url = (
+            f"https://www.facebook.com/{post_log.facebook_post_id}"
+            if post_log.facebook_post_id
+            else None
+        )
+        return {
+            "success": success,
+            "post_id": post_log.id,
+            "status": post_log.status,
+            "facebook_post_id": post_log.facebook_post_id,
+            "facebook_post_url": facebook_post_url,
+            "error_message": post_log.error_message,
+        }
     except HTTPException:
         raise
     except Exception as exc:

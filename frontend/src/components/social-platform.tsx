@@ -1343,6 +1343,7 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
   const [fullFlowResult, setFullFlowResult] = React.useState<any>(null)
   const [testingFullFlow, setTestingFullFlow] = React.useState(false)
   const [publishingTest, setPublishingTest] = React.useState(false)
+  const [publishResult, setPublishResult] = React.useState<{ success: boolean; facebook_post_url?: string | null; error?: string } | null>(null)
   const selectedPage = pages.find((page) => page.id === selectedPageId) || pages[0]
 
   React.useEffect(() => {
@@ -1557,6 +1558,7 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
     if (!selectedPage?.id) return
     setTestingFullFlow(true)
     setFullFlowResult(null)
+    setPublishResult(null)
     try {
       const res = await api.post("/api/ai/test-full-flow", {
         page_connection_id: selectedPage.id,
@@ -1570,17 +1572,22 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
   }
 
   async function publishTestPost() {
-    if (!fullFlowResult?.post_id) return
+    if (!fullFlowResult?.post_id) {
+      toast.error("Generate a test post before publishing.")
+      return
+    }
     setPublishingTest(true)
+    setPublishResult(null)
     try {
-      await api.post(`/api/posts/${fullFlowResult.post_id}/publish-test-to-facebook`)
-      toast.success("Test post published to Facebook!")
-      setFullFlowResult(null)
+      const res = await api.post(`/api/posts/${fullFlowResult.post_id}/publish-test-to-facebook`)
+      setPublishResult({ success: true, facebook_post_url: res.data.facebook_post_url })
+      toast.success("Published to Facebook successfully!")
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || "Could not publish test post.")
+      const errorMsg = err?.response?.data?.detail || "Could not publish to Facebook."
+      setPublishResult({ success: false, error: errorMsg })
+      toast.error(errorMsg)
     } finally {
       setPublishingTest(false)
-      setTestingFullFlow(false)
     }
   }
 
@@ -1606,7 +1613,7 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
         <CardHeader className="shrink-0 border-b">
           <CardTitle className="flex items-center justify-between">
             <span>Test Full Flow</span>
-            <Button variant="ghost" size="icon" onClick={() => { setTestingFullFlow(false); setFullFlowResult(null); }}><X className="size-4" /></Button>
+            <Button variant="ghost" size="icon" onClick={() => { setTestingFullFlow(false); setFullFlowResult(null); setPublishResult(null); }}><X className="size-4" /></Button>
           </CardTitle>
         </CardHeader>
         <CardContent className="flex-1 overflow-y-auto p-0">
@@ -1640,15 +1647,38 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
                   </div>
                 )}
               </div>
+              {publishResult && (
+                <div className={cn("p-4 rounded border text-sm font-medium", publishResult.success ? "bg-green-50 border-green-300 text-green-800" : "bg-red-50 border-red-300 text-red-800")}>
+                  {publishResult.success ? (
+                    <span>
+                      Published to Facebook!{" "}
+                      {publishResult.facebook_post_url && (
+                        <a href={publishResult.facebook_post_url} target="_blank" rel="noreferrer" className="underline font-semibold">
+                          View Post
+                        </a>
+                      )}
+                    </span>
+                  ) : (
+                    <span>Publish failed: {publishResult.error}</span>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </CardContent>
         {fullFlowResult && (
           <div className="shrink-0 border-t p-4 flex justify-end gap-3 bg-slate-50 rounded-b-xl">
-            <Button variant="outline" onClick={() => { setTestingFullFlow(false); setFullFlowResult(null); }} disabled={publishingTest}>Close</Button>
-            <Button className="bg-blue-600 hover:bg-blue-700 text-white" onClick={publishTestPost} disabled={publishingTest || !!fullFlowResult.image_error}>
-              {publishingTest ? <><Loader2 className="size-4 animate-spin mr-2" /> Publishing...</> : "Publish to Facebook"}
-            </Button>
+            <Button variant="outline" onClick={() => { setTestingFullFlow(false); setFullFlowResult(null); setPublishResult(null); }} disabled={publishingTest}>Close</Button>
+            {!publishResult?.success && (
+              <Button
+                id="publish-to-facebook-btn"
+                className="bg-blue-600 hover:bg-blue-700 text-white"
+                onClick={publishTestPost}
+                disabled={publishingTest}
+              >
+                {publishingTest ? <><Loader2 className="size-4 animate-spin mr-2" />Publishing...</> : "Publish to Facebook"}
+              </Button>
+            )}
           </div>
         )}
       </Card>
