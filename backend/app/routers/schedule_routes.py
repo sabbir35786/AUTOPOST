@@ -135,13 +135,17 @@ async def retry_scheduled_slot(
         
     if slot.status != "failed":
         raise HTTPException(status_code=400, detail="Only failed slots can be retried")
-        
+
     slot.status = "pending"
     slot.error_message = None
     slot.retry_count += 1
     db.commit()
-    
-    return {"status": "retrying"}
+
+    result = await execute_slot_publish(db, slot)
+    return {
+        "status": "retrying",
+        "result": result,
+    }
 
 @router.delete("/api/personas/{persona_id}/schedule")
 async def delete_persona_schedule(

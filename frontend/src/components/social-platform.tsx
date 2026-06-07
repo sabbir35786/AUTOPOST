@@ -436,7 +436,7 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
     setRetrying(slotId)
     try {
       await api.post(`/api/scheduled-slots/${slotId}/retry`)
-      toast.success("Slot queued for retry — it will run within the next minute.")
+      toast.success("Slot retry started.")
       await fetchDashboard()
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || "Could not retry slot.")

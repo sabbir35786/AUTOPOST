@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.services.publish_flow import run_full_publish_flow
+from app.posts import publish_post_to_facebook
 
 
 async def prepare_slot_publish(db: Session, slot: models.ScheduledSlot) -> dict:
@@ -105,11 +106,11 @@ async def execute_slot_publish(db: Session, slot: models.ScheduledSlot) -> dict:
         db.commit()
         return {"status": "failed", "reason": slot.error_message}
 
-    from app.posts import publish_post_to_facebook
-
     try:
         post_log.status = "publishing"
         post_log.delivery_status = "delivering"
+        slot.status = "publishing"
+        slot.post_id = post_log.id
         db.commit()
 
         success = await publish_post_to_facebook(db, post_log, connection)
