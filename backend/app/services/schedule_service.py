@@ -6,6 +6,7 @@ import logging
 
 from app.database import SessionLocal
 from app.models import PersonaSchedule, ScheduledSlot
+from apscheduler.triggers.date import DateTrigger
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,39 @@ def _serialize_registered_slot(slot: ScheduledSlot) -> dict:
     }
 
 
+def _schedule_exact_slot_job(slot: ScheduledSlot) -> None:
+    from app.scheduler import get_scheduler
+
+    sched = get_scheduler()
+    if not sched.running:
+        return
+
+    job_id = f"publish_slot_{slot.id}"
+
+    async def _run() -> None:
+        from app.services.slot_publish_service import execute_slot_publish
+
+        db = SessionLocal()
+        try:
+            reloaded = db.get(ScheduledSlot, slot.id)
+            if not reloaded:
+                return
+            await execute_slot_publish(db, reloaded)
+        finally:
+            db.close()
+
+    trigger = DateTrigger(run_date=slot.scheduled_at)
+    sched.add_job(
+        _run,
+        trigger,
+        id=job_id,
+        name=f"Publish persona slot {slot.id}",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=120,
+    )
+
+
 async def register_todays_slots(persona_id: int | str, db: Session) -> list[dict]:
     persona_id_int = int(persona_id)
     schedule = db.query(PersonaSchedule).filter_by(
@@ -137,6 +171,7 @@ async def register_todays_slots(persona_id: int | str, db: Session) -> list[dict
         )
         db.add(new_slot)
         db.flush()
+        _schedule_exact_slot_job(new_slot)
         registered.append(_serialize_registered_slot(new_slot))
 
     db.commit()
