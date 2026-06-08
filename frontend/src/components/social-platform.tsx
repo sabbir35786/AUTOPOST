@@ -2322,7 +2322,7 @@ function SettingsView({ pages, timezone, onChanged }: { pages: PageConnection[];
 type GlobalModelSettings = {
   post_generation_provider: "openai" | "gemini" | "anthropic" | "mistral"
   post_generation_model: string
-  image_generation_provider: "gemini" | "openai" | "stability"
+  image_generation_provider: "gemini" | "openai" | "stability" | "mistral"
   image_generation_model: string
 }
 
@@ -2333,10 +2333,11 @@ const postModelOptions: Record<GlobalModelSettings["post_generation_provider"], 
   mistral: ["mistral-large-latest", "mistral-small-latest"],
 }
 
-const imageModelOptions: Record<string, string[]> = {
+const imageModelOptions: Record<GlobalModelSettings["image_generation_provider"], string[]> = {
   gemini: ["imagen-3.0-generate-001", "imagen-2.0"],
   openai: ["dall-e-3", "dall-e-2"],
   stability: ["stable-diffusion-3", "stable-diffusion-xl"],
+  mistral: ["mistral-not-supported"],
 }
 
 function providerLabel(provider: string) {

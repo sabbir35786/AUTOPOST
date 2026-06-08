@@ -20,6 +20,9 @@ IMAGE_ALLOWED: dict[str, list[str]] = {
     "gemini": ["imagen-3.0-generate-001", "imagen-2.0"],
     "openai": ["dall-e-3", "dall-e-2"],
     "stability": ["stable-diffusion-3", "stable-diffusion-xl"],
+    # Note: Mistral does not currently support image generation in this codebase.
+    # We allow saving the selection so the UI can surface it, but generation will error.
+    "mistral": ["mistral-not-supported"],
 }
 
 DEFAULTS = {
