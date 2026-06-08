@@ -658,19 +658,88 @@ class GenerateLayeredRequest(BaseModel):
     post_text: Optional[str] = None
 
 
-def get_pillow_font(size: int):
+def _detect_script(text: str) -> str:
+    """Detect the primary script of the text."""
+    for char in text or "":
+        if char.isspace():
+            continue
+        cp = ord(char)
+        if 0x0980 <= cp <= 0x09FF:
+            return "bengali"
+        if 0x0600 <= cp <= 0x06FF or 0x0750 <= cp <= 0x077F or 0x08A0 <= cp <= 0x08FF:
+            return "arabic"
+        if 0x0900 <= cp <= 0x097F:
+            return "devanagari"
+        if 0x0400 <= cp <= 0x04FF:
+            return "cyrillic"
+    return "latin"
+
+
+def get_pillow_font(size: int, script: str = "latin"):
     """
-    Get a Pillow font that supports Unicode/CJK characters.
-    Tries multiple strategies to find a suitable font.
+    Get a Pillow font that supports Unicode characters including Bangla, Arabic, Devanagari.
+    Tries multiple strategies to find a suitable font for the given script.
     Falls back to system default if suitable fonts not found.
+    
+    Note: For proper complex text layout (ligatures, conjuncts), Pillow requires libraqm.
+    If libraqm is not available, consider using the Pango/Cairo renderer in persona_image_templates.py.
     """
     import os
     
+    # Get project root and assets/fonts directory
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assets_fonts = os.path.join(project_root, "assets", "fonts")
+    backend_assets_fonts = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "fonts")
+    
     font_candidates = []
     
-    # Strategy 1: Check Windows system fonts directory
+    # Strategy 1: Project-specific fonts (highest priority for script support)
+    if script == "bengali":
+        font_candidates.extend([
+            os.path.join(backend_assets_fonts, "NotoSansBengali-Bold.ttf"),
+            os.path.join(backend_assets_fonts, "NotoSansBengali-Regular.ttf"),
+            os.path.join(assets_fonts, "NotoSansBengali-Bold.ttf"),
+            os.path.join(assets_fonts, "NotoSansBengali-Regular.ttf"),
+        ])
+    elif script == "arabic":
+        font_candidates.extend([
+            os.path.join(backend_assets_fonts, "NotoSansArabic-Bold.ttf"),
+            os.path.join(backend_assets_fonts, "NotoSansArabic-Regular.ttf"),
+            os.path.join(assets_fonts, "NotoSansArabic-Bold.ttf"),
+            os.path.join(assets_fonts, "NotoSansArabic-Regular.ttf"),
+        ])
+    elif script == "devanagari":
+        font_candidates.extend([
+            os.path.join(backend_assets_fonts, "NotoSansDevanagari-Bold.ttf"),
+            os.path.join(backend_assets_fonts, "NotoSansDevanagari-Regular.ttf"),
+            os.path.join(assets_fonts, "NotoSansDevanagari-Bold.ttf"),
+            os.path.join(assets_fonts, "NotoSansDevanagari-Regular.ttf"),
+        ])
+    
+    # Strategy 2: General Noto Sans (covers many scripts)
+    font_candidates.extend([
+        os.path.join(backend_assets_fonts, "NotoSans-Bold.ttf"),
+        os.path.join(backend_assets_fonts, "NotoSans-Regular.ttf"),
+        os.path.join(assets_fonts, "NotoSans-Bold.ttf"),
+        os.path.join(assets_fonts, "NotoSans-Regular.ttf"),
+    ])
+    
+    # Strategy 3: Roboto fonts (project defaults)
+    font_candidates.extend([
+        os.path.join(backend_assets_fonts, "Roboto-Bold.ttf"),
+        os.path.join(backend_assets_fonts, "Roboto-Regular.ttf"),
+        os.path.join(assets_fonts, "Roboto-Bold.ttf"),
+        os.path.join(assets_fonts, "Roboto-Regular.ttf"),
+    ])
+    
+    # Strategy 4: Check Windows system fonts directory
     windows_fonts = "C:\\Windows\\Fonts"
     if os.path.isdir(windows_fonts):
+        # Nirmala UI covers Bengali, Devanagari on Windows
+        nirmala = os.path.join(windows_fonts, "Nirmala.ttc")
+        if os.path.isfile(nirmala):
+            font_candidates.append(nirmala)
+        
         # ArialUni supports a wide range of Unicode characters
         arial_uni = os.path.join(windows_fonts, "ArialUni.ttf")
         if os.path.isfile(arial_uni):
@@ -683,7 +752,7 @@ def get_pillow_font(size: int):
             if os.path.isfile(path):
                 font_candidates.append(path)
     
-    # Strategy 2: Add common cross-platform fonts
+    # Strategy 5: Add common cross-platform fonts
     font_candidates.extend([
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -1199,7 +1268,8 @@ async def generate_template_layered_image(
             color_hex = box.get("color_hex", "#FFFFFF")
             alignment = box.get("alignment", "center")
             fs = max(12, int(H * (font_size_pct / 100.0)))
-            font = get_pillow_font(fs)
+            script = _detect_script(text_str)
+            font = get_pillow_font(fs, script)
 
             if not color_hex.startswith("#"):
                 color_hex = f"#{color_hex}"
@@ -1579,7 +1649,8 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
 
             # Determine font size relative to image height
             fs = max(12, int(H * (font_size_pct / 100.0)))
-            font = get_pillow_font(fs)
+            script = _detect_script(text_str)
+            font = get_pillow_font(fs, script)
 
             # Clean color format
             if not color_hex.startswith("#"):

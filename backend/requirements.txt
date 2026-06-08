@@ -18,8 +18,4 @@ itsdangerous
 APScheduler==3.10.4
 pillow
 pycairo>=1.26
-# On Windows: PyGObject requires GTK runtime.
-# Run setup_windows_gtk.ps1 to install GTK + PyGObject from the gvsbuild bundle.
-# On Linux/Docker: apt-get install python3-gi gir1.2-pango-1.0 (handled in Dockerfile)
-pygobject
 fonttools

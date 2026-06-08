@@ -7,6 +7,9 @@ RUN apt-get update && apt-get install -y \
     libcairo2-dev \
     libgirepository1.0-dev \
     gobject-introspection \
+    python3-gi \
+    python3-gi-cairo \
+    libgirepository-1.0-1 \
     gir1.2-pango-1.0 \
     fontconfig \
     fonts-noto \
