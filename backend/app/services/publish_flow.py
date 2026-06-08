@@ -19,6 +19,7 @@ async def run_full_publish_flow(
     db: Session,
     is_test: bool = False,
     slot: models.ScheduledSlot | None = None,
+    force_image: bool = False,
 ) -> dict:
     """Generate persona content, optionally prepare an image, and optionally publish."""
     persona = db.get(models.AIPersona, persona_id)
@@ -73,8 +74,17 @@ async def run_full_publish_flow(
     image_url: str | None = None
     image_error: str | None = None
 
+    # Log image generation settings
+    logger.info(
+        "[Publish] Image generation check: include_image=%s, template_image_enabled=%s, template_name=%s",
+        persona.include_image,
+        persona.template_image_generation_enabled,
+        template_name,
+    )
+    print(f"[Publish] Image check for persona '{persona.persona_name}': include_image={persona.include_image}, template_enabled={persona.template_image_generation_enabled}")
+
     try:
-        skip_reason = await maybe_generate_image_for_post(db, persona, post_log)
+        skip_reason = await maybe_generate_image_for_post(db, persona, post_log, force_image=force_image)
         if skip_reason:
             post_log.status = "missed" if not is_test else "draft"
             post_log.error_message = skip_reason
@@ -82,6 +92,7 @@ async def run_full_publish_flow(
             _fail_slot(db, slot, skip_reason)
             logger.error("[Publish] Image policy skipped post_id=%s reason=%s", post_log.id, skip_reason)
             return {"status": "failed", "post_id": post_log.id, "error_message": skip_reason}
+        logger.info("[Publish] Image generation completed successfully for post_id=%s", post_log.id)
     except Exception as exc:
         image_error = str(getattr(exc, "detail", None) or exc)
         logger.exception("[Publish] Image generation failed post_id=%s", post_log.id)
@@ -181,6 +192,7 @@ async def run_full_publish_flow(
             reloaded_post.status = "failed"
             reloaded_post.delivery_status = "failed"
             reloaded_post.error_message = error_msg
+            reloaded_post.publish_error = error_msg
         if reloaded_slot:
             reloaded_slot.status = "failed"
             reloaded_slot.error_message = error_msg

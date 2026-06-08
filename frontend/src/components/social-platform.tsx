@@ -474,7 +474,11 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
                 <div key={slot.id} className="flex items-center justify-between p-3 rounded-md border gap-3">
                   <div className="min-w-0">
                     <p className="font-medium text-sm truncate">{slot.persona_name}</p>
-                    <p className="text-xs text-slate-500">{slot.scheduled_at_local}</p>
+                    <p className="text-xs text-slate-500">
+                      {slot.scheduled_at_utc
+                        ? new Intl.DateTimeFormat(undefined, { timeStyle: "short", timeZone: timezone }).format(new Date(slot.scheduled_at_utc))
+                        : slot.scheduled_at_local}
+                    </p>
                     {slot.error_message && (
                       <p className="text-xs text-red-500 mt-1 truncate max-w-[200px]" title={slot.error_message}>{slot.error_message}</p>
                     )}
@@ -531,7 +535,9 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
                     </div>
                     <p className="text-sm line-clamp-2">{post.content_preview}</p>
                     <p className="text-[11px] text-slate-400 mt-1">
-                      {post.published_at ? new Date(post.published_at).toLocaleString() : ""}
+                      {post.published_at
+                        ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", timeZone: timezone }).format(new Date(post.published_at))
+                        : ""}
                     </p>
                   </div>
                 </div>

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -12,7 +13,12 @@ scheduler = None
 def get_scheduler():
     global scheduler
     if scheduler is None:
-        scheduler = AsyncIOScheduler()
+        # Use the current running event loop (for async contexts)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        scheduler = AsyncIOScheduler(event_loop=loop)
     return scheduler
 
 def setup_scheduler():
@@ -47,12 +53,22 @@ def setup_scheduler():
 def start_scheduler():
     sched = get_scheduler()
     if not sched.running:
-        logger.info("Starting APScheduler")
+        logger.info("=" * 60)
+        logger.info("[SCHEDULER] Starting APScheduler")
+        logger.info("=" * 60)
         setup_scheduler()
         sched.start()
+        jobs = sched.get_jobs()
+        logger.info(f"[SCHEDULER] Started with {len(jobs)} jobs:")
+        for job in jobs:
+            logger.info(f"  - {job.name} (id={job.id}, trigger={job.trigger})")
+        logger.info("=" * 60)
+        print(f"[SCHEDULER] APScheduler started with {len(jobs)} jobs")
+    else:
+        logger.info("[SCHEDULER] Scheduler already running")
         
 def stop_scheduler():
     sched = get_scheduler()
     if sched.running:
-        logger.info("Stopping APScheduler")
+        logger.info("[SCHEDULER] Stopping APScheduler")
         sched.shutdown()

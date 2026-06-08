@@ -46,6 +46,7 @@ def create_database_tables() -> None:
         Base.metadata.create_all(bind=engine)
         _ensure_facebook_credential_columns()
         _ensure_facebook_connection_flow()
+        _ensure_post_logs_publish_tracking()
         _ensure_product_blueprint_columns()
         _ensure_user_settings_table()
         _migrate_ai_page_settings_to_personas()
@@ -67,6 +68,17 @@ def create_database_tables() -> None:
                 "that cannot reach Supabase's direct database host."
             ) from exc
         raise
+
+
+def _ensure_post_logs_publish_tracking() -> None:
+    _add_missing_columns(
+        "post_logs",
+        {
+            "facebook_post_url": "text",
+            "published_at": "timestamptz",
+            "publish_error": "text",
+        },
+    )
 
 
 def _ensure_oauth_states_table() -> None:

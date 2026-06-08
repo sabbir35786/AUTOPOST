@@ -1,4 +1,5 @@
 from datetime import date, datetime, time, timezone
+import logging
 from threading import Lock
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -46,8 +47,6 @@ def _persona_post_prompt(
     prompt_template_override: str | None = None,
 ) -> tuple[str, str]:
     """Build the post-generation prompt used by the user's AI persona."""
-    import logging
-
     system_prompt_parts = [
         "You are an expert social media writer. Create polished, platform-ready "
         "Facebook posts that follow the user's saved persona and constraints exactly."
@@ -144,6 +143,11 @@ def generate_persona_post_with_user_model(
         prompt_template_override=prompt_template_override,
     )
     temperature = max(0.1, min(settings.creativity_level / 10, 1.0))
+    
+    logger = logging.getLogger(__name__)
+    prompt_preview = (system_prompt + "\n\n" + prompt).replace("\n", " ")
+    logger.info("[LLM Prompt Preview] persona_id=%s prompt=%s", settings.id, prompt_preview[:100])
+    
     try:
         content = generate_post_text_for_user(
             user_id=settings.user_id,
@@ -424,6 +428,7 @@ async def publish_post_to_facebook(
     if not token:
         post_log.status = "failed"
         post_log.error_message = "Facebook page access token is missing. Please reconnect in Settings."
+        post_log.publish_error = post_log.error_message
         post_log.retry_count += 1
         db.commit()
         return False
@@ -456,12 +461,18 @@ async def publish_post_to_facebook(
 
     if response.status_code < 400:
         data = response.json()
+        facebook_post_id = data.get("post_id") or data.get("id")
         posted_at = datetime.now(timezone.utc)
         post_log.status = "published"
         post_log.error_message = None
+        post_log.publish_error = None
         post_log.posted_at = posted_at
+        post_log.published_at = posted_at
         post_log.post_date = post_date or posted_at.date()
-        post_log.facebook_post_id = data.get("id")
+        post_log.facebook_post_id = facebook_post_id
+        post_log.facebook_post_url = (
+            f"https://www.facebook.com/{facebook_post_id}" if facebook_post_id else None
+        )
         db.commit()
         return True
 
@@ -471,6 +482,7 @@ async def publish_post_to_facebook(
 
     post_log.status = "failed"
     post_log.error_message = error_message
+    post_log.publish_error = error_message
     post_log.retry_count += 1
     db.commit()
     return False
@@ -531,6 +543,7 @@ async def publish_message_to_facebook(
     if not token:
         post_log.status = "failed"
         post_log.error_message = "Facebook page access token is missing. Please reconnect in Settings."
+        post_log.publish_error = post_log.error_message
         post_log.retry_count += 1
         db.commit()
         db.refresh(post_log)
@@ -549,16 +562,21 @@ async def publish_message_to_facebook(
 
     if response.status_code < 400:
         data = response.json()
-        facebook_post_id = data.get("id")
+        facebook_post_id = data.get("post_id") or data.get("id")
         posted_at = datetime.now(timezone.utc)
         post_log.status = "published"
         post_log.error_message = None
+        post_log.publish_error = None
         post_log.posted_at = posted_at
+        post_log.published_at = posted_at
         post_log.post_date = posted_at.date()
         post_log.facebook_post_id = facebook_post_id
+        post_log.facebook_post_url = (
+            f"https://www.facebook.com/{facebook_post_id}" if facebook_post_id else None
+        )
         db.commit()
         db.refresh(post_log)
-        post_url = f"https://www.facebook.com/{facebook_post_id}" if facebook_post_id else None
+        post_url = post_log.facebook_post_url
         return True, post_log, post_url
 
     error_code = _facebook_error_code(response)
@@ -567,6 +585,7 @@ async def publish_message_to_facebook(
 
     post_log.status = "failed"
     post_log.error_message = error_message
+    post_log.publish_error = error_message
     post_log.retry_count += 1
     db.commit()
     db.refresh(post_log)
@@ -656,6 +675,7 @@ async def run_scheduled_posts() -> None:
             if scheduled_at is None:
                 post_log.status = "failed"
                 post_log.error_message = "Scheduled post is missing a scheduled time."
+                post_log.publish_error = post_log.error_message
                 db.commit()
                 continue
 
@@ -670,6 +690,7 @@ async def run_scheduled_posts() -> None:
             if connection is None or connection.connection_status != "connected":
                 post_log.status = "failed"
                 post_log.error_message = "Facebook page is not connected"
+                post_log.publish_error = post_log.error_message
                 db.commit()
                 continue
             post_log.status = "publishing"

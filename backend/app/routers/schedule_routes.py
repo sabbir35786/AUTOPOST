@@ -1,7 +1,6 @@
 from datetime import datetime, date, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 
 from app import models
 from app.database import get_db
@@ -10,7 +9,6 @@ from app.services.schedule_service import (
     register_todays_slots,
     normalize_active_days,
     normalize_day_name,
-    get_today_bounds_utc,
 )
 from app.services.slot_publish_service import execute_slot_publish
 from pydantic import BaseModel
@@ -87,7 +85,7 @@ async def save_persona_schedule(
         schedule.active_days = active_days_norm
         schedule.default_times = schedule_data.default_times
         schedule.day_overrides = day_overrides_norm
-        schedule.updated_at = datetime.utcnow()
+        schedule.updated_at = datetime.now(timezone.utc)
     else:
         schedule = models.PersonaSchedule(
             persona_id=persona_id,
@@ -176,12 +174,16 @@ def convert_to_user_timezone(dt_utc: datetime, timezone_str: str) -> str:
         return ""
     try:
         tz = ZoneInfo(timezone_str)
-        local_dt = dt_utc.replace(tzinfo=timezone.utc).astimezone(tz)
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        local_dt = dt_utc.astimezone(tz)
         return local_dt.strftime("%I:%M %p")
-    except:
+    except Exception:
         return dt_utc.strftime("%I:%M %p")
 
 def _facebook_post_url(post: models.PostLog) -> str | None:
+    if getattr(post, "facebook_post_url", None):
+        return post.facebook_post_url
     if post.facebook_post_id:
         return f"https://www.facebook.com/{post.facebook_post_id}"
     return post.link_url
@@ -208,7 +210,9 @@ async def get_dashboard(
     current_user=Depends(get_current_user),
 ):
     user_tz = current_user.timezone or "Asia/Dhaka"
-    today_start, today_end = get_today_bounds_utc(user_tz)
+    now_utc = datetime.now(timezone.utc)
+    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = now_utc.replace(hour=23, minute=59, second=59, microsecond=999999)
 
     todays_slots = (
         db.query(models.ScheduledSlot)
@@ -224,7 +228,7 @@ async def get_dashboard(
     
     recent_posts = db.query(models.PostLog).filter(
         models.PostLog.user_id == current_user.id,
-        models.PostLog.status.in_(["published", "success"])
+        models.PostLog.status == "published",
     ).order_by(
         models.PostLog.posted_at.desc().nullslast(),
         models.PostLog.created_at.desc()
@@ -233,12 +237,17 @@ async def get_dashboard(
     recent_post_items = []
     for post in recent_posts:
         persona = db.get(models.AIPersona, post.ai_persona_id) if post.ai_persona_id else None
+        published_at = post.published_at or post.posted_at or post.created_at
+        if published_at and published_at.tzinfo is None:
+            published_at = published_at.replace(tzinfo=timezone.utc)
+        elif published_at:
+            published_at = published_at.astimezone(timezone.utc)
         recent_post_items.append({
             "id": str(post.id),
             "persona_name": persona.persona_name if persona else "Manual post",
             "content_preview": post.content[:120] if post.content else "",
             "image_url": post.image_url,
-            "published_at": post.posted_at or post.created_at,
+            "published_at": published_at.isoformat() if published_at else None,
             "facebook_post_url": _facebook_post_url(post),
             "status": post.status,
         })
@@ -249,7 +258,11 @@ async def get_dashboard(
                 "id": str(slot.id),
                 "persona_name": slot.persona.persona_name if slot.persona else "Unknown",
                 "scheduled_at_local": convert_to_user_timezone(slot.scheduled_at, user_tz),
-                "scheduled_at_utc": slot.scheduled_at.isoformat() if slot.scheduled_at else None,
+                "scheduled_at_utc": (
+                    (slot.scheduled_at.replace(tzinfo=timezone.utc) if slot.scheduled_at.tzinfo is None else slot.scheduled_at.astimezone(timezone.utc)).isoformat()
+                    if slot.scheduled_at
+                    else None
+                ),
                 "status": _effective_slot_status(slot, db),
                 "error_message": slot.error_message,
                 "retry_count": slot.retry_count,

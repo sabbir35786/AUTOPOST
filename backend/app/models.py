@@ -122,16 +122,19 @@ class PostLog(Base):
     qstash_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
     delivery_status: Mapped[str] = mapped_column(String, default="pending", nullable=False)
     facebook_post_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    facebook_post_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     topic: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publish_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_generated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     auto_generated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     posted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     post_date: Mapped[date | None] = mapped_column(Date, index=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

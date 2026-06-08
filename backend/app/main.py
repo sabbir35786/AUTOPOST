@@ -267,14 +267,24 @@ async def _ensure_supabase_storage_bucket() -> None:
 
 
 def _print_health_check_summary() -> None:
+    from app.scheduler import get_scheduler
+    sched = get_scheduler()
+    scheduler_running = sched is not None and sched.running
+    jobs = sched.get_jobs() if scheduler_running else []
+    
     print("=== APP HEALTH CHECK ===")
     print("✓ Database: all tables present")
     print("✓ Migrations: all applied")
-    print("✓ APScheduler: running")
+    if scheduler_running:
+        print(f"✓ APScheduler: running ({len(jobs)} jobs)")
+        for job in jobs:
+            print(f"    - {job.name}")
+    else:
+        print("✗ APScheduler: NOT RUNNING (CRITICAL ERROR)")
     print("✓ Supabase Storage: connected")
-    print("\u2713 Fonts: all present")
-    print("\u2713 Pango: working")
-    print("\u2713 Routes: all registered")
+    print("✓ Fonts: all present")
+    print("✓ Pango: working")
+    print("✓ Routes: all registered")
     print("========================")
 
 async def _run_startup_initialization() -> None:
@@ -1373,7 +1383,7 @@ def create_ai_persona(
     persona.is_active = payload.is_active
     persona.learning_mode_enabled = payload.learning_mode_enabled
     persona.minimum_engagement_threshold = max(0, payload.minimum_engagement_threshold)
-    persona.include_image = payload.template_image_generation_enabled
+    persona.include_image = payload.include_image or payload.template_image_generation_enabled
     persona.image_fallback_policy = payload.image_fallback_policy
     persona.template_image_generation_enabled = payload.template_image_generation_enabled
     persona.template_logo_url = payload.template_logo_url
@@ -1422,7 +1432,7 @@ def update_ai_persona(
     persona.is_active = payload.is_active
     persona.learning_mode_enabled = payload.learning_mode_enabled
     persona.minimum_engagement_threshold = max(0, payload.minimum_engagement_threshold)
-    persona.include_image = payload.template_image_generation_enabled
+    persona.include_image = payload.include_image or payload.template_image_generation_enabled
     persona.image_fallback_policy = payload.image_fallback_policy
     persona.template_image_generation_enabled = payload.template_image_generation_enabled
     persona.template_logo_url = payload.template_logo_url
@@ -2176,6 +2186,7 @@ async def test_full_flow(
             db=db,
             is_test=True,
             slot=None,
+            force_image=True,
         )
 
         if result.get("status") == "failed":
@@ -2291,9 +2302,8 @@ async def publish_test_to_facebook(
                 detail=post_log.error_message or "Facebook rejected the post.",
             )
         facebook_post_url = (
-            f"https://www.facebook.com/{post_log.facebook_post_id}"
-            if post_log.facebook_post_id
-            else None
+            post_log.facebook_post_url
+            or (f"https://www.facebook.com/{post_log.facebook_post_id}" if post_log.facebook_post_id else None)
         )
         return {
             "success": success,

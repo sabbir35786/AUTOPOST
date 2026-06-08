@@ -70,17 +70,18 @@ def get_todays_slots_for_persona(schedule: PersonaSchedule) -> list[datetime]:
     times_to_use = day_overrides.get(today, default_times)
 
     slots = []
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(timezone.utc) - timedelta(minutes=1)
     for time_str in times_to_use:
         try:
             hour, minute = map(int, time_str.split(":"))
-            slot_local = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            slot_local = datetime(now.year, now.month, now.day, hour, minute, tzinfo=tz)
             slot_utc = slot_local.astimezone(timezone.utc)
-            slots.append(slot_utc)
+            if slot_utc >= now_utc:
+                slots.append(slot_utc)
         except ValueError:
             continue
             
-    return slots
+    return sorted(set(slots))
 
 
 def _serialize_registered_slot(slot: ScheduledSlot) -> dict:
@@ -194,7 +195,12 @@ async def register_all_todays_slots(db: Session = None):
 
         for schedule in active_schedules:
             try:
-                await register_todays_slots(schedule.persona_id, db)
+                registered = await register_todays_slots(schedule.persona_id, db)
+                logger.info(
+                    "[Scheduler] Persona %s registered %s slot(s) for today",
+                    schedule.persona_id,
+                    len(registered),
+                )
             except Exception as e:
                 logger.error(f"[Scheduler] Persona {schedule.persona_id} failed: {e}")
         logger.info("[Scheduler] Daily slot registration finished for %s active persona schedule(s)", len(active_schedules))

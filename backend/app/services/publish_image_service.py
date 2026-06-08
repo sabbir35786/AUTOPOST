@@ -15,12 +15,13 @@ async def maybe_generate_image_for_post(
     db: Session,
     persona: models.AIPersona,
     post_log: models.PostLog,
+    force_image: bool = False,
 ) -> str | None:
     """
     Generate an image for the post when persona settings require it.
     Returns a skip reason string if publishing should be aborted, else None.
     """
-    if not persona.include_image or post_log.media_library_id or post_log.image_url:
+    if (not force_image and not persona.include_image) or post_log.media_library_id or post_log.image_url:
         return None
 
     from app.routers.images import async_upload_to_supabase, generate_template_layered_image
@@ -45,7 +46,7 @@ async def maybe_generate_image_for_post(
     elif freq == "weekends_only" and local_now.weekday() >= 5:
         should_generate = True
 
-    if not should_generate:
+    if not should_generate and not force_image:
         return None
 
     if persona.template_image_generation_enabled:
