@@ -32,28 +32,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     try {
       const res = await api.get("/api/pages")
       setPages(res.data)
-    } catch { /* handled by interceptor */ }
+    } catch {
+      console.warn("[AppContext] Failed to fetch pages")
+    }
   }, [])
 
   const refreshPosts = React.useCallback(async () => {
     try {
       const res = await api.get("/posts", { params: { limit: 50 } })
       setPosts(res.data)
-    } catch { /* handled by interceptor */ }
+    } catch {
+      console.warn("[AppContext] Failed to fetch posts")
+    }
   }, [])
 
   const refreshImageTemplates = React.useCallback(async () => {
     try {
       const res = await api.get("/api/image-templates")
       setImageTemplates(res.data)
-    } catch { /* handled by interceptor */ }
+    } catch {
+      console.warn("[AppContext] Failed to fetch image templates")
+    }
   }, [])
 
   const refreshDashboard = React.useCallback(async () => {
     try {
       const res = await api.get("/api/dashboard")
       setDashboardData(res.data)
-    } catch { /* handled by interceptor */ }
+    } catch {
+      console.warn("[AppContext] Failed to fetch dashboard data")
+    }
   }, [])
 
   const fetchAll = React.useCallback(async () => {

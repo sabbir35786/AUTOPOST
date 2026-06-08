@@ -719,6 +719,7 @@ def create_facebook_oauth_url(
 async def connect_facebook(
     payload: schemas.FacebookConnectRequest,
     current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     pending_credentials = pending_facebook_credentials.get(current_user.id)
     if payload.code and pending_credentials:
