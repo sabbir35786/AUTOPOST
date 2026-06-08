@@ -32,10 +32,6 @@ FACEBOOK_OAUTH_GRAPH_VERSION = "v18.0"
 FACEBOOK_GRAPH_OAUTH_BASE = f"https://graph.facebook.com/{FACEBOOK_OAUTH_GRAPH_VERSION}"
 FACEBOOK_DIALOG_OAUTH_BASE = f"https://www.facebook.com/{FACEBOOK_OAUTH_GRAPH_VERSION}/dialog/oauth"
 
-# Bearer-authenticated JSON connect flow (legacy callback page)
-pending_json_oauth_pages: dict[int, dict] = {}
-
-
 def _create_oauth_state(db: Session, user_id: int) -> str:
     """Create and store OAuth state in database."""
     state = secrets.token_hex(16)
@@ -354,24 +350,29 @@ async def complete_page_selection(
     user_id: int,
     page_id: str,
 ) -> models.FacebookConnection:
-    pending_pages = request.session.get("oauth_pending_pages") or []
-    token_expires_at_raw = request.session.get("oauth_token_expires_at")
-    token_expires_at = None
-    if token_expires_at_raw:
-        token_expires_at = datetime.fromisoformat(token_expires_at_raw)
+    pending = db.get(models.PendingFacebookOAuth, user_id)
+    if pending is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Connect Facebook before selecting a page")
 
-    selected_page = next((page for page in pending_pages if page.get("page_id") == page_id), None)
+    if pending.expires_at <= datetime.now(timezone.utc):
+        db.delete(pending)
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Facebook page selection expired. Please connect again.")
+
+    selected_page = next((page for page in pending.pages if page.get("page_id") == page_id), None)
     if selected_page is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Selected page was not found")
 
     try:
-        connection = save_or_update_page_connection(db, user_id, selected_page, token_expires_at)
+        connection = save_or_update_page_connection(db, user_id, selected_page, pending.token_expires_at)
     except HTTPException as exc:
         _clear_oauth_session(request)
         if exc.status_code == status.HTTP_409_CONFLICT:
             raise
         raise
 
+    db.delete(pending)
+    db.commit()
     _clear_oauth_session(request)
     return connection
 
@@ -431,9 +432,7 @@ async def handle_facebook_callback(
     if token_data and token_data.get("expires_in") is not None:
         token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(token_data["expires_in"]))
 
-    request.session["oauth_pending_pages"] = pages
-    if token_expires_at:
-        request.session["oauth_token_expires_at"] = token_expires_at.isoformat()
+    await store_pending_pages_for_user(db, int(user_id), pages, token_expires_at)
 
     if len(pages) == 1:
         try:
@@ -551,22 +550,36 @@ def list_user_page_connections(db: Session, user_id: int) -> list[schemas.PageCo
 
 
 async def store_pending_pages_for_user(
+    db: Session,
     user_id: int,
     pages: list[dict],
     token_expires_at: datetime | None = None,
 ) -> None:
-    pending_json_oauth_pages[user_id] = {
-        "pages": pages,
-        "token_expires_at": token_expires_at,
-    }
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    pending = db.get(models.PendingFacebookOAuth, user_id)
+    if pending is None:
+        pending = models.PendingFacebookOAuth(user_id=user_id)
+        db.add(pending)
+    pending.pages = pages
+    pending.token_expires_at = token_expires_at
+    pending.expires_at = expires_at
+    db.query(models.PendingFacebookOAuth).filter(
+        models.PendingFacebookOAuth.expires_at <= datetime.now(timezone.utc)
+    ).delete(synchronize_session=False)
+    db.commit()
 
 
 def select_page_for_user(db: Session, user_id: int, page_id: str) -> models.FacebookConnection:
-    pending = pending_json_oauth_pages.get(user_id)
+    pending = db.get(models.PendingFacebookOAuth, user_id)
     if not pending:
         _facebook_error("Connect Facebook before selecting a page")
 
-    selected_page = next((page for page in pending["pages"] if page["page_id"] == page_id), None)
+    if pending.expires_at <= datetime.now(timezone.utc):
+        db.delete(pending)
+        db.commit()
+        _facebook_error("Facebook page selection expired. Please connect again.")
+
+    selected_page = next((page for page in pending.pages if page["page_id"] == page_id), None)
     if selected_page is None:
         _facebook_error("Selected page was not found")
 
@@ -575,10 +588,11 @@ def select_page_for_user(db: Session, user_id: int, page_id: str) -> models.Face
             db,
             user_id,
             selected_page,
-            pending.get("token_expires_at"),
+            pending.token_expires_at,
         )
     except HTTPException:
         raise
 
-    pending_json_oauth_pages.pop(user_id, None)
+    db.delete(pending)
+    db.commit()
     return connection

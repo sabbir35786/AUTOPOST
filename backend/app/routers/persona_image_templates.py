@@ -186,10 +186,6 @@ def verify_pango_bengali():
         print(f"[WARNING] Pango text rendering failed: {e}")
 
 
-# Call once at app startup
-register_fonts_with_fontconfig()
-verify_pango_bengali()
-
 _VISION_SYSTEM_INSTRUCTION = (
     "You are an image layout analyst. Analyze this image and return ONLY a JSON object with no explanation, "
     "no markdown, no backticks. The JSON must have these exact keys: canvas_width (int), canvas_height (int), "

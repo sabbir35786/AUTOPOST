@@ -48,10 +48,19 @@ def _normalize_database_url(database_url: str) -> str:
     return database_url
 
 
-SQLALCHEMY_DATABASE_URL = _normalize_database_url(os.getenv(
-    "DATABASE_URL",
-    os.getenv("SQLITE_DATABASE_URL", "sqlite:///./auto_poster.db"),
-))
+_database_url = os.getenv("DATABASE_URL")
+if not _database_url:
+    raise RuntimeError(
+        "DATABASE_URL is required. Configure Render with the PostgreSQL connection "
+        "string; local SQLite fallback is disabled because Render's filesystem is ephemeral."
+    )
+
+SQLALCHEMY_DATABASE_URL = _normalize_database_url(_database_url)
+if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+    raise RuntimeError(
+        "SQLite DATABASE_URL is not allowed for this app. Use the PostgreSQL DATABASE_URL "
+        "from Render/Supabase so settings and Facebook page connections persist."
+    )
 FACEBOOK_APP_ID = os.getenv("FACEBOOK_APP_ID", "")
 FACEBOOK_APP_SECRET = os.getenv("FACEBOOK_APP_SECRET", "")
 FACEBOOK_OAUTH_SCOPES = os.getenv(
@@ -94,4 +103,3 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 QSTASH_TOKEN = os.getenv("QSTASH_TOKEN", "")
 QSTASH_CURRENT_SIGNING_KEY = os.getenv("QSTASH_CURRENT_SIGNING_KEY", "")
 QSTASH_NEXT_SIGNING_KEY = os.getenv("QSTASH_NEXT_SIGNING_KEY", "")
-

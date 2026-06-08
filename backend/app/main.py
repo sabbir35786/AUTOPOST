@@ -49,7 +49,7 @@ from app.config import (
     SUPABASE_URL,
 )
 from app.crypto import decrypt_token, encrypt_token
-from app.database import create_database_tables, get_db
+from app.database import SessionLocal, create_database_tables, engine, get_db
 from app.posts import (
     clear_all_user_posting_locks,
     create_draft_post,
@@ -100,8 +100,13 @@ logger = logging.getLogger(__name__)
 startup_task: asyncio.Task | None = None
 
 
+def _check_database_connection() -> None:
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+
+
 def _run_database_migrations() -> None:
-    """Run pending database migrations on startup."""
+    """Run each migration once, tracked in schema_migrations."""
     def _split_sql_statements(sql_script: str) -> list[str]:
         statements: list[str] = []
         current: list[str] = []
@@ -140,13 +145,9 @@ def _run_database_migrations() -> None:
         return statements
 
     try:
-        from app.database import engine
-        
         migration_dir = os.path.join(os.path.dirname(__file__), '..', 'migrations')
-        
-        # Migration files to run in order (priority order)
-        MIGRATIONS = [
-            '11 fix_image_templates_schema.sql',   # Critical fix for schema issues
+        migrations = [
+            '11 fix_image_templates_schema.sql',
             '02 add_image_generation_tables.sql',
             '08 add_template_image_generation.sql',
             '09 add_user_settings_models.sql',
@@ -157,34 +158,57 @@ def _run_database_migrations() -> None:
             '03 add_manual_template_builder_step1.sql',
             '04 add_manual_template_builder_step2.sql',
             '05 add_manual_template_builder_step5.sql',
-            '15 add_qstash_fields_to_post_logs.sql',  # QStash delivery tracking columns
+            '15 add_qstash_fields_to_post_logs.sql',
             '16 health_check_fixes.sql',
             '17 repair_persona_save_and_scheduling_schema.sql',
             '19 drop_legacy_persona_schedule_columns.sql',
         ]
-        
-        for migration_file in MIGRATIONS:
+
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS schema_migrations (
+                        version VARCHAR PRIMARY KEY,
+                        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+
+        for migration_file in migrations:
             migration_path = os.path.join(migration_dir, migration_file)
-            
             if not os.path.exists(migration_path):
                 continue
-            
+
+            with engine.begin() as conn:
+                applied = conn.execute(
+                    text("SELECT 1 FROM schema_migrations WHERE version = :version"),
+                    {"version": migration_file},
+                ).first()
+                if applied:
+                    logger.info("Migration %s already applied", migration_file)
+                    continue
+
             try:
-                with open(migration_path, 'r') as f:
+                with open(migration_path, 'r', encoding='utf-8') as f:
                     sql_script = f.read()
-                
+
                 with engine.begin() as conn:
                     for statement in _split_sql_statements(sql_script):
                         conn.execute(text(statement))
-                logger.info(f"✅ Migration {migration_file} completed")
-            except Exception as e:
-                logger.warning(f"⚠️ Migration {migration_file} skipped or had non-critical error: {e}")
+                    conn.execute(
+                        text("INSERT INTO schema_migrations (version) VALUES (:version)"),
+                        {"version": migration_file},
+                    )
+                logger.info("Migration %s completed", migration_file)
+            except Exception as exc:
+                logger.warning("Migration %s skipped or had non-critical error: %s", migration_file, exc)
                 continue
-        
-        logger.info("🎉 All migrations completed successfully")
-    except Exception as e:
-        logger.warning(f"⚠️ Database migrations could not be run: {e}")
 
+        logger.info("All pending migrations completed")
+    except Exception as exc:
+        logger.warning("Database migrations could not be run: %s", exc)
 
 
 def _print_startup_config_status() -> None:
@@ -287,27 +311,76 @@ def _print_health_check_summary() -> None:
     print("✓ Routes: all registered")
     print("========================")
 
+
+def _print_startup_ready_summary() -> None:
+    print("=== AutoPoster Starting ===")
+    print("✓ Database connected")
+    print("✓ Routers registered")
+    print("✓ Server ready at port 10000")
+    print("⏳ Background initialization running...")
+    print("===========================")
+
+
+def _print_background_init_complete_summary(
+    fonts_registered: bool,
+    scheduler_running: bool,
+    slots_registered: bool,
+    assets_verified: bool,
+) -> None:
+    print("=== Background Init Complete ===")
+    print(f"{'✓' if fonts_registered else '⚠'} Fonts registered")
+    print(f"{'✓' if scheduler_running else '⚠'} APScheduler running")
+    print(f"{'✓' if slots_registered else '⚠'} Today's slots registered")
+    print(f"{'✓' if assets_verified else '⚠'} Assets verified")
+    print("================================")
+
+
 async def _run_startup_initialization() -> None:
     """Run non-critical startup work after the server is already listening."""
+    fonts_registered = False
+    scheduler_running = False
+    slots_registered = False
+    assets_verified = False
     try:
         await asyncio.to_thread(create_database_tables)
         await asyncio.to_thread(_run_database_migrations)
         await asyncio.to_thread(clear_all_user_posting_locks)
-        asyncio.create_task(_ensure_supabase_storage_bucket())
+
+        from app.routers.persona_image_templates import (
+            register_fonts_with_fontconfig,
+            verify_pango_bengali,
+        )
+
+        await asyncio.to_thread(register_fonts_with_fontconfig)
+        fonts_registered = True
+        await asyncio.to_thread(verify_pango_bengali)
+
+        await _ensure_supabase_storage_bucket()
+        assets_verified = True
 
         from app.scheduler import start_scheduler
         from app.services.schedule_service import register_all_todays_slots
 
-        print("--- START SCHEDULER (background) ---")
         start_scheduler()
-        asyncio.create_task(register_all_todays_slots())
-        _print_health_check_summary()
+        from app.scheduler import get_scheduler
+        sched = get_scheduler()
+        scheduler_running = sched is not None and sched.running
+        await register_all_todays_slots()
+        slots_registered = True
     except Exception as exc:
         logger.exception("Startup initialization failed: %s", exc)
+    finally:
+        _print_background_init_complete_summary(
+            fonts_registered,
+            scheduler_running,
+            slots_registered,
+            assets_verified,
+        )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _print_startup_config_status()
+    await asyncio.to_thread(_check_database_connection)
+    _print_startup_ready_summary()
     global startup_task
     startup_task = asyncio.create_task(_run_startup_initialization())
     try:
@@ -647,7 +720,7 @@ async def connect_facebook(
     if token_data and token_data.get("expires_in") is not None:
         token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(token_data["expires_in"]))
 
-    await facebook_oauth.store_pending_pages_for_user(current_user.id, pages, token_expires_at)
+    await facebook_oauth.store_pending_pages_for_user(db, current_user.id, pages, token_expires_at)
     pending_facebook_credentials.pop(current_user.id, None)
 
     return {

@@ -469,6 +469,16 @@ class OAuthState(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
+class PendingFacebookOAuth(Base):
+    __tablename__ = "pending_facebook_oauth"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    pages: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
 class ImageTemplate(Base):
     __tablename__ = "image_templates"
 
