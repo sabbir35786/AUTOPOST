@@ -239,11 +239,6 @@ class AIPersonaRead(AIPersonaBase):
     model_config = {"from_attributes": True}
 
 
-AIPageSettingsBase = AIPersonaBase
-AIPageSettingsUpsert = AIPersonaCreate
-AIPageSettingsRead = AIPersonaRead
-
-
 class AIGenerateRequest(BaseModel):
     page_connection_id: int
     topic_hint: str | None = None

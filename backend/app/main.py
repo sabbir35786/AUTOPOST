@@ -4,6 +4,19 @@ import asyncio
 import logging
 import os
 import secrets
+import sys
+import io
+
+# Fix Windows console: wrap stdout/stderr so Unicode chars (✓, ❌, বাংলা, etc.)
+# don't crash the app on cp1252 or other narrow terminal encodings.
+if os.name == "nt" and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True
+    )
+if os.name == "nt" and hasattr(sys.stderr, "buffer"):
+    sys.stderr = io.TextIOWrapper(
+        sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True
+    )
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode, urlparse
 from zoneinfo import ZoneInfo
@@ -307,7 +320,7 @@ def _print_health_check_summary() -> None:
         print("✗ APScheduler: NOT RUNNING (CRITICAL ERROR)")
     print("✓ Supabase Storage: connected")
     print("✓ Fonts: all present")
-    print("✓ Pango: working")
+    print("✓ PangoCairo text shaping: working (complex scripts supported)")
     print("✓ Routes: all registered")
     print("========================")
 
@@ -316,7 +329,8 @@ def _print_startup_ready_summary() -> None:
     print("=== AutoPoster Starting ===")
     print("✓ Database connected")
     print("✓ Routers registered")
-    print("✓ Server ready at port 10000")
+    port = os.getenv("PORT", "8000")
+    print(f"✓ Server ready at port {port}")
     print("⏳ Background initialization running...")
     print("===========================")
 
@@ -805,14 +819,6 @@ def facebook_status(
         "connection_status": connection.connection_status,
         "instagram_business_account_id": connection.instagram_business_account_id,
     }
-
-
-@app.get("/facebook/pages", response_model=list[schemas.PageConnectionRead])
-def list_facebook_pages(
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    return facebook_oauth.list_user_page_connections(db, current_user.id)
 
 
 @app.get("/api/pages", response_model=list[schemas.PageConnectionRead])
@@ -1648,12 +1654,6 @@ def apply_strategy_decision(
     return {"success": True}
 
 
-@app.get("/api/ai/settings/{page_connection_id}", response_model=schemas.AIPageSettingsRead | None)
-def get_ai_page_settings(page_connection_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    personas = list_ai_personas(page_connection_id, current_user, db)
-    return personas[0] if personas else None
-
-
 @app.get("/api/ai/performance/{page_connection_id}", response_model=schemas.PerformanceInsightsResponse)
 def ai_performance_insights(
     page_connection_id: int,
@@ -2315,6 +2315,7 @@ async def test_full_flow(
             "image_error": result.get("image_error"),
             "persona_name": result.get("persona_name"),
             "template_name": result.get("template_name"),
+            "template_decisions": result.get("template_decisions"),
             "model_provider": model_pref.provider_name if model_pref else "default",
             "model_name": model_pref.model_name if model_pref else "default",
             "timestamp": post_log.created_at.isoformat() if post_log and post_log.created_at else None,

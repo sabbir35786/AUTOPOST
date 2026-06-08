@@ -20,9 +20,6 @@ IMAGE_ALLOWED: dict[str, list[str]] = {
     "gemini": ["imagen-3.0-generate-001", "imagen-2.0"],
     "openai": ["dall-e-3", "dall-e-2"],
     "stability": ["stable-diffusion-3", "stable-diffusion-xl"],
-    # Note: Mistral does not currently support image generation in this codebase.
-    # We allow saving the selection so the UI can surface it, but generation will error.
-    "mistral": ["mistral-not-supported"],
 }
 
 DEFAULTS = {
@@ -72,11 +69,22 @@ def get_model_settings(
     row = db.get(models.UserSettings, current_user.id)
     if not row:
         return {**DEFAULTS}
+
+    img_provider = row.image_generation_provider
+    img_model = row.image_generation_model
+    # Auto-migrate any stored "mistral" provider which is no longer supported
+    if img_provider == "mistral":
+        img_provider = DEFAULTS["image_generation_provider"]
+        img_model = DEFAULTS["image_generation_model"]
+        row.image_generation_provider = img_provider
+        row.image_generation_model = img_model
+        db.commit()
+
     return {
         "post_generation_provider": row.post_generation_provider,
         "post_generation_model": row.post_generation_model,
-        "image_generation_provider": row.image_generation_provider,
-        "image_generation_model": row.image_generation_model,
+        "image_generation_provider": img_provider,
+        "image_generation_model": img_model,
     }
 
 

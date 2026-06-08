@@ -281,11 +281,16 @@ def get_image_provider_for_user(user_id: int, db) -> tuple:
     provider = (row.image_generation_provider or "").strip().lower()
     model_name = (row.image_generation_model or "").strip()
 
+    # Auto-migrate stored "mistral" provider which is no longer supported
     if provider == "mistral":
-        raise RuntimeError(
-            "Image generation via Mistral is not supported in this build. "
-            "Please choose Gemini, OpenAI / DALL-E, or Stability AI."
-        )
+        provider = "gemini"
+        model_name = "imagen-3.0-generate-001"
+        row.image_generation_provider = provider
+        row.image_generation_model = model_name
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
 
     if provider not in _PROVIDER_MAP:
         return FalProvider(), "FLUX.1-schnell", FAL_API_KEY

@@ -16,10 +16,12 @@ async def maybe_generate_image_for_post(
     persona: models.AIPersona,
     post_log: models.PostLog,
     force_image: bool = False,
+    out_decisions: dict | None = None,
 ) -> str | None:
     """
     Generate an image for the post when persona settings require it.
     Returns a skip reason string if publishing should be aborted, else None.
+    When out_decisions is provided, populates it with LLM template decisions.
     """
     if (not force_image and not persona.include_image) or post_log.media_library_id or post_log.image_url:
         return None
@@ -50,12 +52,53 @@ async def maybe_generate_image_for_post(
         return None
 
     if persona.template_image_generation_enabled:
+        assignment = (
+            db.query(models.PersonaImageTemplateAssignment)
+            .filter(models.PersonaImageTemplateAssignment.persona_id == persona.id)
+            .first()
+        )
+        if assignment:
+            try:
+                from app.routers.persona_image_templates import _run_post_image_generation
+                generation = await _run_post_image_generation(
+                    db=db,
+                    post_id=post_log.id,
+                    user_id=persona.user_id,
+                    raise_errors=False,
+                )
+                if generation and generation.status == "completed" and generation.final_image_url:
+                    post_log.image_url = generation.final_image_url
+                    if out_decisions is not None and generation.llm_instructions:
+                        out_decisions.clear()
+                        out_decisions.update({
+                            "flow": "prompt_studio",
+                            "chosen_background_asset_id": generation.llm_instructions.get("chosen_background_asset_id"),
+                            "layers": generation.llm_instructions.get("layers", []),
+                        })
+                    return None
+                error_msg = generation.error_message if generation else "Prompt Studio template generation failed"
+                print(f"Prompt Studio image generation for persona {persona.persona_name}: {error_msg}")
+                if persona.image_fallback_policy == "skip_post":
+                    return f"template_image_generation_failed: {error_msg}"
+                if persona.image_fallback_policy == "use_library":
+                    _attach_library_image(db, persona, post_log)
+                return None
+            except Exception as exc:
+                exc_str = str(getattr(exc, "detail", None) or exc)
+                print(f"Prompt Studio image generation for persona {persona.persona_name}: failed — {exc_str}")
+                if persona.image_fallback_policy == "skip_post":
+                    return f"template_image_generation_failed: {exc_str}"
+                if persona.image_fallback_policy == "use_library":
+                    _attach_library_image(db, persona, post_log)
+                return None
+
+        # Legacy template flow (via ImagePromptSettings.template_layers_json)
         template_settings = db.query(models.ImagePromptSettings).filter(
             models.ImagePromptSettings.persona_id == persona.id
         ).first()
         if template_settings and template_settings.template_layers_json:
             try:
-                media_id, _image_url = await generate_template_layered_image(
+                media_id, _image_url, decisions = await generate_template_layered_image(
                     persona_id=persona.id,
                     post_text=post_log.content,
                     topic_hint=post_log.topic,
@@ -63,6 +106,8 @@ async def maybe_generate_image_for_post(
                     user_id=persona.user_id,
                 )
                 post_log.media_library_id = media_id
+                if out_decisions is not None:
+                    out_decisions.update(decisions)
                 return None
             except Exception as exc:
                 print(f"Template image generation for persona {persona.persona_name}: failed — {exc}")

@@ -11,10 +11,10 @@ TOKEN ATTACHMENT MECHANISM (lines 103-112):
 - setAuthHeader() adds: Authorization: Bearer <token>
 - Applied to ALL outgoing requests automatically
 
-TIMEOUT CONFIGURATION (line 77):
-- timeout: 90_000ms (90 seconds)
-- Reason: Render free-tier cold starts can take 30-60s
-- This may contribute to "slow loading" perception
+TIMEOUT CONFIGURATION (line 95):
+- Default timeout: 30_000ms (30 seconds)
+- test-full-flow overrides to 180_000ms (3 minutes) in social-platform.tsx
+- Reason: Render free-tier cold starts + LLM calls + image generation
 
 BACKEND URL RESOLUTION (lines 8-27):
 - Localhost: uses http://localhost:8000 or configured backend

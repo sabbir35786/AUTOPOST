@@ -13,6 +13,16 @@ from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException,
 from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy.orm import Session
 
+# On Windows, add the gvsbuild GTK runtime DLLs to PATH so gi/pycairo can find them.
+# Download from: https://github.com/wingtk/gvsbuild/releases → GTK3 bundle
+_GTK_BIN = os.environ.get("GTK_BIN_PATH") or os.path.join("C:\\", "gtk", "bin")
+if os.name == "nt" and os.path.isdir(_GTK_BIN):
+    if _GTK_BIN not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = _GTK_BIN + os.pathsep + os.environ.get("PATH", "")
+    _typellb = os.path.join(os.path.dirname(_GTK_BIN), "lib", "girepository-1.0")
+    if os.path.isdir(_typellb) and _typellb not in os.environ.get("GI_TYPELIB_PATH", ""):
+        os.environ["GI_TYPELIB_PATH"] = _typellb + os.pathsep + os.environ.get("GI_TYPELIB_PATH", "")
+
 _gi_import_error = None
 try:
     import cairo
@@ -22,7 +32,10 @@ try:
     from gi.repository import Pango, PangoCairo
 except ImportError as e:
     _gi_import_error = ImportError(
-        "Pango/Cairo dependencies missing. Install python3-gi and gir1.2-pango-1.0 (or appropriate packages for your OS)."
+        "Pango/Cairo dependencies missing. On Windows, download GTK runtime from "
+        "https://github.com/wingtk/gvsbuild/releases (GTK3 bundle) and extract to C:\\gtk "
+        "or set GTK_BIN_PATH to the bin directory. "
+        "On Linux: apt-get install python3-gi gir1.2-pango-1.0"
     )
     cairo = None
     Pango = None
@@ -43,16 +56,16 @@ logger = logging.getLogger(__name__)
 def _get_font_family_name(font_path: str) -> str:
     try:
         from fontTools.ttLib import TTFont
-        tt = TTFont(font_path)
-        for record in tt['name'].names:
+        kwargs = {"fontNumber": 0} if font_path.lower().endswith(".ttc") else {}
+        tt = TTFont(font_path, **kwargs)
+        for record in tt["name"].names:
             if record.nameID == 1:
                 return record.toUnicode()
     except Exception:
         pass
-    # Fallback: derive from filename
     import os
     name = os.path.splitext(os.path.basename(font_path))[0]
-    return name.replace('-', ' ').replace('_', ' ')
+    return name.replace("-", " ").replace("_", " ")
 
 
 def render_text_layer_pango(
@@ -67,7 +80,7 @@ def render_text_layer_pango(
 ) -> Image.Image:
     if _gi_import_error is not None:
         raise _gi_import_error
-    
+
     # Create transparent Cairo surface
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, layer_width_px, layer_height_px)
     ctx = cairo.Context(surface)
@@ -98,25 +111,27 @@ def render_text_layer_pango(
     }
     layout.set_alignment(align_map.get(text_align, Pango.Alignment.LEFT))
     
-    # Set font using font description with Bengali/complex-script fallbacks.
+    # Set font using font description with script-aware fallbacks.
     # Pango accepts a comma-separated family list — it will use the first font
-    # that has a glyph for each character, so Bengali chars automatically fall
-    # back to Noto Sans Bengali even when the custom font has no Bengali glyphs.
+    # that has a glyph for each character. Pango + Harfbuzz handle the actual
+    # shaping (Bengali conjuncts, Arabic cursive forms, Devanagari matras, etc.)
+    # regardless of which font family is selected.
     font_desc = Pango.FontDescription()
     font_desc.set_absolute_size(font_size_px * Pango.SCALE)
     font_desc.set_weight(Pango.Weight.BOLD if font_weight == 'bold' else Pango.Weight.NORMAL)
 
-    # Build a family list: custom font first, then comprehensive fallbacks for
-    # Bengali, Arabic, Devanagari and other complex scripts.
+    # Build a family list: custom font first, then cross-platform fallbacks
+    # Windows: Nirmala UI covers Bengali, Devanagari; Segoe UI has wide coverage
+    # Linux: Noto fonts cover all scripts
     custom_family = _get_font_family_name(font_path) if font_path else ""
     fallback_families = [
+        "Nirmala UI",
         "Noto Sans Bengali",
         "Noto Serif Bengali",
         "Noto Sans Arabic",
         "Noto Sans Devanagari",
         "Noto Sans",
-        "Noto Sans CJK SC",
-        "DejaVu Sans",
+        "Segoe UI",
         "sans-serif",
     ]
     if custom_family:
@@ -136,9 +151,11 @@ def render_text_layer_pango(
     PangoCairo.show_layout(ctx, layout)
     
     # Convert Cairo surface to PIL Image
-    buf = surface.get_data()
-    pil_img = Image.frombuffer('RGBA', (layer_width_px, layer_height_px), bytes(buf), 'raw', 'BGRA', 0, 1)
-    return pil_img.copy()
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        buf = surface.get_data()
+    return Image.frombuffer("RGBA", (layer_width_px, layer_height_px), bytes(buf), "raw", "BGRA", 0, 1)
 
 
 def register_fonts_with_fontconfig():
@@ -181,7 +198,7 @@ def verify_pango_bengali():
             text_align="center",
             font_weight="regular"
         )
-        print("[OK] Pango Bengali text rendering working correctly")
+        print("[OK] Pango text rendering working correctly (complex scripts supported)")
     except Exception as e:
         print(f"[WARNING] Pango text rendering failed: {e}")
 

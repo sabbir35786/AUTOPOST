@@ -638,8 +638,8 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
 
   React.useEffect(() => {
     if (!selectedPage?.id) return setAiSettingsReady(false)
-    api.get<AIPersona | null>(`/api/ai/settings/${selectedPage.id}`)
-      .then((response) => setAiSettingsReady(Boolean(response.data?.niche)))
+    api.get<AIPersona[]>(`/api/ai/personas/${selectedPage.id}`)
+      .then((response) => setAiSettingsReady(response.data.some((p) => Boolean(p.niche))))
       .catch(() => setAiSettingsReady(false))
   }, [selectedPage?.id])
   async function generateWithAI() {
@@ -1289,7 +1289,7 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
   const router = useRouter()
   const { user } = useAuth()
   const userTimezone = user?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-  const [selectedPageId, setSelectedPageId] = React.useState<number | null>(pages[0]?.id ?? null)
+  const [selectedPageId, setSelectedPageId] = React.useState<number | null>(pages.find((p) => p.connection_status === "connected")?.id ?? pages[0]?.id ?? null)
   const [personas, setPersonas] = React.useState<AIPersona[]>([])
   const [editing, setEditing] = React.useState<AIPersona | null>(null)
   const [scheduleDraft, setScheduleDraft] = React.useState<PersonaScheduleData>(emptySchedule(userTimezone))
@@ -1522,7 +1522,7 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
       const res = await api.post("/api/ai/test-full-flow", {
         page_connection_id: selectedPage.id,
         persona_id: persona.id,
-      })
+      }, { timeout: 180_000 })  // 3 min: LLM calls + image gen can be slow
       setFullFlowResult(res.data)
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || "Full flow test failed.")
@@ -1579,33 +1579,172 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
           {!fullFlowResult ? (
             <div className="flex flex-col items-center justify-center p-12 text-slate-500">
               <Loader2 className="size-8 animate-spin mb-4 text-purple-600" />
-              <p>Generating post text and image... This may take a minute.</p>
+              <p className="text-center max-w-md">Generating post text and composing photocard image from template layers... This may take up to a minute.</p>
             </div>
           ) : (
             <div className="grid gap-6 p-6">
+              {/* Metadata */}
               <div className="grid gap-2 text-sm text-slate-600 bg-slate-50 p-3 rounded">
                 <p><strong>Persona:</strong> {fullFlowResult.persona_name}</p>
-                <p><strong>Model:</strong> {fullFlowResult.model_provider} / {fullFlowResult.model_name}</p>
+                <p><strong>LLM Model:</strong> {fullFlowResult.model_provider} / {fullFlowResult.model_name}</p>
                 <p><strong>Template:</strong> {fullFlowResult.template_name || "None"}</p>
+                {fullFlowResult.template_decisions?.provider && (
+                  <p><strong>Image Provider:</strong> {fullFlowResult.template_decisions.provider} / {fullFlowResult.template_decisions.model}</p>
+                )}
               </div>
+
+              {/* Generated caption */}
               <div className="grid gap-2">
-                <Label className="text-lg">Generated Caption</Label>
-                <div className="whitespace-pre-wrap p-4 bg-white border rounded text-sm shadow-sm">{fullFlowResult.content}</div>
+                <Label className="text-lg font-semibold">Generated Caption</Label>
+                <div className="whitespace-pre-wrap p-4 bg-white border rounded text-sm shadow-sm max-h-64 overflow-y-auto">{fullFlowResult.content}</div>
               </div>
+
+              {/* Generated photocard image */}
               <div className="grid gap-2">
-                <Label className="text-lg">Generated Image</Label>
+                <Label className="text-lg font-semibold">Generated Photocard</Label>
                 {fullFlowResult.image_error ? (
                   <div className="p-4 bg-red-50 text-red-700 border border-red-200 rounded text-sm">
                     <strong>Image Generation Failed:</strong> {fullFlowResult.image_error}
                   </div>
                 ) : fullFlowResult.image_url ? (
-                  <img src={fullFlowResult.image_url} alt="Generated post image" className="max-w-full h-auto rounded border shadow-sm" />
+                  <img src={fullFlowResult.image_url} alt="Generated photocard" className="max-w-full h-auto rounded border shadow-sm" />
                 ) : (
                   <div className="p-4 bg-slate-50 text-slate-500 border border-slate-200 rounded text-sm italic">
-                    No image was generated. {fullFlowResult.template_name ? "Template processing returned no image." : "Assign a template in Prompt Studio to automatically generate images."}
+                    No image was generated. Assign a template in Prompt Studio to automatically generate photocards.
                   </div>
                 )}
               </div>
+
+              {/* LLM Decisions */}
+              {fullFlowResult.template_decisions && (
+                (fullFlowResult.template_decisions.style_tags?.length > 0 || fullFlowResult.template_decisions.text_boxes?.length > 0 || fullFlowResult.template_decisions.layers?.length > 0) && (
+                <div className="grid gap-3">
+                  <Label className="text-lg font-semibold">LLM Styling Decisions</Label>
+                  <div className="grid gap-3 text-sm bg-purple-50 border border-purple-200 rounded p-4">
+                    {/* Prompt Studio format (flow === "prompt_studio") */}
+                    {fullFlowResult.template_decisions.flow === "prompt_studio" && (
+                      <>
+                        {/* Chosen background */}
+                        {fullFlowResult.template_decisions.chosen_background_asset_id && (
+                          <div>
+                            <p className="font-medium text-purple-800 mb-1">Background Asset</p>
+                            <p className="text-xs text-purple-700">Asset ID: {fullFlowResult.template_decisions.chosen_background_asset_id}</p>
+                          </div>
+                        )}
+
+                        {/* Layers */}
+                        {fullFlowResult.template_decisions.layers?.length > 0 && (
+                          <div>
+                            <p className="font-medium text-purple-800 mb-1">Layer Decisions</p>
+                            <div className="grid gap-2">
+                              {fullFlowResult.template_decisions.layers.map((layer: any, i: number) => {
+                                const isText = layer.text !== undefined
+                                const isOverlay = layer.opacity !== undefined
+                                return (
+                                  <div key={i} className="bg-white rounded p-2 border border-purple-100 grid gap-1">
+                                    {isText && (
+                                      <>
+                                        <p className="text-xs text-purple-600 font-medium">Text Layer {layer.layer_id}</p>
+                                        <p className="text-sm text-purple-900">"{layer.text}"</p>
+                                        <div className="flex gap-3 text-xs text-purple-500">
+                                          {layer.font_size_percent && <span>Size: {layer.font_size_percent}%</span>}
+                                          {layer.color_hex && (
+                                            <span>
+                                              Color: <span style={{ display: "inline-block", width: 12, height: 12, backgroundColor: layer.color_hex, borderRadius: 2, verticalAlign: "middle" }} /> {layer.color_hex}
+                                            </span>
+                                          )}
+                                          {layer.text_align && <span>Align: {layer.text_align}</span>}
+                                          {layer.font_asset_id && <span>Font: {layer.font_asset_id}</span>}
+                                        </div>
+                                      </>
+                                    )}
+                                    {isOverlay && (
+                                      <>
+                                        <p className="text-xs text-purple-600 font-medium">Overlay Layer {layer.layer_id}</p>
+                                        <div className="flex gap-3 text-xs text-purple-500">
+                                          {layer.color_hex && (
+                                            <span>
+                                              Color: <span style={{ display: "inline-block", width: 12, height: 12, backgroundColor: layer.color_hex, borderRadius: 2, verticalAlign: "middle" }} /> {layer.color_hex}
+                                            </span>
+                                          )}
+                                          {layer.opacity !== undefined && <span>Opacity: {Math.round(layer.opacity * 100)}%</span>}
+                                        </div>
+                                      </>
+                                    )}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {/* Legacy format (from generate_template_layered_image) */}
+                    {fullFlowResult.template_decisions.flow !== "prompt_studio" && (
+                      <>
+                        {/* Style tags chosen */}
+                        {fullFlowResult.template_decisions.style_tags?.length > 0 && (
+                          <div>
+                            <p className="font-medium text-purple-800 mb-1">Background Style</p>
+                            <div className="flex flex-wrap gap-1">
+                              {fullFlowResult.template_decisions.style_tags.map((tag: string) => (
+                                <span key={tag} className="rounded-full bg-purple-100 text-purple-700 px-2 py-0.5 text-xs">{tag}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Background prompt */}
+                        {fullFlowResult.template_decisions.background_prompt && (
+                          <div>
+                            <p className="font-medium text-purple-800 mb-1">Background Prompt (sent to image provider)</p>
+                            <p className="text-xs text-purple-700 bg-white rounded p-2 border border-purple-100 max-h-24 overflow-y-auto">{fullFlowResult.template_decisions.background_prompt}</p>
+                          </div>
+                        )}
+
+                        {/* Overlay text */}
+                        {fullFlowResult.template_decisions.overlay_text && (
+                          <div>
+                            <p className="font-medium text-purple-800 mb-1">Overlay Text (headline/hook)</p>
+                            <p className="text-sm text-purple-900 bg-white rounded p-2 border border-purple-100">"{fullFlowResult.template_decisions.overlay_text}"</p>
+                          </div>
+                        )}
+
+                        {/* Text boxes */}
+                        {fullFlowResult.template_decisions.text_boxes?.length > 0 && (
+                          <div>
+                            <p className="font-medium text-purple-800 mb-1">Text Boxes on Photocard</p>
+                            <div className="grid gap-2">
+                              {fullFlowResult.template_decisions.text_boxes.map((box: any, i: number) => (
+                                <div key={i} className="bg-white rounded p-2 border border-purple-100 grid gap-1">
+                                  <p className="text-xs text-purple-600 font-medium">{box.purpose}</p>
+                                  <p className="text-sm text-purple-900">"{box.text}"</p>
+                                  <div className="flex gap-3 text-xs text-purple-500">
+                                    <span>Font size: {box.font_size_px}px</span>
+                                    <span>Color: <span style={{ display: "inline-block", width: 12, height: 12, backgroundColor: box.color, borderRadius: 2, verticalAlign: "middle" }} /> {box.color}</span>
+                                    <span>Align: {box.alignment}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Logo */}
+                        {fullFlowResult.template_decisions.logo_used && (
+                          <div>
+                            <p className="font-medium text-purple-800 mb-1">Logo</p>
+                            <p className="text-xs text-purple-700">Brand logo was applied to the photocard.</p>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
+
+              {/* Publish result */}
               {publishResult && (
                 <div className={cn("p-4 rounded border text-sm font-medium", publishResult.success ? "bg-green-50 border-green-300 text-green-800" : "bg-red-50 border-red-300 text-red-800")}>
                   {publishResult.success ? (
@@ -2322,7 +2461,7 @@ function SettingsView({ pages, timezone, onChanged }: { pages: PageConnection[];
 type GlobalModelSettings = {
   post_generation_provider: "openai" | "gemini" | "anthropic" | "mistral"
   post_generation_model: string
-  image_generation_provider: "gemini" | "openai" | "stability" | "mistral"
+  image_generation_provider: "gemini" | "openai" | "stability"
   image_generation_model: string
 }
 
@@ -2337,7 +2476,6 @@ const imageModelOptions: Record<GlobalModelSettings["image_generation_provider"]
   gemini: ["imagen-3.0-generate-001", "imagen-2.0"],
   openai: ["dall-e-3", "dall-e-2"],
   stability: ["stable-diffusion-3", "stable-diffusion-xl"],
-  mistral: ["mistral-not-supported"],
 }
 
 function providerLabel(provider: string) {

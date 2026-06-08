@@ -984,12 +984,12 @@ async def generate_template_layered_image(
     topic_hint: str | None,
     db: Session,
     user_id: int,
-) -> tuple[str, str]:
+) -> tuple[str, str, dict]:
     """
     Generate a layered image based on persona's template settings.
-    Returns (media_library_id, image_url).
+    Returns (media_library_id, image_url, decisions_dict).
+    decisions_dict contains all LLM choices for display in the frontend.
     """
-    # Fetch persona and template settings
     persona = db.query(models.AIPersona).filter(models.AIPersona.id == persona_id).first()
     if not persona:
         raise HTTPException(status_code=404, detail="Persona not found")
@@ -1003,10 +1003,30 @@ async def generate_template_layered_image(
 
     layers_json = settings.template_layers_json
 
-    # 1. Prompt 1: The Background Asset Prompt Creator
+    decisions: dict = {
+        "style_tags": [],
+        "background_prompt": "",
+        "overlay_text": "",
+        "text_boxes": [],
+        "logo_used": False,
+        "logo_url": None,
+        "provider": "",
+        "model": "",
+    }
+
+    # 1. Background prompt via LLM
     style_tags = layers_json.get("background", {}).get("style_tags", [])
+    decisions["style_tags"] = style_tags
     style_tags_str = ", ".join(style_tags) if style_tags else "abstract, modern design"
-    system_prompt_bg = f"Based on this social media post content: '{post_text}', write a highly descriptive, artistic prompt for an image generator like Fal.ai FLUX to build a background asset. The image must match the style guidelines: {style_tags_str} from the template. CRITICAL: The prompt must describe a clean background scene or design, and must strictly contain no written letters, text, or typography."
+
+    bg_description = layers_json.get("background", {}).get("description", "")
+    system_prompt_bg = (
+        f"Based on this social media post content: '{post_text}', "
+        f"write a highly descriptive, artistic prompt for an image generator like Fal.ai FLUX "
+        f"to build a background asset. The image must match the style guidelines: {style_tags_str} "
+        f"from the template. CRITICAL: The prompt must describe a clean background scene or design, "
+        f"and must strictly contain no written letters, text, or typography."
+    )
 
     bg_prompt = generate_text_for_user(
         user_id=user_id,
@@ -1018,19 +1038,19 @@ async def generate_template_layered_image(
         max_tokens=200,
     )
     if not bg_prompt:
-        bg_style = layers_json.get("background", {}).get("description", "simple abstract background")
-        bg_prompt = f"abstract background related to {topic_hint or post_text}, style: {bg_style}"
-
-    # Explicitly enforce negative prompts
-    bg_prompt = f"{bg_prompt}, empty background, no people writing, no text, copy-space, clean"
+        bg_prompt = f"abstract background related to {topic_hint or post_text}, style: {bg_description or style_tags_str}"
+    bg_prompt_clean = f"{bg_prompt}, empty background, no people writing, no text, copy-space, clean"
+    decisions["background_prompt"] = bg_prompt_clean
 
     # 2. Generate background image
     provider_instance, model_name, api_key = get_image_provider_for_user(user_id, db)
+    decisions["provider"] = provider_instance.__class__.__name__.replace("Provider", "").lower()
+    decisions["model"] = model_name
 
     try:
         def _generate():
             return provider_instance.generate(
-                prompt=bg_prompt,
+                prompt=bg_prompt_clean,
                 negative_prompt="text, letters, words, logo, writing, watermark, signature, symbols",
                 aspect_ratio="1:1",
                 model_name=model_name,
@@ -1040,8 +1060,13 @@ async def generate_template_layered_image(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate background image: {str(e)}")
 
-    # 3. Prompt 2: The Text Overlay Creator
-    system_prompt_overlay = f"Based on this social media post content: '{post_text}', extract or write a single short headline, punchy hook, or news-style title suitable to be written directly across an image asset. Keep it under 60 characters and make it relevant to the post topic."
+    # 3. Overlay text via LLM (main headline)
+    system_prompt_overlay = (
+        f"Based on this social media post content: '{post_text}', "
+        f"extract or write a single short headline, punchy hook, or news-style title "
+        f"suitable to be written directly across an image asset. "
+        f"Keep it under 60 characters and make it relevant to the post topic."
+    )
     try:
         overlay_text = generate_post_text_for_user(
             user_id=user_id,
@@ -1068,20 +1093,22 @@ async def generate_template_layered_image(
         overlay_text = overlay_text.strip().replace('"', '').replace("'", "")
     else:
         overlay_text = topic_hint or "Learn More"
+    decisions["overlay_text"] = overlay_text
 
-    # Generate copy for any secondary/other text boxes using LLM if template has them
+    # 4. Generate copy for secondary text boxes via LLM
     text_boxes = layers_json.get("text_boxes", [])
     copy_map = {}
     if len(text_boxes) > 1:
         boxes_desc = "\n".join([f"- Purpose: {b.get('purpose', 'Headline')}" for b in text_boxes])
-        prompt_for_copy = f"""We are generating text copy for a social media post graphic on the topic: '{topic_hint or post_text}'.
-Context/Post text: {post_text}
-We need to fill the following text boxes in our template:
-{boxes_desc}
-
-For each text box, write a very short, catchy copy suitable for the purpose.
-Return a raw JSON object mapping each box's exact Purpose to the written text string. Do not wrap in markdown block, just return raw JSON."""
-
+        prompt_for_copy = (
+            f"We are generating text copy for a social media post graphic on the topic: '{topic_hint or post_text}'.\n"
+            f"Context/Post text: {post_text}\n"
+            f"We need to fill the following text boxes in our template:\n"
+            f"{boxes_desc}\n\n"
+            f"For each text box, write a very short, catchy copy suitable for the purpose.\n"
+            f"Return a raw JSON object mapping each box's exact Purpose to the written text string. "
+            f"Do not wrap in markdown block, just return raw JSON."
+        )
         try:
             copy_resp = generate_post_text_for_user(
                 user_id=user_id,
@@ -1118,16 +1145,15 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
             except Exception:
                 pass
 
-    # 4. Fetch logo
+    # 5. Fetch logo
     logo_img = None
+    logo_url = None
     logo_pos = layers_json.get("logo_position")
     if logo_pos:
-        # Try persona-specific logo first, then global logo
         logo_url = persona.template_logo_url or settings.template_logo_url
         user = db.get(models.User, user_id)
         if not logo_url and user:
             logo_url = user.brand_logo_url
-
         if logo_url:
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
@@ -1136,15 +1162,14 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
                         logo_img = Image.open(io.BytesIO(resp.content))
             except Exception as e:
                 print(f"Error fetching logo URL: {e}")
+    decisions["logo_used"] = logo_img is not None
+    decisions["logo_url"] = logo_url
 
-        # No local-disk fallback logos; use uploaded/supabase assets only.
-
-    # 5. Compose with Pillow
+    # 6. Compose with Pillow
     try:
         bg_image = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
         W, H = bg_image.size
 
-        # Overlay Logo
         if logo_img and logo_pos:
             logo_img = logo_img.convert("RGBA")
             target_w = int(W * (float(logo_pos.get("width_pct", 15)) / 100.0))
@@ -1152,20 +1177,15 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
                 aspect = logo_img.height / logo_img.width
                 target_h = int(target_w * aspect)
                 logo_resized = logo_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-
                 logo_x = int(W * (float(logo_pos.get("x_pct", 5)) / 100.0))
                 logo_y = int(H * (float(logo_pos.get("y_pct", 5)) / 100.0))
-
                 logo_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
                 logo_layer.paste(logo_resized, (logo_x, logo_y))
                 bg_image = Image.alpha_composite(bg_image, logo_layer)
 
-        # Draw Text Boxes
         draw = ImageDraw.Draw(bg_image)
         for box in text_boxes:
             purpose = box.get("purpose", "")
-            
-            # Map Prompt 2's overlay_text to the main headline/title box, or the only text box.
             if "headline" in purpose.lower() or "title" in purpose.lower() or "hook" in purpose.lower() or len(text_boxes) == 1 or purpose == "Main Headline":
                 text_str = overlay_text
             else:
@@ -1178,7 +1198,6 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
             font_size_pct = float(box.get("font_size_pct", 5))
             color_hex = box.get("color_hex", "#FFFFFF")
             alignment = box.get("alignment", "center")
-
             fs = max(12, int(H * (font_size_pct / 100.0)))
             font = get_pillow_font(fs)
 
@@ -1194,7 +1213,6 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
 
             tx = int(W * (x_pct / 100.0))
             ty = int(H * (y_pct / 100.0))
-
             if alignment == "center":
                 tx -= int(tw / 2)
             elif alignment == "right":
@@ -1203,6 +1221,14 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
             draw.text((tx + 1, ty + 1), text_str, font=font, fill="#000000")
             draw.text((tx, ty), text_str, font=font, fill=color_hex)
 
+            decisions["text_boxes"].append({
+                "purpose": purpose,
+                "text": text_str,
+                "font_size_px": fs,
+                "color": color_hex,
+                "alignment": alignment,
+            })
+
         final_image = bg_image.convert("RGB")
         out_io = io.BytesIO()
         final_image.save(out_io, format="PNG")
@@ -1210,7 +1236,7 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Pillow Compositor failed: {str(e)}")
 
-    # 6. Upload to Supabase
+    # 7. Upload to Supabase
     job_id = str(uuid.uuid4())
     filename = f"{user_id}/template_{job_id}.png"
     try:
@@ -1218,13 +1244,13 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upload finished image: {str(e)}")
 
-    # 7. Create Media Library Entry
+    # 8. Create Media Library Entry
     media = models.MediaLibrary(
         user_id=user_id,
         persona_id=persona_id,
         image_url=public_url,
         storage_path=filename,
-        generation_prompt=bg_prompt,
+        generation_prompt=bg_prompt_clean,
         provider="compositor",
         model_name="layered"
     )
@@ -1232,7 +1258,7 @@ Return a raw JSON object mapping each box's exact Purpose to the written text st
     db.commit()
     db.refresh(media)
 
-    return str(media.id), public_url
+    return str(media.id), public_url, decisions
 
 
 @router.post("/test-template-generation")
@@ -1284,7 +1310,7 @@ async def test_template_generation(
 
     # Generate layered image
     try:
-        media_id, image_url = await generate_template_layered_image(
+        media_id, image_url, _ = await generate_template_layered_image(
             persona_id=req.persona_id,
             post_text=post_text,
             topic_hint=req.topic_hint,
@@ -1348,7 +1374,7 @@ async def publish_template_post(
 
         if settings and settings.template_layers_json:
             try:
-                media_library_id, _ = await generate_template_layered_image(
+                media_library_id, _, _ = await generate_template_layered_image(
                     persona_id=req.persona_id,
                     post_text=post_text,
                     topic_hint=None,

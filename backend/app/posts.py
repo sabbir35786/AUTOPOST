@@ -878,7 +878,7 @@ async def run_auto_ai_posts(db: Session, now_utc: datetime) -> None:
 
                         if template_settings and template_settings.template_layers_json:
                             try:
-                                media_id, image_url = await generate_template_layered_image(
+                                media_id, image_url, _ = await generate_template_layered_image(
                                     persona_id=settings.id,
                                     post_text=content,
                                     topic_hint=topic,

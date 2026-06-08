@@ -15,14 +15,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
+    import os
     import uvicorn
+    port = int(os.getenv("PORT", "8000"))
     logger.info("=" * 60)
     logger.info("Starting Auto Poster API Server")
     logger.info("=" * 60)
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
-        port=8000,
+        port=port,
         reload=True,
         log_level="info"
     )

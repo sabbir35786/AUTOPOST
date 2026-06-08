@@ -83,8 +83,9 @@ async def run_full_publish_flow(
     )
     print(f"[Publish] Image check for persona '{persona.persona_name}': include_image={persona.include_image}, template_enabled={persona.template_image_generation_enabled}")
 
+    template_decisions: dict = {}
     try:
-        skip_reason = await maybe_generate_image_for_post(db, persona, post_log, force_image=force_image)
+        skip_reason = await maybe_generate_image_for_post(db, persona, post_log, force_image=force_image, out_decisions=template_decisions)
         if skip_reason:
             post_log.status = "missed" if not is_test else "draft"
             post_log.error_message = skip_reason
@@ -122,6 +123,7 @@ async def run_full_publish_flow(
             "image_error": image_error,
             "template_name": template_name,
             "persona_name": persona.persona_name,
+            "template_decisions": template_decisions,
         }
 
     if slot:
