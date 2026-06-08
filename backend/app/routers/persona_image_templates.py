@@ -601,6 +601,8 @@ def _font_candidates_for_script(script: str, weight: str, preferred_font_path: s
             [
                 "backend/assets/fonts/NotoSansBengali-Bold.ttf" if bold else "backend/assets/fonts/NotoSansBengali-Regular.ttf",
                 "assets/fonts/NotoSansBengali-Bold.ttf" if bold else "assets/fonts/NotoSansBengali-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansBengali-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
+                "/usr/share/fonts/opentype/noto/NotoSansBengali-Bold.ttf" if bold else "/usr/share/fonts/opentype/noto/NotoSansBengali-Regular.ttf",
                 "C:\\Windows\\Fonts\\Nirmala.ttc",
             ]
         )
@@ -609,6 +611,8 @@ def _font_candidates_for_script(script: str, weight: str, preferred_font_path: s
             [
                 "backend/assets/fonts/NotoSansArabic-Bold.ttf" if bold else "backend/assets/fonts/NotoSansArabic-Regular.ttf",
                 "assets/fonts/NotoSansArabic-Bold.ttf" if bold else "assets/fonts/NotoSansArabic-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+                "/usr/share/fonts/opentype/noto/NotoSansArabic-Bold.ttf" if bold else "/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf",
                 "C:\\Windows\\Fonts\\arial.ttf",
             ]
         )
@@ -617,6 +621,8 @@ def _font_candidates_for_script(script: str, weight: str, preferred_font_path: s
             [
                 "backend/assets/fonts/NotoSansDevanagari-Bold.ttf" if bold else "backend/assets/fonts/NotoSansDevanagari-Regular.ttf",
                 "assets/fonts/NotoSansDevanagari-Bold.ttf" if bold else "assets/fonts/NotoSansDevanagari-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+                "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Bold.ttf" if bold else "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Regular.ttf",
                 "C:\\Windows\\Fonts\\Nirmala.ttc",
                 "C:\\Windows\\Fonts\\mangal.ttf",
             ]
@@ -646,6 +652,8 @@ def _font_candidates_for_script(script: str, weight: str, preferred_font_path: s
         [
             "backend/assets/fonts/NotoSans-Bold.ttf" if bold else "backend/assets/fonts/NotoSans-Regular.ttf",
             "assets/fonts/NotoSans-Bold.ttf" if bold else "assets/fonts/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf" if bold else "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
             "C:\\Windows\\Fonts\\Nirmala.ttc",
             "C:\\Windows\\Fonts\\arial.ttf",
         ]

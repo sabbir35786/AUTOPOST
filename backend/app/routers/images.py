@@ -716,15 +716,42 @@ def get_pillow_font(size: int, script: str = "latin"):
             os.path.join(assets_fonts, "NotoSansDevanagari-Regular.ttf"),
         ])
     
-    # Strategy 2: General Noto Sans (covers many scripts)
+    # Strategy 2: System-installed script-specific fonts (Linux - installed via fonts-noto-*)
+    if script == "bengali":
+        font_candidates.extend([
+            "/usr/share/fonts/truetype/noto/NotoSansBengali-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansBengali-Bold.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansBengali-Regular.ttf",
+        ])
+    elif script == "arabic":
+        font_candidates.extend([
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansArabic-Bold.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf",
+        ])
+    elif script == "devanagari":
+        font_candidates.extend([
+            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Bold.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansDevanagari-Regular.ttf",
+        ])
+
+    # Strategy 3: General Noto Sans (covers many scripts)
     font_candidates.extend([
         os.path.join(backend_assets_fonts, "NotoSans-Bold.ttf"),
         os.path.join(backend_assets_fonts, "NotoSans-Regular.ttf"),
         os.path.join(assets_fonts, "NotoSans-Bold.ttf"),
         os.path.join(assets_fonts, "NotoSans-Regular.ttf"),
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
     ])
     
-    # Strategy 3: Roboto fonts (project defaults)
+    # Strategy 4: Roboto fonts (project defaults)
     font_candidates.extend([
         os.path.join(backend_assets_fonts, "Roboto-Bold.ttf"),
         os.path.join(backend_assets_fonts, "Roboto-Regular.ttf"),
@@ -732,7 +759,7 @@ def get_pillow_font(size: int, script: str = "latin"):
         os.path.join(assets_fonts, "Roboto-Regular.ttf"),
     ])
     
-    # Strategy 4: Check Windows system fonts directory
+    # Strategy 5: Check Windows system fonts directory
     windows_fonts = "C:\\Windows\\Fonts"
     if os.path.isdir(windows_fonts):
         # Nirmala UI covers Bengali, Devanagari on Windows
@@ -752,7 +779,7 @@ def get_pillow_font(size: int, script: str = "latin"):
             if os.path.isfile(path):
                 font_candidates.append(path)
     
-    # Strategy 5: Add common cross-platform fonts
+    # Strategy 6: Add common cross-platform fonts
     font_candidates.extend([
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -776,134 +803,6 @@ def get_pillow_font(size: int, script: str = "latin"):
         return ImageFont.load_default(size=max(1, size // 11))
     except (TypeError, IOError):
         return ImageFont.load_default()
-
-
-@router.get("/templates")
-def list_templates(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    templates = db.query(models.ImageTemplate).filter(
-        models.ImageTemplate.user_id == current_user.id
-    ).all()
-    return [
-        {
-            "id": t.id,
-            "user_id": t.user_id,
-            "name": t.name,
-            "reference_image_url": t.reference_image_url,
-            "layers_json": t.template_json,
-            "template_json": t.template_json,
-            "created_at": t.created_at,
-        }
-        for t in templates
-    ]
-
-
-@router.delete("/templates/{template_id}")
-def delete_template(
-    template_id: str,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    template = db.query(models.ImageTemplate).filter(
-        models.ImageTemplate.id == template_id,
-        models.ImageTemplate.user_id == current_user.id
-    ).first()
-    if not template:
-        raise HTTPException(status_code=404, detail="Template not found")
-    db.delete(template)
-    db.commit()
-    return {"message": "Template deleted successfully"}
-
-
-@router.post("/analyze-template")
-async def analyze_template(
-    name: str = Form(...),
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    file_bytes = await file.read()
-    
-    # 1. Upload reference image to Supabase
-    filename = f"templates/{uuid.uuid4()}.png"
-    try:
-        public_url = await async_upload_to_supabase(filename, file_bytes)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to upload reference image to Supabase: {str(e)}")
-
-    # 2. Base64 encode for Vision LLM
-    mimetype = file.content_type or "image/png"
-    b64 = base64.b64encode(file_bytes).decode('utf-8')
-    base64_image = f"data:{mimetype};base64,{b64}"
-
-    # 3. Request analysis from Vision LLM
-    system_prompt = "You are an expert visual layout analyzer."
-    prompt = """Analyze the layout of the reference image and describe its structure in a strict JSON format with the following keys:
-- 'background': { 'type': 'photographic' | 'solid' | 'gradient' | 'abstract', 'description': 'detailed description of the background style (e.g. vibrant blue mesh gradient, corporate white desk layout)' }
-- 'text_boxes': a list of objects, each containing:
-  - 'purpose': e.g., 'Main Headline', 'Call to Action', 'Subheading'
-  - 'x_pct': relative X position of the text box start (0 to 100)
-  - 'y_pct': relative Y position of the text box start (0 to 100)
-  - 'font_size_pct': relative font size (0 to 100) where 5 is medium, 8 is large, 3 is small
-  - 'color_hex': hex code for text color (e.g., '#FFFFFF')
-  - 'alignment': 'left' | 'center' | 'right'
-- 'logo_position': { 'x_pct': relative X, 'y_pct': relative Y, 'width_pct': relative width, 'height_pct': relative height } (or null if no logo)
-
-Important: Return ONLY a raw JSON string. Do not wrap it in markdown code blocks like ```json. Do not include any explanations.
-"""
-    from app.providers.llm_providers import _resolve_user_llm_choice
-    provider_name, model_name = _resolve_user_llm_choice(current_user.id, "post_analysis", db)
-
-    if provider_name == "openai":
-        from app.config import OPENAI_API_KEY
-        key = (OPENAI_API_KEY or "").strip()
-        if not key or any(p in key.lower() for p in ["your-real-key", "placeholder", "your-real", "your_real", "your-key-here", "********"]):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid OpenAI API Key detected. Please update your AI Model Settings with a valid token."
-            )
-
-    try:
-        response_text = generate_text(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            model_name=model_name,
-            provider_name=provider_name,
-            api_key="",
-            temperature=0.2,
-            max_tokens=4096,
-            images=[base64_image],
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Vision LLM analysis failed: {str(exc)}",
-        )
-
-    if not response_text:
-        raise HTTPException(status_code=500, detail="Vision LLM returned empty response")
-
-    layers_json = _parse_json_with_fallback(
-        response_text,
-        base64_image=base64_image,
-        model_name=model_name,
-        provider_name=provider_name,
-    )
-
-    # 4. Save template
-    template = models.ImageTemplate(
-        user_id=current_user.id,
-        name=name,
-        reference_image_url=public_url,
-        template_json=layers_json
-    )
-    db.add(template)
-    db.commit()
-    db.refresh(template)
-
-    return template
 
 
 @router.post("/analyze-template-reference")

@@ -1,6 +1,6 @@
 FROM python:3.11-slim-bookworm
 
-# Install system dependencies for PyGObject, PyCairo, and PangoCairo
+# Install system dependencies for PyGObject, PyCairo, PangoCairo, and libraqm
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
@@ -15,6 +15,14 @@ RUN apt-get update && apt-get install -y \
     fonts-noto \
     fonts-noto-core \
     fonts-noto-extra \
+    fonts-noto-bengali \
+    fonts-noto-arabic \
+    fonts-noto-devanagari \
+    fonts-noto-thai \
+    fonts-noto-khmer \
+    libharfbuzz-dev \
+    libraqm0 \
+    libraqm-dev \
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 

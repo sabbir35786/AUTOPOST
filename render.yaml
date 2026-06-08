@@ -2,7 +2,7 @@ services:
   - type: web
     name: auto-poster-backend
     runtime: image
-    repo: https://github.com/your-username/auto-poster-agentic-ai
+    repo: https://github.com/Mohammad35786/AUTOPOST.git
     plan: free
     region: singapore
     dockerfilePath: ./backend/Dockerfile
@@ -31,7 +31,7 @@ services:
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: FRONTEND_URL
-        value: https://auto-poster-frontend.vercel.app
+        value: https://autopost-woad.vercel.app
       - key: BACKEND_URL
         value: https://auto-poster-backend.onrender.com
       - key: CRON_SECRET

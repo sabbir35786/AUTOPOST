@@ -620,11 +620,6 @@ def login(credentials: schemas.UserLogin, db: Session = Depends(get_db)):
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
-
-
 @app.get("/users/me", response_model=schemas.UserRead)
 def read_users_me(current_user: models.User = Depends(get_current_user)):
     return schemas.UserRead.from_orm(current_user)
