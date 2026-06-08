@@ -1,8 +1,10 @@
 FROM python:3.11-slim-bookworm
 
+ENV PIP_ROOT_USER_ACTION=ignore
+
 # Install system dependencies for PyGObject, PyCairo, PangoCairo, and libraqm
 # See: backend/app/routers/persona_image_templates.py (Pango/Cairo rendering)
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libcairo2 \
@@ -21,8 +23,12 @@ RUN apt-get update && apt-get install -y \
     libharfbuzz-dev \
     libraqm0 \
     libraqm-dev \
+    python3-dev \
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Python bindings for Pango/Cairo (PyGObject, pycairo)
+RUN pip install --no-cache-dir PyGObject pycairo
 
 # Set working directory
 WORKDIR /workspace
