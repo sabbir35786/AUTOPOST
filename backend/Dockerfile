@@ -15,11 +15,6 @@ RUN apt-get update && apt-get install -y \
     fonts-noto \
     fonts-noto-core \
     fonts-noto-extra \
-    fonts-noto-bengali \
-    fonts-noto-arabic \
-    fonts-noto-devanagari \
-    fonts-noto-thai \
-    fonts-noto-khmer \
     libharfbuzz-dev \
     libraqm0 \
     libraqm-dev \
