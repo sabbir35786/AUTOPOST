@@ -1,5 +1,33 @@
 "use client"
 
+/*
+AUTH INVESTIGATION FINDINGS - API CLIENT
+======================================
+
+TOKEN ATTACHMENT MECHANISM (lines 103-112):
+- Uses Axios request interceptor
+- Reads token from: window.localStorage.getItem("auth_token")
+- If token exists, calls setAuthHeader() (lines 80-90)
+- setAuthHeader() adds: Authorization: Bearer <token>
+- Applied to ALL outgoing requests automatically
+
+TIMEOUT CONFIGURATION (line 77):
+- timeout: 90_000ms (90 seconds)
+- Reason: Render free-tier cold starts can take 30-60s
+- This may contribute to "slow loading" perception
+
+BACKEND URL RESOLUTION (lines 8-27):
+- Localhost: uses http://localhost:8000 or configured backend
+- Production: uses /backend proxy on Vercel or configured remote
+- Default remote: https://autopost-1-ax2p.onrender.com
+
+POTENTIAL ISSUES IDENTIFIED:
+1. 90-second timeout may be too long, causing slow UX
+2. No retry logic for failed requests
+3. No token refresh logic - if token expires, requests fail
+4. No error handling for 401 responses (could trigger auto-refresh)
+*/
+
 import axios, { AxiosHeaders, isAxiosError } from "axios"
 
 const DEFAULT_REMOTE_BACKEND = "https://autopost-1-ax2p.onrender.com"
@@ -74,7 +102,7 @@ export function getApiErrorMessage(error: unknown, fallback: string): string {
 
 export const api = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 90_000, // Render free-tier cold starts can take 30-60s
+  timeout: 30_000, // 30 seconds - reasonable timeout for API requests
 })
 
 function setAuthHeader(config: { headers?: unknown }, token: string) {
@@ -114,6 +142,18 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
+    // Handle 401 Unauthorized - token expired or invalid
+    if (isAxiosError(error) && error.response?.status === 401) {
+      // Clear the invalid token from localStorage
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem("auth_token")
+      }
+      // Redirect to login page if not already there
+      if (typeof window !== "undefined" && !window.location.pathname.includes("/auth")) {
+        window.location.href = "/auth/login"
+      }
+    }
+
     if (
       isAxiosError(error) &&
       error.config?.responseType === "blob" &&

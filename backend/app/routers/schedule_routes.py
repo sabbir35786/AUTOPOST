@@ -223,6 +223,7 @@ async def get_dashboard(
             models.ScheduledSlot.scheduled_at <= today_end,
         )
         .order_by(models.ScheduledSlot.scheduled_at.asc())
+        .limit(50)
         .all()
     )
     
@@ -290,6 +291,7 @@ async def get_scheduled_slots(
             models.ScheduledSlot.status.in_(["pending", "generating"]),
         )
         .order_by(models.ScheduledSlot.scheduled_at.asc())
+        .limit(50)
         .all()
     )
 
@@ -301,6 +303,7 @@ async def get_scheduled_slots(
             models.PostLog.scheduled_at >= now,
         )
         .order_by(models.PostLog.scheduled_at.asc())
+        .limit(50)
         .all()
     )
 
