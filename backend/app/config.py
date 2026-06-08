@@ -27,7 +27,7 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))  # 7 days in minutes
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://autopost-woad.vercel.app").rstrip("/")
-BACKEND_URL = os.getenv("BACKEND_URL", "https://auto-poster-backend.onrender.com").rstrip("/")
+BACKEND_URL = os.getenv("BACKEND_URL", "https://autopost-1-ax2p.onrender.com").rstrip("/")
 APP_BASE_URL = os.getenv("APP_BASE_URL", BACKEND_URL)
 CRON_SECRET = os.getenv("CRON_SECRET", "your_cron_secret_here")
 
@@ -74,7 +74,7 @@ FACEBOOK_OAUTH_SCOPES = os.getenv(
 )
 FACEBOOK_REDIRECT_URI = os.getenv(
     "FACEBOOK_REDIRECT_URI",
-    "https://auto-poster-backend.onrender.com/auth/facebook/callback",
+    "https://autopost-1-ax2p.onrender.com/auth/facebook/callback",
 )
 FACEBOOK_TOKEN_ENCRYPTION_KEY = os.getenv("FACEBOOK_TOKEN_ENCRYPTION_KEY", "")
 FACEBOOK_GRAPH_API_BASE_URL = os.getenv(

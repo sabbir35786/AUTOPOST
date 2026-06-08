@@ -19,7 +19,7 @@ TIMEOUT CONFIGURATION (line 95):
 BACKEND URL RESOLUTION (lines 8-27):
 - Localhost: uses http://localhost:8000 or configured backend
 - Production: uses /backend proxy on Vercel or configured remote
-- Default remote: https://auto-poster-backend.onrender.com
+- Default remote: https://autopost-1-ax2p.onrender.com
 
 POTENTIAL ISSUES IDENTIFIED:
 1. 90-second timeout may be too long, causing slow UX
@@ -30,7 +30,7 @@ POTENTIAL ISSUES IDENTIFIED:
 
 import axios, { AxiosHeaders, isAxiosError } from "axios"
 
-const DEFAULT_REMOTE_BACKEND = "https://auto-poster-backend.onrender.com"
+const DEFAULT_REMOTE_BACKEND = "https://autopost-1-ax2p.onrender.com"
 const VERCEL_BACKEND_PROXY = "/backend"
 
 function getBackendUrl() {

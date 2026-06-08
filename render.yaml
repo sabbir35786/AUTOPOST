@@ -19,7 +19,7 @@ services:
       - key: FACEBOOK_APP_SECRET
         sync: false
       - key: FACEBOOK_REDIRECT_URI
-        value: https://auto-poster-backend.onrender.com/auth/facebook/callback
+        value: https://autopost-1-ax2p.onrender.com/auth/facebook/callback
       - key: FACEBOOK_TOKEN_ENCRYPTION_KEY
         sync: false
       - key: OPENAI_API_KEY
@@ -33,7 +33,7 @@ services:
       - key: FRONTEND_URL
         value: https://autopost-woad.vercel.app
       - key: BACKEND_URL
-        value: https://auto-poster-backend.onrender.com
+        value: https://autopost-1-ax2p.onrender.com
       - key: CRON_SECRET
         sync: false
       - key: QSTASH_TOKEN
