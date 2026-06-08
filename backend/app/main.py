@@ -424,6 +424,32 @@ app.add_middleware(
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax", https_only=False)
 
 
+@app.middleware("http")
+async def token_refresh_middleware(request: Request, call_next):
+    """If the JWT in the Authorization header is within 1 day of expiry,
+    issue a new token via X-New-Token response header so the frontend
+    can store it transparently."""
+    response = await call_next(request)
+    if response.status_code >= 400:
+        return response
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return response
+    raw_token = auth_header[7:]
+    try:
+        payload = jwt.decode(raw_token, SECRET_KEY, algorithms=[ALGORITHM])
+        exp_ts = payload.get("exp")
+        if not exp_ts:
+            return response
+        exp_dt = datetime.fromtimestamp(exp_ts, tz=timezone.utc)
+        if exp_dt - datetime.now(timezone.utc) < timedelta(days=1):
+            new_token = create_access_token(data={"sub": payload["sub"]})
+            response.headers["X-New-Token"] = new_token
+    except JWTError:
+        pass
+    return response
+
+
 @app.api_route("/", methods=["GET", "HEAD"])
 def read_root():
     return {"message": "Welcome to the Auto Poster API"}
@@ -578,6 +604,11 @@ def login(credentials: schemas.UserLogin, db: Session = Depends(get_db)):
 
     access_token = create_access_token(data={"sub": str(user.id)})
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
 
 
 @app.get("/users/me", response_model=schemas.UserRead)

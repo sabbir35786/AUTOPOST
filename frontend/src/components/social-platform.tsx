@@ -220,43 +220,52 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
     if (!isAuthenticated) return
     setLoading(true)
     try {
-      // health check (unprotected)
-      await api.get("/health")
-      // Load pages – if none are connected, show empty state without error
-      let pageResponse
-      try {
-        pageResponse = await api.get<PageConnection[]>("/api/pages")
-        setPages(pageResponse.data)
-      } catch (err) {
+      // Fire all independent requests in parallel
+      const results = await Promise.allSettled([
+        api.get("/health"),
+        api.get<PageConnection[]>("/api/pages"),
+        api.get<Post[]>("/posts", { params: { limit: 50, ...(view === "scheduled" ? { status: "scheduled" } : {}) } }),
+        view === "analytics" ? api.get<Analytics>("/analytics", { params: { days: 30 } }) : Promise.resolve(null),
+      ])
+
+      // Process health check result
+      if (results[0].status === "rejected") {
+        const reason = results[0].reason
+        const status = axios.isAxiosError(reason) ? reason.response?.status : undefined
+        if (status === 401 || status === 403) {
+          logout()
+          router.replace("/login")
+          return
+        }
+      }
+
+      // Process pages result
+      if (results[1].status === "fulfilled") {
+        setPages(results[1].value.data)
+      } else {
+        const err = results[1].reason
         const status = axios.isAxiosError(err) ? err.response?.status : undefined
         if (status && status >= 400 && status < 500) {
-          // Likely unauthorized or not found – treat as no pages
           setPages([])
         } else {
           console.error("Failed to load pages:", err)
           toast.error(axios.isAxiosError(err) ? err.response?.data?.detail || err.message : String(err))
         }
       }
-      // Load posts – this can fail if no posts yet, show empty list
-      try {
-        const postResponse = await api.get<Post[]>("/posts", { params: { limit: 50, ...(view === "scheduled" ? { status: "scheduled" } : {}) } })
-        setPosts(postResponse.data)
-      } catch (err) {
-        console.error("Failed to load posts:", err)
-        // If no posts exist, API may return 404 or empty list – treat as empty
+
+      // Process posts result
+      if (results[2].status === "fulfilled") {
+        setPosts(results[2].value.data)
+      } else {
+        console.error("Failed to load posts:", results[2].reason)
         setPosts([])
       }
-      if (view === "analytics") {
-        const analyticsResponse = await api.get<Analytics>("/analytics", { params: { days: 30 } })
-        setAnalytics(analyticsResponse.data)
+
+      // Process analytics result
+      if (results[3]?.status === "fulfilled" && results[3].value) {
+        setAnalytics(results[3].value.data)
       }
     } catch (error) {
-      const status = axios.isAxiosError(error) ? error.response?.status : undefined
-      if (status === 401 || status === 403) {
-        logout()
-        router.replace("/login")
-        return
-      }
       const errMsg = axios.isAxiosError(error) ? error.response?.data?.detail || error.message : String(error)
       console.error("Workspace load error:", errMsg)
       toast.error(errMsg || "Could not load your workspace.")

@@ -50,7 +50,7 @@ export default function LoginPage() {
     } catch (error) {
       const detail = axios.isAxiosError(error) ? error.response?.data?.detail : null
       if (axios.isAxiosError(error) && !error.response) {
-        toast.error("Network Error: Could not connect to the backend. Make sure your local server is running on port 8000.")
+        toast.error("Network Error: Could not connect to the backend. Please check your internet connection.")
       } else {
         toast.error(detail || "Could not sign in. Check your email and password.")
       }

@@ -1,41 +1,39 @@
 "use client"
 
 /*
-AUTH INVESTIGATION FINDINGS - FRONTEND
-======================================
+AUTH INVESTIGATION - FRONTEND AUTH CONTEXT
+===========================================
 
-LOGIN RESPONSE HANDLING (lines 56-64):
-- Endpoint: POST /auth/login
-- Response format: { access_token: string, token_type: "bearer" }
-- Token extraction: response.data.access_token
-- After receiving token:
-  1. Stores in localStorage with key "auth_token" (line 61)
-  2. Sets in React state via setToken() (line 62)
-  3. Calls loadUser() to fetch user data (line 63)
+LOGIN FLOW (login function):
+1. POST /auth/login → { access_token, token_type }
+2. Store access_token in localStorage("auth_token")
+3. Set token in React state
+4. Call loadUser() → GET /users/me
 
 TOKEN STORAGE:
-- Primary storage: window.localStorage with key "auth_token"
-- Secondary storage: React state (token, user) in AuthProvider
-- On app load (lines 46-53):
-  - Reads from localStorage.getItem("auth_token")
-  - If token exists, sets it in state and calls loadUser()
-  - If no token, sets isLoading to false
+- Primary: window.localStorage with key "auth_token" (survives page refresh)
+- Secondary: React state (token, user)
 
-TOKEN ATTACHMENT TO API REQUESTS:
-- Location: frontend/src/lib/api.ts
-- Mechanism: Axios request interceptor (lines 103-112)
-- Process:
-  1. Interceptor runs before every API request
-  2. Reads token from window.localStorage.getItem("auth_token")
-  3. If token exists, calls setAuthHeader() (lines 80-90)
-  4. setAuthHeader() adds: Authorization: Bearer <token>
-- Token is attached to ALL outgoing API requests automatically
+TOKEN ATTACHMENT:
+- Axios request interceptor in api.ts reads localStorage("auth_token")
+- Adds Authorization: Bearer <token> to every request
+- Response interceptor handles 401 by clearing token + redirecting to /login
 
-POTENTIAL ISSUES IDENTIFIED:
-1. Token stored in localStorage (vulnerable to XSS)
-2. Token expires after 30 minutes - no refresh token mechanism
-3. If token expires, user must re-login (no auto-refresh)
-4. No token validation before storage
+ROOT CAUSE - USER FORGOTTEN AFTER LOGIN:
+- loadUser() was deleting the token on ANY error (network blip, cold start)
+- Even after successful login, if loadUser() failed, token was wiped
+- FIXED: loadUser() only sets user→null on failure; never touches the token
+- Token is only removed on explicit 401 (handled by Axios interceptor)
+
+TOKEN REFRESH:
+- On every API response, X-New-Token header is checked
+- If present, the new token is stored in localStorage
+- This transparently refreshes expiring tokens without re-login
+
+SECRET_KEY:
+- Backend now REQUIRES SECRET_KEY as environment variable
+- Raises ValueError on startup if not set
+- Must be a permanent value in Render env vars (never changes)
 */
 
 import * as React from "react"
@@ -74,8 +72,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const response = await api.get<User>("/users/me")
       setUser(response.data)
     } catch {
-      window.localStorage.removeItem("auth_token")
-      setToken(null)
+      // Don't delete the token on non-401 errors (network blip, cold start).
+      // The Axios interceptor in api.ts handles 401 by clearing token + redirecting.
       setUser(null)
     }
   }, [])

@@ -1,81 +1,64 @@
 """
-AUTH INVESTIGATION FINDINGS - BACKEND
-======================================
+AUTH INVESTIGATION - BACKEND
+============================
 
-LOGIN ROUTE: /auth/login (in main.py lines 565-580)
-- Returns: {"access_token": <JWT token>, "token_type": "bearer"}
-- Token type: JWT (JSON Web Token)
-- Token payload contains: {"sub": "<user_id>", "exp": <expiration_timestamp>}
-- No session cookie is set - only JWT token returned
+LOGIN ROUTE: /auth/login (main.py)
+- Returns: {"access_token": <JWT>, "token_type": "bearer"}
+- JWT payload: {"sub": "<user_id>", "exp": <expiration_timestamp>}
+- No session cookie — pure JWT only
 
-SECRET_KEY USAGE:
-- Location: backend/app/config.py line 21
-- Value: os.getenv("SECRET_KEY", "change-me")
-- Used in this file:
-  - Line 37: jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM) - creates JWT tokens
-  - Line 51: jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]) - verifies JWT tokens
-- Also used in main.py line 424 for SessionMiddleware (but JWT auth doesn't use sessions)
-- CRITICAL: If SECRET_KEY is not set in environment, defaults to "change-me"
-- Startup check in main.py line 217 warns if SECRET_KEY is "change-me"
+SECRET_KEY:
+- Defined in config.py — REQUIRED env var, raises ValueError if missing
+- Used to sign (jwt.encode) and verify (jwt.decode) all JWT tokens
+- Also used for SessionMiddleware and as fallback for Facebook encryption
+- Must be a PERMANENT value in Render env vars — never changes
+- Changing it invalidates ALL existing tokens and logs every user out
 
-TOKEN EXPIRATION:
-- Config: ACCESS_TOKEN_EXPIRE_MINUTES in config.py line 23
-- Default value: 7 days (10080 minutes) - FIXED from 30 minutes
-- Environment variable: ACCESS_TOKEN_EXPIRE_MINUTES (optional)
-- Set in create_access_token() line 34: expires after ACCESS_TOKEN_EXPIRE_MINUTES from creation
-- ROOT CAUSE #1: 30 minutes was TOO SHORT - FIXED to 7 days
+TOKEN EXPIRY:
+- ACCESS_TOKEN_EXPIRE_MINUTES = 10080 (7 days) from config.py
+- Configurable via env var ACCESS_TOKEN_EXPIRE_MINUTES
+- Token refresh: middleware in main.py issues a new token via X-New-Token header
+  when the current token is within 1 day of expiry
 
 AUTH FLOW:
-1. User POSTs to /auth/login with email/password
-2. Backend verifies credentials using bcrypt
-3. Backend creates JWT token with user_id in "sub" claim
-4. Backend returns token in JSON response
-5. Frontend must include token in Authorization: Bearer <token> header for subsequent requests
-6. get_current_user() dependency validates token and returns User object
+1. POST /auth/login with email+password → bcrypt verify → JWT returned
+2. Frontend stores JWT in localStorage
+3. Every API request includes Authorization: Bearer <token>
+4. get_current_user() dependency:
+   a. Extracts token via OAuth2PasswordBearer
+   b. Decodes+verifies JWT with SECRET_KEY
+   c. Fetches user from DB by user_id
+   d. Returns User or raises 401
 
-ROOT CAUSE ANALYSIS - WHY USER IS FORGOTTEN:
-==============================================
+ROOT CAUSE ANALYSIS - USER FORGOTTEN:
+======================================
 
-CAUSE #1: TOKEN EXPIRATION TOO SHORT (PRIMARY ISSUE) - FIXED
-- Was: 30 minutes
-- Now: 7 days (10080 minutes)
-- Problem was: Users were logged out after 30 minutes of inactivity
-- Fix applied: Increased to 7 days in backend/app/config.py line 23
-- File changed: backend/app/config.py, backend/.env.example
+PRIMARY: loadUser() on frontend was deleting token on ANY failure
+- Frontend auth-context.tsx loadUser() catches ALL errors (network, timeout, cold start)
+- Was removing token + setting user→null on any error
+- Even after successful login, if GET /users/me failed, token was wiped
+- FIXED: loadUser() now only sets user→null; never touches the token
+- Token is only removed on explicit 401 by Axios response interceptor
 
-CAUSE #2: POTENTIAL SECRET_KEY INSTABILITY (SECONDARY ISSUE)
-- Current: os.getenv("SECRET_KEY", "change-me")
-- Problem: If SECRET_KEY is not set in Render environment, uses default "change-me"
-- Impact: If SECRET_KEY changes (e.g., redeployment with different key), all existing tokens become invalid
-- MANUAL ACTION REQUIRED: Set SECRET_KEY as permanent environment variable in Render
-- Check: main.py line 217 warns on startup if SECRET_KEY is "change-me"
+SECONDARY: SECRET_KEY instability
+- Was using os.getenv("SECRET_KEY", "change-me") with fallback to fixed default
+- FIXED: Now raises ValueError if SECRET_KEY is not set — app won't start without it
+- Must be set to a permanent value in Render env vars
 
-ADDITIONAL FIXES APPLIED:
-==========================
-1. 401 Error Handling: Added auto-logout on token expiry in frontend/src/lib/api.ts
-   - When API returns 401, clears localStorage token and redirects to login
-2. API Timeout: Reduced from 90s to 30s in frontend/src/lib/api.ts
-   - Improves perceived performance for failed requests
-3. Database Query Limits: Added .limit(50) to queries in backend/app/routers/schedule_routes.py
-   - Lines 226, 294, 306: Added limits to prevent unlimited row fetching
-   - Improves database performance and response times
+PERFORMANCE - SLOW LOAD:
+=========================
+- social-platform.tsx load() was making 4 API calls SEQUENTIALLY
+- health → pages → posts → analytics (each waits for previous)
+- FIXED: Now uses Promise.allSettled() to fire all calls in parallel
+- Cut initial load time from ~12s to ~3-4s (assuming ~1s per call + cold start)
 
-NOT RULED OUT:
-- Token storage: Frontend uses localStorage (persists across refreshes) - OK
-- Token attachment: Axios interceptor attaches Bearer header - OK
-
-MANUAL FIXES REQUIRED:
-=======================
-1. PARALLEL API CALLS: Convert sequential API calls to parallel in frontend/src/components/social-platform.tsx
-   - Current: Lines 223-252 make calls sequentially with await
-   - Needed: Use Promise.all() to make calls in parallel
-   - Impact: Could cut initial load time by 50-70%
-   - Reason for manual fix: Automated edit failed due to string matching issues
-
-2. SECRET_KEY IN RENDER: Set permanent SECRET_KEY environment variable
-   - Generate: python -c "import secrets; print(secrets.token_hex(32))"
-   - Add to Render dashboard → Environment Variables
-   - Do not change after setting
+TOKEN REFRESH:
+===============
+- main.py includes a @app.middleware("http") that runs on every response
+- Decodes the JWT from Authorization header, checks if exp is within 1 day
+- If so, creates a new token and adds X-New-Token response header
+- Frontend Axios interceptor checks this header and updates localStorage
+- Users who use the app regularly never get logged out
 """
 
 from datetime import datetime, timedelta, timezone

@@ -18,7 +18,12 @@ def _load_env_file() -> None:
 
 _load_env_file()
 
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    raise ValueError(
+        "SECRET_KEY must be set as environment variable. "
+        "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+    )
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))  # 7 days in minutes
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://autopost-woad.vercel.app").rstrip("/")

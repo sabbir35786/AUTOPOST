@@ -36,22 +36,18 @@ const VERCEL_BACKEND_PROXY = "/backend"
 function getBackendUrl() {
   const configuredBackend = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, "")
 
+  if (configuredBackend) {
+    return configuredBackend
+  }
+
   if (typeof window !== "undefined") {
-    const isLocalhost = ["localhost", "127.0.0.1"].includes(window.location.hostname)
-    if (isLocalhost) {
-      return configuredBackend || "http://localhost:8000"
-    }
-
-    const configuredForLocalhost =
-      configuredBackend?.startsWith("http://localhost") ||
-      configuredBackend?.startsWith("http://127.0.0.1")
-
-    if (!configuredBackend || configuredBackend === DEFAULT_REMOTE_BACKEND || configuredForLocalhost) {
+    // Fallback to proxy only if explicitly configured
+    if (configuredBackend === VERCEL_BACKEND_PROXY) {
       return VERCEL_BACKEND_PROXY
     }
   }
 
-  return configuredBackend || DEFAULT_REMOTE_BACKEND
+  return DEFAULT_REMOTE_BACKEND
 }
 
 export const API_BASE_URL = getBackendUrl()
@@ -60,12 +56,6 @@ export function getBackendOrigin() {
   const configuredBackend = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, "")
   if (configuredBackend?.startsWith("http")) {
     return configuredBackend
-  }
-  if (typeof window !== "undefined") {
-    const isLocalhost = ["localhost", "127.0.0.1"].includes(window.location.hostname)
-    if (isLocalhost) {
-      return configuredBackend || "http://localhost:8000"
-    }
   }
   return DEFAULT_REMOTE_BACKEND
 }
@@ -140,7 +130,14 @@ api.interceptors.request.use((config) => {
 })
 
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    // Token refresh: if the backend returned a new token, store it
+    const newToken = response.headers?.["x-new-token"]
+    if (newToken && typeof window !== "undefined") {
+      window.localStorage.setItem("auth_token", newToken)
+    }
+    return response
+  },
   async (error) => {
     // Handle 401 Unauthorized - token expired or invalid
     if (isAxiosError(error) && error.response?.status === 401) {
