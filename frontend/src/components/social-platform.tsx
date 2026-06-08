@@ -1,7 +1,6 @@
 "use client"
 
 import * as React from "react"
-import axios from "axios"
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
 import {
@@ -37,6 +36,7 @@ import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { useAuth } from "@/contexts/auth-context"
+import { useApp } from "@/contexts/app-context"
 import { API_BASE_URL, BACKEND_ORIGIN, api, getApiErrorMessage } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { TemplateBuilder } from "@/components/template-builder/template-builder"
@@ -203,10 +203,8 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
   const router = useRouter()
   const pathname = usePathname()
   const { user, isAuthenticated, isLoading, logout } = useAuth()
-  const [pages, setPages] = React.useState<PageConnection[]>([])
-  const [posts, setPosts] = React.useState<Post[]>([])
+  const { pages, posts, isInitialLoading, refreshPages, refreshPosts } = useApp()
   const [analytics, setAnalytics] = React.useState<Analytics | null>(null)
-  const [loading, setLoading] = React.useState(true)
   const [mobileOpen, setMobileOpen] = React.useState(false)
 
   const timezone = user?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
@@ -216,67 +214,13 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
     if (!isLoading && !isAuthenticated) router.replace("/login")
   }, [isAuthenticated, isLoading, router])
 
-  const load = React.useCallback(async () => {
-    if (!isAuthenticated) return
-    setLoading(true)
-    try {
-      // Fire all independent requests in parallel
-      const results = await Promise.allSettled([
-        api.get("/health"),
-        api.get<PageConnection[]>("/api/pages"),
-        api.get<Post[]>("/posts", { params: { limit: 50, ...(view === "scheduled" ? { status: "scheduled" } : {}) } }),
-        view === "analytics" ? api.get<Analytics>("/analytics", { params: { days: 30 } }) : Promise.resolve(null),
-      ])
-
-      // Process health check result
-      if (results[0].status === "rejected") {
-        const reason = results[0].reason
-        const status = axios.isAxiosError(reason) ? reason.response?.status : undefined
-        if (status === 401 || status === 403) {
-          logout()
-          router.replace("/login")
-          return
-        }
-      }
-
-      // Process pages result
-      if (results[1].status === "fulfilled") {
-        setPages(results[1].value.data)
-      } else {
-        const err = results[1].reason
-        const status = axios.isAxiosError(err) ? err.response?.status : undefined
-        if (status && status >= 400 && status < 500) {
-          setPages([])
-        } else {
-          console.error("Failed to load pages:", err)
-          toast.error(axios.isAxiosError(err) ? err.response?.data?.detail || err.message : String(err))
-        }
-      }
-
-      // Process posts result
-      if (results[2].status === "fulfilled") {
-        setPosts(results[2].value.data)
-      } else {
-        console.error("Failed to load posts:", results[2].reason)
-        setPosts([])
-      }
-
-      // Process analytics result
-      if (results[3]?.status === "fulfilled" && results[3].value) {
-        setAnalytics(results[3].value.data)
-      }
-    } catch (error) {
-      const errMsg = axios.isAxiosError(error) ? error.response?.data?.detail || error.message : String(error)
-      console.error("Workspace load error:", errMsg)
-      toast.error(errMsg || "Could not load your workspace.")
-    } finally {
-      setLoading(false)
-    }
-  }, [isAuthenticated, logout, router, view])
-
   React.useEffect(() => {
-    load()
-  }, [load])
+    if (view === "analytics" && isAuthenticated) {
+      api.get<Analytics>("/analytics", { params: { days: 30 } })
+        .then((res) => setAnalytics(res.data))
+        .catch(() => setAnalytics(null))
+    }
+  }, [view, isAuthenticated])
 
   function signOut() {
     logout()
@@ -320,17 +264,17 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
         </Sheet>
       </header>
       <main className="mx-auto grid max-w-6xl gap-6 p-4 md:ml-60 md:p-8">
-        {loading ? <SkeletonPage /> : null}
-        {!loading && view === "home" ? <HomeView pages={pages} posts={posts} onConnected={load} timezone={timezone} /> : null}
-        {!loading && view === "create" ? <Composer pages={pages} timezone={timezone} onSaved={load} /> : null}
-        {!loading && view === "ai-settings" ? <AISettingsView pages={pages} /> : null}
-        {!loading && view === "style-analyzer" ? <StyleAnalyzerView pages={pages} /> : null}
-        {!loading && view === "page-tracker" ? <PageTrackerView pages={pages} /> : null}
-        {!loading && view === "templates" ? <TemplateLibraryView /> : null}
-        {!loading && view === "scheduled" ? <ScheduledSlotsView timezone={timezone} /> : null}
-        {!loading && view === "published" ? <PostList title="Published Posts" posts={posts.filter((post) => post.status === "published" || post.status === "success")} emptyAction="/dashboard/create" emptyText="No published posts yet." timezone={timezone} published onChanged={load} /> : null}
-        {!loading && view === "analytics" ? <AnalyticsView analytics={analytics} setAnalytics={setAnalytics} /> : null}
-        {!loading && view === "settings" ? <SettingsView pages={pages} timezone={timezone} onChanged={load} /> : null}
+        {isInitialLoading ? <SkeletonPage /> : null}
+        {!isInitialLoading && view === "home" ? <HomeView pages={pages} posts={posts} onConnected={refreshPages} timezone={timezone} /> : null}
+        {!isInitialLoading && view === "create" ? <Composer pages={pages} timezone={timezone} onSaved={refreshPosts} /> : null}
+        {!isInitialLoading && view === "ai-settings" ? <AISettingsView pages={pages} /> : null}
+        {!isInitialLoading && view === "style-analyzer" ? <StyleAnalyzerView pages={pages} /> : null}
+        {!isInitialLoading && view === "page-tracker" ? <PageTrackerView pages={pages} /> : null}
+        {!isInitialLoading && view === "templates" ? <TemplateLibraryView /> : null}
+        {!isInitialLoading && view === "scheduled" ? <ScheduledSlotsView timezone={timezone} /> : null}
+        {!isInitialLoading && view === "published" ? <PostList title="Published Posts" posts={posts.filter((post) => post.status === "published" || post.status === "success")} emptyAction="/dashboard/create" emptyText="No published posts yet." timezone={timezone} published onChanged={refreshPosts} /> : null}
+        {!isInitialLoading && view === "analytics" ? <AnalyticsView analytics={analytics} setAnalytics={setAnalytics} /> : null}
+        {!isInitialLoading && view === "settings" ? <SettingsView pages={pages} timezone={timezone} onChanged={refreshPages} /> : null}
       </main>
     </div>
   )
@@ -2744,9 +2688,8 @@ function isPastScheduledSlot(post: Post) {
 
 
 function TemplateLibraryView() {
-  const [templates, setTemplates] = React.useState<any[]>([])
+  const { imageTemplates, refreshImageTemplates } = useApp()
   const [selectedTemplate, setSelectedTemplate] = React.useState<any | null>(null)
-  const [loading, setLoading] = React.useState(true)
   const [analyzing, setAnalyzing] = React.useState(false)
   const [createMode, setCreateMode] = React.useState<"choose" | "extract" | "manual">("choose")
   const [name, setName] = React.useState("")
@@ -2759,6 +2702,8 @@ function TemplateLibraryView() {
   const [testResult, setTestResult] = React.useState<any | null>(null)
   const [testError, setTestError] = React.useState<string | null>(null)
   const [showPrompt, setShowPrompt] = React.useState(false)
+
+  const templates = imageTemplates
 
   async function runTemplateTest() {
     if (!inputText.trim()) {
@@ -2800,21 +2745,7 @@ function TemplateLibraryView() {
     }
   }
 
-  const loadTemplates = React.useCallback(async () => {
-    setLoading(true)
-    try {
-      const response = await api.get<any[]>("/api/image-templates")
-      setTemplates(response.data)
-    } catch (err) {
-      console.error("Failed to load templates:", err)
-    } finally {
-      setLoading(false)
-    }
-  }, [])
 
-  React.useEffect(() => {
-    loadTemplates()
-  }, [loadTemplates])
 
   async function handleAnalyze(e: React.FormEvent) {
     e.preventDefault()
@@ -2831,7 +2762,7 @@ function TemplateLibraryView() {
       toast.success("Image analyzed and template created successfully!")
       setName("")
       setFile(null)
-      loadTemplates()
+      refreshImageTemplates()
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || "Template analysis failed.")
     } finally {
@@ -2844,7 +2775,7 @@ function TemplateLibraryView() {
     try {
       await api.delete(`/api/image-templates/${id}`)
       toast.success("Template deleted successfully")
-      loadTemplates()
+      refreshImageTemplates()
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || "Delete failed.")
     }
@@ -2867,7 +2798,7 @@ function TemplateLibraryView() {
           onCancel={() => setCreateMode("choose")}
           onSaved={() => {
             setCreateMode("choose")
-            loadTemplates()
+            refreshImageTemplates()
           }}
         />
       ) : null}
@@ -2934,9 +2865,7 @@ function TemplateLibraryView() {
             <CardTitle>Saved Templates</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
-            {loading ? (
-              <div className="col-span-2 text-center py-10"><Loader2 className="size-6 animate-spin mx-auto text-slate-400" /></div>
-            ) : templates.length === 0 ? (
+            {templates.length === 0 ? (
               <div className="col-span-2 text-center py-10 text-slate-500">No layout templates saved. Upload one to get started!</div>
             ) : (
               templates.map((tpl) => (
