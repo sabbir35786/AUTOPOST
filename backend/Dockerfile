@@ -1,15 +1,18 @@
 FROM python:3.11-slim-bookworm
 
 # Install system dependencies for PyGObject, PyCairo, PangoCairo, and libraqm
+# See: backend/app/routers/persona_image_templates.py (Pango/Cairo rendering)
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
+    libcairo2 \
     libcairo2-dev \
     libgirepository1.0-dev \
     gobject-introspection \
     python3-gi \
     python3-gi-cairo \
     libgirepository-1.0-1 \
+    libpango-1.0-0 \
     gir1.2-pango-1.0 \
     fontconfig \
     fonts-noto \

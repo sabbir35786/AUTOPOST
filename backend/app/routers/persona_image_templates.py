@@ -30,12 +30,22 @@ try:
     gi.require_version('Pango', '1.0')
     gi.require_version('PangoCairo', '1.0')
     from gi.repository import Pango, PangoCairo
-except ImportError as e:
+except Exception as e:
     _gi_import_error = ImportError(
-        "Pango/Cairo dependencies missing. On Windows, download GTK runtime from "
-        "https://github.com/wingtk/gvsbuild/releases (GTK3 bundle) and extract to C:\\gtk "
-        "or set GTK_BIN_PATH to the bin directory. "
-        "On Linux: apt-get install python3-gi gir1.2-pango-1.0"
+        "Pango/Cairo dependencies missing. This application requires Pango/Cairo for "
+        "proper complex text layout (Bengali ligatures, Arabic shaping, etc.).\n\n"
+        "On Windows:\n"
+        "  1. Run setup_windows_gtk.ps1 (in the project root) as Administrator:\n"
+        "       PowerShell .\\setup_windows_gtk.ps1\n"
+        "  2. This downloads the GTK3 runtime from gvsbuild, installs PyGObject/PyCairo,\n"
+        "     and adds C:\\gtk\\bin to your system PATH.\n"
+        "  3. Alternatively, download manually from:\n"
+        "       https://github.com/wingtk/gvsbuild/releases  (GTK3 bundle)\n"
+        "     Extract to C:\\gtk and run: .\\setenv_gtk.cmd\n\n"
+        "On Linux/Docker:\n"
+        "  apt-get install python3-gi python3-gi-cairo gir1.2-pango-1.0 \\\n"
+        "      libpango-1.0-0 libcairo2 libcairo2-dev\n\n"
+        "Original error: " + str(e)
     )
     cairo = None
     Pango = None
