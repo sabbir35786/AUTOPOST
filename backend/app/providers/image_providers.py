@@ -281,13 +281,7 @@ def get_image_provider_for_user(user_id: int, db) -> tuple:
     provider = (row.image_generation_provider or "").strip().lower()
     model_name = (row.image_generation_model or "").strip()
 
-    if provider == "mistral":
-        raise RuntimeError(
-            "Image generation via Mistral is not supported in this build. "
-            "Please choose Gemini, OpenAI / DALL-E, or Stability AI."
-        )
-
-    if provider not in _PROVIDER_MAP:
+    if provider == "mistral" or provider not in _PROVIDER_MAP:
         return FalProvider(), "FLUX.1-schnell", FAL_API_KEY
 
     # Fail fast with the required UX message when a selected provider key is missing.
