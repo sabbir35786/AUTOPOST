@@ -95,7 +95,7 @@ export function getApiErrorMessage(error: unknown, fallback: string): string {
 
 export const api = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30_000, // 30 seconds - reasonable timeout for API requests
+  timeout: 10_000, // 10 seconds - reduced from 30s for faster failure detection
 })
 
 function setAuthHeader(config: { headers?: unknown }, token: string) {
@@ -144,11 +144,9 @@ api.interceptors.response.use(
   async (error) => {
     // Handle 401 Unauthorized - token expired or invalid
     if (isAxiosError(error) && error.response?.status === 401) {
-      // Clear the invalid token from localStorage
       if (typeof window !== "undefined") {
         window.localStorage.removeItem("auth_token")
       }
-      // Redirect to login page if not already there
       if (typeof window !== "undefined" && !window.location.pathname.includes("/auth")) {
         window.location.href = "/auth/login"
       }
@@ -169,6 +167,19 @@ api.interceptors.response.use(
         // keep original blob body
       }
     }
+
+    // Auto-retry once on network errors (no response) after 2 seconds
+    if (
+      isAxiosError(error) &&
+      !error.response &&
+      error.config &&
+      !(error.config as any).__retry
+    ) {
+      (error.config as any).__retry = true
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      return api.request(error.config)
+    }
+
     return Promise.reject(error)
   },
 )
