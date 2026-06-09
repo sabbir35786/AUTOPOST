@@ -264,16 +264,17 @@ export function SocialPlatform({ view }: { view: "home" | "create" | "ai-setting
         </Sheet>
       </header>
       <main className="mx-auto grid max-w-6xl gap-6 p-4 md:ml-60 md:p-8">
-        {view === "home" ? <HomeView pages={pages} posts={posts} onConnected={refreshPages} timezone={timezone} /> : null}
-        {view === "create" ? <Composer pages={pages} timezone={timezone} onSaved={refreshPosts} /> : null}
-        {view === "ai-settings" ? <AISettingsView pages={pages} /> : null}
-        {view === "style-analyzer" ? <StyleAnalyzerView pages={pages} /> : null}
-        {view === "page-tracker" ? <PageTrackerView pages={pages} /> : null}
-        {view === "templates" ? <TemplateLibraryView /> : null}
-        {view === "scheduled" ? <ScheduledSlotsView timezone={timezone} /> : null}
-        {view === "published" ? <PostList title="Published Posts" posts={posts.filter((post) => post.status === "published" || post.status === "success")} emptyAction="/dashboard/create" emptyText="No published posts yet." timezone={timezone} published onChanged={refreshPosts} /> : null}
-        {view === "analytics" ? <AnalyticsView analytics={analytics} setAnalytics={setAnalytics} /> : null}
-        {view === "settings" ? <SettingsView pages={pages} timezone={timezone} onChanged={refreshPages} /> : null}
+        {isInitialLoading ? <SkeletonPage /> : null}
+        {!isInitialLoading && view === "home" ? <HomeView pages={pages} posts={posts} onConnected={refreshPages} timezone={timezone} /> : null}
+        {!isInitialLoading && view === "create" ? <Composer pages={pages} timezone={timezone} onSaved={refreshPosts} /> : null}
+        {!isInitialLoading && view === "ai-settings" ? <AISettingsView pages={pages} /> : null}
+        {!isInitialLoading && view === "style-analyzer" ? <StyleAnalyzerView pages={pages} /> : null}
+        {!isInitialLoading && view === "page-tracker" ? <PageTrackerView pages={pages} /> : null}
+        {!isInitialLoading && view === "templates" ? <TemplateLibraryView /> : null}
+        {!isInitialLoading && view === "scheduled" ? <ScheduledSlotsView timezone={timezone} /> : null}
+        {!isInitialLoading && view === "published" ? <PostList title="Published Posts" posts={posts.filter((post) => post.status === "published" || post.status === "success")} emptyAction="/dashboard/create" emptyText="No published posts yet." timezone={timezone} published onChanged={refreshPosts} /> : null}
+        {!isInitialLoading && view === "analytics" ? <AnalyticsView analytics={analytics} setAnalytics={setAnalytics} /> : null}
+        {!isInitialLoading && view === "settings" ? <SettingsView pages={pages} timezone={timezone} onChanged={refreshPages} /> : null}
       </main>
     </div>
   )
@@ -361,53 +362,34 @@ function ScheduledSlotsView({ timezone }: { timezone: string }) {
 }
 
 function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; posts: Post[]; onConnected: () => void; timezone: string }) {
-  const { dashboardData: cachedData, dashboardLoading, dashboardError, refreshDashboard, clearDashboardError, setDashboardData } = useApp()
+  const [dashboardData, setDashboardData] = React.useState<{ todays_slots: any[], recent_posts: any[] } | null>(null)
+  const [loadingDashboard, setLoadingDashboard] = React.useState(true)
+  const [dashboardError, setDashboardError] = React.useState<string | null>(null)
   const [retrying, setRetrying] = React.useState<string | null>(null)
   
-  // Use cached data from AppContext, fall back to local state for immediate display
-  const [localData, setLocalData] = React.useState<{ todays_slots: any[], recent_posts: any[] } | null>(cachedData)
-  const [loading, setLoading] = React.useState(!cachedData)
-  const [error, setError] = React.useState<string | null>(null)
-
   const fetchDashboard = React.useCallback(async () => {
-    setError(null)
-    if (!cachedData) setLoading(true)
+    setDashboardError(null)
     try {
       const response = await api.get("/api/dashboard")
-      setLocalData(response.data)
       setDashboardData(response.data)
     } catch (err: any) {
-      const msg = err?.response?.data?.detail || "Could not load dashboard. Tap to retry."
-      setError(msg)
+      console.error("Failed to load dashboard data:", err)
+      setDashboardError(err?.response?.data?.detail || "Failed to load dashboard data. Retrying soon...")
     } finally {
-      setLoading(false)
+      setLoadingDashboard(false)
     }
-  }, [cachedData, setDashboardData])
+  }, [])
+
+  const hasActiveSlots = dashboardData?.todays_slots?.some(
+    (slot) => slot.status === "pending" || slot.status === "generating"
+  )
 
   React.useEffect(() => {
-    // If we have cached data, show it immediately; otherwise fetch
-    if (!cachedData && !localData) {
-      fetchDashboard()
-    } else if (cachedData && !localData) {
-      setLocalData(cachedData)
-    }
-  }, [cachedData, localData, fetchDashboard])
-
-  // Background refresh every 30 seconds (silent — no loading indicator)
-  React.useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const response = await api.get("/api/dashboard")
-        setLocalData(response.data)
-        setDashboardData(response.data)
-      } catch {
-        // silent
-      }
-    }, 30000)
+    fetchDashboard()
+    const intervalMs = hasActiveSlots ? 5000 : 30000
+    const interval = setInterval(fetchDashboard, intervalMs)
     return () => clearInterval(interval)
-  }, [setDashboardData])
-
-  const displayData = localData || cachedData
+  }, [fetchDashboard, hasActiveSlots])
 
   async function retrySlot(slotId: string) {
     setRetrying(slotId)
@@ -429,19 +411,11 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
     </>
   )
 
-  if (error && !displayData) {
+  if (loadingDashboard) {
     return (
       <>
         <PageTitle title="Dashboard" subtitle="Today's schedule and recent activity." />
-        <Card>
-          <CardContent className="flex flex-col items-center gap-4 py-12">
-            <p className="text-sm text-red-600">{error}</p>
-            <Button variant="outline" onClick={fetchDashboard} disabled={loading}>
-              {loading ? <Loader2 className="size-4 animate-spin mr-2" /> : <RefreshCw className="size-4 mr-2" />}
-              Retry
-            </Button>
-          </CardContent>
-        </Card>
+        <div className="flex justify-center py-16"><Loader2 className="size-6 animate-spin text-slate-400" /></div>
       </>
     )
   }
@@ -449,6 +423,9 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
   return (
     <>
       <PageTitle title="Dashboard" subtitle="Today's schedule and recent activity." />
+      {dashboardError && (
+        <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">{dashboardError}</div>
+      )}
       
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
@@ -456,21 +433,15 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
             <CardTitle className="flex items-center justify-between">
               <span>Today's Schedule</span>
               <Button variant="ghost" size="icon" onClick={fetchDashboard} title="Refresh">
-                <RefreshCw className={cn("size-4", loading && "animate-spin")} />
+                <RefreshCw className="size-4" />
               </Button>
             </CardTitle>
           </CardHeader>
           <CardContent className="grid gap-3">
-            {loading && !displayData ? (
-              <div className="grid gap-3">
-                {[1, 2, 3, 4].map((i) => (
-                  <div key={i} className="h-16 animate-pulse rounded-md bg-slate-200" />
-                ))}
-              </div>
-            ) : !displayData?.todays_slots?.length ? (
+            {!dashboardData?.todays_slots?.length ? (
               <p className="text-sm text-slate-500 py-4 text-center">No slots scheduled for today.</p>
             ) : (
-              displayData.todays_slots.map((slot: any) => (
+              dashboardData.todays_slots.map((slot: any) => (
                 <div key={slot.id} className="flex items-center justify-between p-3 rounded-md border gap-3">
                   <div className="min-w-0">
                     <p className="font-medium text-sm truncate">{slot.persona_name}</p>
@@ -520,16 +491,10 @@ function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; p
         <Card>
           <CardHeader><CardTitle>Recent Published Posts</CardTitle></CardHeader>
           <CardContent className="grid gap-3">
-            {loading && !displayData ? (
-              <div className="grid gap-3">
-                {[1, 2, 3, 4].map((i) => (
-                  <div key={i} className="h-20 animate-pulse rounded-md bg-slate-200" />
-                ))}
-              </div>
-            ) : !displayData?.recent_posts?.length ? (
+            {!dashboardData?.recent_posts?.length ? (
               <p className="text-sm text-slate-500 py-4 text-center">No recent posts.</p>
             ) : (
-              displayData.recent_posts.map((post: any) => (
+              dashboardData.recent_posts.map((post: any) => (
                 <div key={post.id} className="flex gap-3 p-3 rounded-md border">
                   {post.image_url && <img src={post.image_url} alt="Post" className="size-16 rounded object-cover" />}
                   <div className="flex-1 min-w-0">
@@ -1344,8 +1309,7 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
   const userTimezone = user?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
   const [selectedPageId, setSelectedPageId] = React.useState<number | null>(pages.find((p) => p.connection_status === "connected")?.id ?? pages[0]?.id ?? null)
   const [personas, setPersonas] = React.useState<AIPersona[]>([])
-  const [personasLoading, setPersonasLoading] = React.useState(true)
-  const [personasError, setPersonasError] = React.useState<string | null>(null)
+  const [loadingPersonas, setLoadingPersonas] = React.useState(true)
   const [editing, setEditing] = React.useState<AIPersona | null>(null)
   const [scheduleDraft, setScheduleDraft] = React.useState<PersonaScheduleData>(emptySchedule(userTimezone))
   const [saving, setSaving] = React.useState(false)
@@ -1369,23 +1333,26 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
   }, [editing?.id])
 
   const loadPersonas = React.useCallback(() => {
-    if (!selectedPage?.id) return
-    setPersonasLoading(true)
-    setPersonasError(null)
-    Promise.all([
-      api.get<AIPersona[]>(`/api/ai/personas/${selectedPage.id}`),
-      api.get<PerformanceInsights>(`/api/ai/performance/${selectedPage.id}`).catch(() => null),
-    ]).then(([personasRes, insightsRes]) => {
-      setPersonas(personasRes.data)
-      if (insightsRes) setInsights(insightsRes.data)
-    }).catch(() => {
-      setPersonasError("Could not load personas. Tap to retry.")
-    }).finally(() => {
-      setPersonasLoading(false)
-    })
+    if (!selectedPage?.id) {
+      setLoadingPersonas(false)
+      return
+    }
+    setLoadingPersonas(true)
+    api.get<AIPersona[]>(`/api/ai/personas/${selectedPage.id}`).then((response) => {
+      setPersonas(response.data)
+    }).catch((err) => {
+      console.error("Failed to load personas:", err)
+      toast.error("Failed to load AI personas. Please try again.")
+    }).finally(() => setLoadingPersonas(false))
+    api.get<PerformanceInsights>(`/api/ai/performance/${selectedPage.id}`).then((response) => setInsights(response.data)).catch(() => setInsights(null))
   }, [selectedPage?.id])
 
-  React.useEffect(() => { loadPersonas() }, [loadPersonas])
+  React.useEffect(() => {
+    if (!pages.length) return
+    const connectedId = pages.find((p) => p.connection_status === "connected")?.id ?? pages[0]?.id ?? null
+    if (connectedId !== selectedPageId) setSelectedPageId(connectedId)
+    loadPersonas()
+  }, [loadPersonas, pages, selectedPageId])
 
   React.useEffect(() => {
     if (!editing) return
@@ -1614,34 +1581,11 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
     }
   }
 
+  if (loadingPersonas) {
+    return <><PageTitle title="Prompt Studio" subtitle="Building the exact AI prompt used by each scheduled persona." aiPowered /><div className="flex justify-center py-16"><Loader2 className="size-6 animate-spin text-slate-400" /></div></>
+  }
   return <><PageTitle title="Prompt Studio" subtitle="Build the exact AI prompt used by each scheduled persona." aiPowered />{!pages.length ? <Empty text="Connect a page before setting up AI personas." action="/dashboard/settings" /> : <div className="grid gap-5">
     {pages.length > 1 ? <Select value={String(selectedPageId ?? pages[0].id)} onChange={(event) => setSelectedPageId(Number(event.target.value))}>{pages.map((page) => <option key={page.id} value={String(page.id)}>{page.page_name}</option>)}</Select> : <PageMini page={pages[0]} />}
-    {personasLoading ? (
-      <div className="grid gap-4 md:grid-cols-2">
-        {[1, 2, 3, 4].map((i) => (
-          <Card key={i}>
-            <CardContent className="p-5">
-              <div className="h-5 w-32 animate-pulse rounded bg-slate-200 mb-3" />
-              <div className="h-4 w-24 animate-pulse rounded bg-slate-200 mb-3" />
-              <div className="flex gap-2 mb-3">
-                <div className="h-6 w-16 animate-pulse rounded-full bg-slate-200" />
-                <div className="h-6 w-20 animate-pulse rounded-full bg-slate-200" />
-              </div>
-              <div className="h-4 w-36 animate-pulse rounded bg-slate-200" />
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-    ) : personasError ? (
-      <Card>
-        <CardContent className="flex flex-col items-center gap-4 py-12">
-          <p className="text-sm text-red-600">{personasError}</p>
-          <Button variant="outline" onClick={loadPersonas}>
-            <RefreshCw className="size-4 mr-2" /> Retry
-          </Button>
-        </CardContent>
-      </Card>
-    ) : (<>
     <div className="grid grid-cols-2 gap-2 md:grid-cols-7">{dayOptions.map((day) => {
       const owner = dayOwners[day]
       const index = owner ? Math.max(0, personas.findIndex((persona) => persona.id === owner.id)) : 0
@@ -1655,7 +1599,6 @@ function AISettingsView({ pages }: { pages: PageConnection[] }) {
         </div>
       </CardContent></Card>)}{personas.length < 5 ? <Button variant="outline" className="min-h-36 border-dashed" onClick={() => setEditing({ ...emptyPersona(), persona_name: `Persona ${personas.length + 1}` })}><Plus className="size-4" /> Add New Persona</Button> : null}</div>
     <PerformanceInsightsPanel insights={insights} personas={personas} timezone={Intl.DateTimeFormat().resolvedOptions().timeZone} />
-    </>)}
   </div>}{editing ? <PromptStudioModal draft={draft} config={config} simplePrompt={simplePrompt} rawPrompt={rawPrompt} previewTab={previewTab} saving={saving} strategy={strategy} fromStyleAnalyzer={prefilled} schedule={scheduleDraft} onScheduleChange={setScheduleDraft} onStrategyDecision={handleStrategyDecision} onPreviewTab={setPreviewTab} onChange={setEditing} onConfig={updateConfig} onToggleTone={toggleTone} onToggleDay={toggleDay} onToggleConfigList={toggleConfigList} onAddTag={addTag} onSave={saveSettings} onTest={testSample} onResetLearning={resetLearning} onClose={() => { setEditing(null); setPrefilled(false) }} /> : null}{sample ? <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4"><Card className="max-w-xl"><CardHeader><CardTitle>Sample AI Post</CardTitle></CardHeader><CardContent className="grid gap-4"><p className="whitespace-pre-wrap text-sm text-slate-700">{sample}</p><Button className="w-fit bg-blue-700 hover:bg-blue-800" onClick={() => setSample("")}>Close</Button></CardContent></Card></div> : null}
   {testingFullFlow ? (
     <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4 overflow-y-auto">

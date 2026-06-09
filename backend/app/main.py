@@ -903,18 +903,15 @@ def _schedule_persona_posts(db: Session, persona: models.AIPersona, user: models
     print(f"Schedule saved and today's slots registered for persona {persona.persona_name}")
 
 
-def _serialize_ai_persona(persona: models.AIPersona, preloaded_image_settings: dict[int, models.ImagePromptSettings] | None = None) -> dict:
+def _serialize_ai_persona(persona: models.AIPersona) -> dict:
     image_settings = None
-    if preloaded_image_settings is not None:
-        image_settings = preloaded_image_settings.get(persona.id)
-    else:
-        session = object_session(persona)
-        if session is not None:
-            image_settings = (
-                session.query(models.ImagePromptSettings)
-                .filter(models.ImagePromptSettings.persona_id == persona.id)
-                .first()
-            )
+    session = object_session(persona)
+    if session is not None:
+        image_settings = (
+            session.query(models.ImagePromptSettings)
+            .filter(models.ImagePromptSettings.persona_id == persona.id)
+            .first()
+        )
     return {
         "id": persona.id,
         "page_connection_id": persona.page_connection_id,
@@ -1460,12 +1457,7 @@ def list_ai_personas(
         .order_by(models.AIPersona.id.asc())
         .all()
     )
-    persona_ids = [p.id for p in personas]
-    preloaded: dict[int, models.ImagePromptSettings] = {}
-    if persona_ids:
-        for ips in db.query(models.ImagePromptSettings).filter(models.ImagePromptSettings.persona_id.in_(persona_ids)).all():
-            preloaded[ips.persona_id] = ips
-    return [_serialize_ai_persona(persona, preloaded) for persona in personas]
+    return [_serialize_ai_persona(persona) for persona in personas]
 
 
 @app.post("/api/ai/personas/{page_connection_id}", response_model=schemas.AIPersonaRead, status_code=status.HTTP_201_CREATED)

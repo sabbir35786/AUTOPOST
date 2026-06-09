@@ -9,15 +9,12 @@ type AppContextValue = {
   posts: any[]
   imageTemplates: any[]
   dashboardData: any | null
-  dashboardLoading: boolean
-  dashboardError: string | null
   isInitialLoading: boolean
   refreshPages: () => Promise<void>
   refreshPosts: () => Promise<void>
   refreshImageTemplates: () => Promise<void>
   refreshDashboard: () => Promise<void>
   setDashboardData: (data: any | null) => void
-  clearDashboardError: () => void
 }
 
 const AppContext = React.createContext<AppContextValue | null>(null)
@@ -29,8 +26,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [posts, setPosts] = React.useState<any[]>([])
   const [imageTemplates, setImageTemplates] = React.useState<any[]>([])
   const [dashboardData, setDashboardData] = React.useState<any | null>(null)
-  const [dashboardLoading, setDashboardLoading] = React.useState(false)
-  const [dashboardError, setDashboardError] = React.useState<string | null>(null)
   const [isInitialLoading, setIsInitialLoading] = React.useState(true)
 
   const refreshPages = React.useCallback(async () => {
@@ -61,38 +56,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const refreshDashboard = React.useCallback(async () => {
-    setDashboardLoading(true)
-    setDashboardError(null)
     try {
       const res = await api.get("/api/dashboard")
       setDashboardData(res.data)
     } catch {
-      if (!dashboardData) {
-        setDashboardError("Could not load dashboard data. Tap to retry.")
-      }
       console.warn("[AppContext] Failed to fetch dashboard data")
-    } finally {
-      setDashboardLoading(false)
     }
-  }, [dashboardData])
-
-  const clearDashboardError = React.useCallback(() => {
-    setDashboardError(null)
   }, [])
-
-  // Dashboard background refresh every 30 seconds
-  React.useEffect(() => {
-    if (!isAuthenticated) return
-    const interval = setInterval(() => {
-      api.get("/api/dashboard").then((res) => {
-        setDashboardData(res.data)
-        setDashboardError(null)
-      }).catch(() => {
-        // silent background refresh failure — don't overwrite cached data
-      })
-    }, 30000)
-    return () => clearInterval(interval)
-  }, [isAuthenticated])
 
   const fetchAll = React.useCallback(async () => {
     setIsInitialLoading(true)
@@ -114,7 +84,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setPosts([])
         setImageTemplates([])
         setDashboardData(null)
-        setDashboardError(null)
         setIsInitialLoading(false)
       }
     }
@@ -127,15 +96,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         posts,
         imageTemplates,
         dashboardData,
-        dashboardLoading,
-        dashboardError,
         isInitialLoading,
         refreshPages,
         refreshPosts,
         refreshImageTemplates,
         refreshDashboard,
         setDashboardData,
-        clearDashboardError,
       }}
     >
       {children}

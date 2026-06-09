@@ -132,10 +132,9 @@ class PostLog(Base):
     auto_generated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     posted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
-        index=True,
         nullable=True,
     )
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     post_date: Mapped[date | None] = mapped_column(Date, index=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

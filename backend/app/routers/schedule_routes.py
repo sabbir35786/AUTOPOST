@@ -26,7 +26,6 @@ class ScheduleInput(BaseModel):
 
 
 from app.auth import get_current_user
-from sqlalchemy.orm import joinedload
 
 
 def _verify_persona_owner(db: Session, persona_id: int, user_id: int) -> models.AIPersona:
@@ -190,16 +189,16 @@ def _facebook_post_url(post: models.PostLog) -> str | None:
     return post.link_url
 
 
-def _effective_slot_status(slot: models.ScheduledSlot, resolved_posts: dict[int, models.PostLog] | None = None) -> str:
+def _effective_slot_status(slot: models.ScheduledSlot, db: Session) -> str:
     """Return the real status — recover from desync where FB publish succeeded but slot wasn't updated."""
     if slot.status == "published":
         return "published"
     if slot.post_id:
-        post = resolved_posts.get(slot.post_id) if resolved_posts else None
+        post = db.get(models.PostLog, slot.post_id)
         if post and post.status in ("published", "success"):
             return "published"
     if slot.status == "generating" and slot.post_id:
-        post = resolved_posts.get(slot.post_id) if resolved_posts else None
+        post = db.get(models.PostLog, slot.post_id)
         if post and post.facebook_post_id:
             return "published"
     return slot.status
@@ -217,7 +216,6 @@ async def get_dashboard(
 
     todays_slots = (
         db.query(models.ScheduledSlot)
-        .options(joinedload(models.ScheduledSlot.persona))
         .join(models.AIPersona)
         .filter(
             models.AIPersona.user_id == current_user.id,
@@ -229,49 +227,17 @@ async def get_dashboard(
         .all()
     )
     
-    # Batch-load all PostLogs referenced by todays_slots for _effective_slot_status
-    slot_post_ids = [slot.post_id for slot in todays_slots if slot.post_id]
-    resolved_posts: dict[int, models.PostLog] = {}
-    if slot_post_ids:
-        for sp in db.query(models.PostLog).filter(models.PostLog.id.in_(slot_post_ids)).all():
-            resolved_posts[sp.id] = sp
-    
-    recent_posts = (
-        db.query(
-            models.PostLog.id,
-            models.PostLog.ai_persona_id,
-            models.PostLog.content,
-            models.PostLog.image_url,
-            models.PostLog.published_at,
-            models.PostLog.posted_at,
-            models.PostLog.created_at,
-            models.PostLog.facebook_post_id,
-            models.PostLog.facebook_post_url,
-            models.PostLog.link_url,
-            models.PostLog.status,
-        )
-        .filter(
-            models.PostLog.user_id == current_user.id,
-            models.PostLog.status == "published",
-        )
-        .order_by(
-            models.PostLog.posted_at.desc().nullslast(),
-            models.PostLog.created_at.desc()
-        )
-        .limit(10)
-        .all()
-    )
-    
-    # Batch-load all personas referenced by recent_posts
-    persona_ids = {p.ai_persona_id for p in recent_posts if p.ai_persona_id}
-    persona_map: dict[int, str] = {}
-    if persona_ids:
-        for p in db.query(models.AIPersona.id, models.AIPersona.persona_name).filter(models.AIPersona.id.in_(persona_ids)).all():
-            persona_map[p.id] = p.persona_name
+    recent_posts = db.query(models.PostLog).filter(
+        models.PostLog.user_id == current_user.id,
+        models.PostLog.status == "published",
+    ).order_by(
+        models.PostLog.posted_at.desc().nullslast(),
+        models.PostLog.created_at.desc()
+    ).limit(10).all()
     
     recent_post_items = []
     for post in recent_posts:
-        persona_name = persona_map.get(post.ai_persona_id) if post.ai_persona_id else None
+        persona = db.get(models.AIPersona, post.ai_persona_id) if post.ai_persona_id else None
         published_at = post.published_at or post.posted_at or post.created_at
         if published_at and published_at.tzinfo is None:
             published_at = published_at.replace(tzinfo=timezone.utc)
@@ -279,8 +245,8 @@ async def get_dashboard(
             published_at = published_at.astimezone(timezone.utc)
         recent_post_items.append({
             "id": str(post.id),
-            "persona_name": persona_name or "Manual post",
-            "content_preview": (post.content or "")[:120],
+            "persona_name": persona.persona_name if persona else "Manual post",
+            "content_preview": post.content[:120] if post.content else "",
             "image_url": post.image_url,
             "published_at": published_at.isoformat() if published_at else None,
             "facebook_post_url": _facebook_post_url(post),
@@ -298,7 +264,7 @@ async def get_dashboard(
                     if slot.scheduled_at
                     else None
                 ),
-                "status": _effective_slot_status(slot, resolved_posts),
+                "status": _effective_slot_status(slot, db),
                 "error_message": slot.error_message,
                 "retry_count": slot.retry_count,
             }
@@ -318,7 +284,6 @@ async def get_scheduled_slots(
 
     persona_slots = (
         db.query(models.ScheduledSlot)
-        .options(joinedload(models.ScheduledSlot.persona))
         .join(models.AIPersona)
         .filter(
             models.AIPersona.user_id == current_user.id,
@@ -342,20 +307,6 @@ async def get_scheduled_slots(
         .all()
     )
 
-    # Batch-load post logs for slot status resolution
-    slot_post_ids = [slot.post_id for slot in persona_slots if slot.post_id]
-    resolved_posts: dict[int, models.PostLog] = {}
-    if slot_post_ids:
-        for sp in db.query(models.PostLog).filter(models.PostLog.id.in_(slot_post_ids)).all():
-            resolved_posts[sp.id] = sp
-
-    # Batch-load personas for manual posts
-    manual_persona_ids = {p.ai_persona_id for p in manual_posts if p.ai_persona_id}
-    manual_persona_map: dict[int, str] = {}
-    if manual_persona_ids:
-        for p in db.query(models.AIPersona.id, models.AIPersona.persona_name).filter(models.AIPersona.id.in_(manual_persona_ids)).all():
-            manual_persona_map[p.id] = p.persona_name
-
     items = []
     for slot in persona_slots:
         persona = slot.persona
@@ -366,16 +317,16 @@ async def get_scheduled_slots(
             "content_preview": None,
             "scheduled_at": slot.scheduled_at,
             "scheduled_at_local": convert_to_user_timezone(slot.scheduled_at, current_user.timezone),
-            "status": _effective_slot_status(slot, resolved_posts),
+            "status": _effective_slot_status(slot, db),
             "error_message": slot.error_message,
         })
 
     for post in manual_posts:
-        persona_name = manual_persona_map.get(post.ai_persona_id) if post.ai_persona_id else None
+        persona = db.get(models.AIPersona, post.ai_persona_id) if post.ai_persona_id else None
         items.append({
             "id": str(post.id),
             "type": "manual_post",
-            "persona_name": persona_name or "Manual post",
+            "persona_name": persona.persona_name if persona else "Manual post",
             "content_preview": (post.content or "")[:120] or None,
             "scheduled_at": post.scheduled_at,
             "scheduled_at_local": convert_to_user_timezone(post.scheduled_at, current_user.timezone) if post.scheduled_at else "",
