@@ -17,6 +17,6 @@ python-multipart
 itsdangerous
 APScheduler==3.10.4
 pillow
-PyGObject
-pycairo>=1.26
+PyGObject==3.50.0
+pycairo==1.27.0
 fonttools

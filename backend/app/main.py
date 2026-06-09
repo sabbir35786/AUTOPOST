@@ -320,7 +320,9 @@ def _print_health_check_summary() -> None:
         print("✗ APScheduler: NOT RUNNING (CRITICAL ERROR)")
     print("✓ Supabase Storage: connected")
     print("✓ Fonts: all present")
-    print("✓ PangoCairo text shaping: working (complex scripts supported)")
+    from app.routers.persona_image_templates import PANGO_AVAILABLE
+    pango_status = "✓ PangoCairo: available" if PANGO_AVAILABLE else "⚠ PangoCairo: not available (using PIL fallback)"
+    print(pango_status)
     print("✓ Routes: all registered")
     print("========================")
 

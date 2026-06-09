@@ -13,22 +13,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gobject-introspection \
     python3-gi \
     python3-gi-cairo \
+    python3-cairo \
     libgirepository-1.0-1 \
     libpango-1.0-0 \
+    libpango1.0-dev \
     gir1.2-pango-1.0 \
+    gir1.2-harfbuzz-0.0 \
     fontconfig \
+    libfontconfig1-dev \
     fonts-noto \
     fonts-noto-core \
     fonts-noto-extra \
     libharfbuzz-dev \
     libraqm0 \
     libraqm-dev \
+    libmagickwand-dev \
+    imagemagick \
     python3-dev \
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python bindings for Pango/Cairo (PyGObject, pycairo)
-RUN pip install --no-cache-dir PyGObject pycairo
+RUN pip install --no-cache-dir "PyGObject<3.52.0" pycairo
+
+# Verify Pango works at build time
+RUN python3 -c "import gi; gi.require_version('Pango', '1.0'); gi.require_version('PangoCairo', '1.0'); from gi.repository import Pango, PangoCairo; print('Pango OK')"
 
 # Set working directory
 WORKDIR /workspace

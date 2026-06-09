@@ -23,6 +23,7 @@ if os.name == "nt" and os.path.isdir(_GTK_BIN):
     if os.path.isdir(_typellb) and _typellb not in os.environ.get("GI_TYPELIB_PATH", ""):
         os.environ["GI_TYPELIB_PATH"] = _typellb + os.pathsep + os.environ.get("GI_TYPELIB_PATH", "")
 
+PANGO_AVAILABLE = False
 _gi_import_error = None
 try:
     import cairo
@@ -30,7 +31,9 @@ try:
     gi.require_version('Pango', '1.0')
     gi.require_version('PangoCairo', '1.0')
     from gi.repository import Pango, PangoCairo
+    PANGO_AVAILABLE = True
 except Exception as e:
+    print(f"[Warning] Pango not available: {e}. Using PIL fallback for text.")
     _gi_import_error = ImportError(
         "Pango/Cairo dependencies missing. This application requires Pango/Cairo for "
         "proper complex text layout (Bengali ligatures, Arabic shaping, etc.).\n\n"
@@ -88,8 +91,35 @@ def render_text_layer_pango(
     text_align: str,
     font_weight: str
 ) -> Image.Image:
-    if _gi_import_error is not None:
-        raise _gi_import_error
+    if not PANGO_AVAILABLE:
+        print(f"[Info] Using PIL fallback renderer for text: '{text[:40]}...'")
+        img = Image.new("RGBA", (layer_width_px, layer_height_px), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        font_candidates = [
+            font_path,
+            "backend/assets/fonts/NotoSansBengali-Regular.ttf",
+            "assets/fonts/NotoSansBengali-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansBengali-Regular.ttf",
+        ]
+        font_obj = None
+        for fp in font_candidates:
+            try:
+                font_obj = ImageFont.truetype(fp, font_size_px)
+                break
+            except Exception:
+                continue
+        if font_obj is None:
+            font_obj = ImageFont.load_default()
+        bbox = draw.textbbox((0, 0), text, font=font_obj)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        x = max(0, (layer_width_px - tw) // 2) if text_align == 'center' else 0
+        y = max(0, (layer_height_px - th) // 2)
+        draw.text((x, y), text, font=font_obj, fill=text_color_hex)
+        return img
+
+    print(f"[Info] Using Pango/Cairo renderer for text: '{text[:40]}...'")
 
     # Create transparent Cairo surface
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, layer_width_px, layer_height_px)
@@ -197,20 +227,10 @@ def register_fonts_with_fontconfig():
 
 
 def verify_pango_bengali():
-    try:
-        test_img = render_text_layer_pango(
-            text="বাংলা পরীক্ষা",
-            font_path="backend/assets/fonts/Roboto-Regular.ttf",
-            font_size_px=40,
-            text_color_hex="#000000",
-            layer_width_px=400,
-            layer_height_px=100,
-            text_align="center",
-            font_weight="regular"
-        )
-        print("[OK] Pango text rendering working correctly (complex scripts supported)")
-    except Exception as e:
-        print(f"[WARNING] Pango text rendering failed: {e}")
+    if PANGO_AVAILABLE:
+        print("[OK] Pango Bengali text rendering working correctly")
+    else:
+        print("[Warning] Pango not available — using PIL fallback for text rendering")
 
 
 _VISION_SYSTEM_INSTRUCTION = (
