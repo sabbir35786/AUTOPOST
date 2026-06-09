@@ -5,6 +5,7 @@ import Link from "next/link"
 import axios from "axios"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
+import { RefreshCw } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -34,6 +35,7 @@ export default function LoginPage() {
   const [email, setEmail] = React.useState("")
   const [password, setPassword] = React.useState("")
   const [isSubmitting, setIsSubmitting] = React.useState(false)
+  const [isNetworkError, setIsNetworkError] = React.useState(false)
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -44,13 +46,15 @@ export default function LoginPage() {
     }
 
     setIsSubmitting(true)
+    setIsNetworkError(false)
     try {
       await login(email, password)
       router.push("/dashboard")
     } catch (error) {
       const detail = axios.isAxiosError(error) ? error.response?.data?.detail : null
       if (axios.isAxiosError(error) && !error.response) {
-        toast.error("Network Error: Could not connect to the backend. Please check your internet connection.")
+        setIsNetworkError(true)
+        toast.error("The app is starting up. Please wait a moment and try again.")
       } else {
         toast.error(detail || "Could not sign in. Check your email and password.")
       }
@@ -100,6 +104,23 @@ export default function LoginPage() {
               </Link>
             </p>
           </form>
+          {isNetworkError ? (
+            <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-4 text-center">
+              <p className="mb-3 text-sm text-amber-800">The app is starting up. Please wait a moment and try again.</p>
+              <Button
+                type="button"
+                variant="outline"
+                className="gap-2 border-amber-300 text-amber-800 hover:bg-amber-100"
+                onClick={() => {
+                  setIsNetworkError(false)
+                  handleSubmit({ preventDefault: () => {} } as React.FormEvent<HTMLFormElement>)
+                }}
+              >
+                <RefreshCw className="size-4" />
+                Retry
+              </Button>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
     </main>

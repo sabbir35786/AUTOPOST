@@ -3275,3 +3275,20 @@ def update_current_user(
     db.commit()
     db.refresh(current_user)
     return current_user
+
+
+@app.api_route("/{full_path:path}", methods=["GET", "HEAD"])
+async def serve_spa(full_path: str):
+    """Catch-all route that serves the frontend's index.html for SPA routing.
+    All API and auth routes are matched first by FastAPI's router, so this
+    only catches paths that no other route handled."""
+    if full_path.startswith("api/") or full_path.startswith("auth/"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    frontend_index = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "out", "index.html")
+    if os.path.exists(frontend_index):
+        from fastapi.responses import FileResponse
+        return FileResponse(frontend_index, media_type="text/html")
+
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"{FRONTEND_URL}/{full_path}")

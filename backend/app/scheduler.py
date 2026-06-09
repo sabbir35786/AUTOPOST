@@ -3,10 +3,28 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from sqlalchemy import text
 
 from app.services.schedule_service import process_due_persona_slots, register_all_todays_slots, prepare_upcoming_persona_slots
 
 logger = logging.getLogger(__name__)
+
+
+def keep_db_alive():
+    """Lightweight keepalive query to prevent database connections from going stale."""
+    try:
+        from app.database import SessionLocal
+        db = SessionLocal()
+        try:
+            db.execute(text("SELECT 1"))
+            db.commit()
+            logger.info("Database connection is healthy (keepalive)")
+        except Exception as exc:
+            logger.error("Database keepalive query failed: %s", exc)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.error("Database keepalive session failed: %s", exc)
 
 scheduler = None
 
@@ -46,6 +64,15 @@ def setup_scheduler():
         CronTrigger(hour=0, minute=0, timezone="UTC"),
         id="register_daily_slots",
         name="Register daily slots for all personas at midnight UTC",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    sched.add_job(
+        keep_db_alive,
+        IntervalTrigger(minutes=10),
+        id="keep_db_alive",
+        name="Keep database connection alive",
         replace_existing=True,
         max_instances=1,
     )

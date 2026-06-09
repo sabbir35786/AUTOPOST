@@ -25,13 +25,10 @@ if (
 engine_kwargs = {
     "connect_args": connect_args,
     "pool_pre_ping": True,
+    "pool_recycle": 1800,
+    "pool_size": 3,
+    "max_overflow": 5,
 }
-
-if (
-    "pgbouncer=true" in SQLALCHEMY_DATABASE_URL
-    or "pooler.supabase.com" in SQLALCHEMY_DATABASE_URL
-):
-    engine_kwargs["poolclass"] = NullPool
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

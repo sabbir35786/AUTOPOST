@@ -37,6 +37,7 @@ SECRET_KEY:
 */
 
 import * as React from "react"
+import axios from "axios"
 
 import { api } from "@/lib/api"
 
@@ -68,13 +69,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = React.useState(true)
 
   const loadUser = React.useCallback(async () => {
-    try {
-      const response = await api.get<User>("/users/me")
-      setUser(response.data)
-    } catch {
-      // Don't delete the token on non-401 errors (network blip, cold start).
-      // The Axios interceptor in api.ts handles 401 by clearing token + redirecting.
-      setUser(null)
+    const maxRetries = 3
+    const retryDelay = 2000
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const response = await api.get<User>("/users/me")
+        setUser(response.data)
+        return
+      } catch (error) {
+        if (axios.isAxiosError(error) && error.response?.status === 401) {
+          setUser(null)
+          return
+        }
+
+        const isNetworkError = axios.isAxiosError(error) && !error.response
+        const isServiceUnavailable = axios.isAxiosError(error) &&
+          (error.response?.status === 503 || error.response?.status === 502)
+
+        if ((isNetworkError || isServiceUnavailable) && attempt < maxRetries - 1) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelay))
+          continue
+        }
+
+        setUser(null)
+      }
     }
   }, [])
 
@@ -86,6 +105,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     setToken(storedToken)
+    setIsLoading(true)
     loadUser().finally(() => setIsLoading(false))
   }, [loadUser])
 

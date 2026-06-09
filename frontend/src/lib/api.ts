@@ -66,6 +66,9 @@ export function getApiErrorMessage(error: unknown, fallback: string): string {
   if (!isAxiosError(error)) {
     return fallback
   }
+  if (!error.response) {
+    return "The app is starting up. Please wait a moment and try again."
+  }
   const detail = error.response?.data?.detail
   if (typeof detail === "string" && detail.trim()) {
     return detail
