@@ -171,7 +171,11 @@ async def register_todays_slots(persona_id: int | str, db: Session) -> list[dict
             error_message=None,
         )
         db.add(new_slot)
-        db.flush()
+        try:
+            db.flush()
+        except Exception:
+            db.rollback()
+            raise
         _schedule_exact_slot_job(new_slot)
         registered.append(_serialize_registered_slot(new_slot))
 

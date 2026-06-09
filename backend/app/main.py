@@ -888,8 +888,12 @@ def _schedule_persona_posts(db: Session, persona: models.AIPersona, user: models
     import asyncio
     async def schedule_and_process():
         from app.services.schedule_service import register_todays_slots, process_due_persona_slots
-        await register_todays_slots(str(persona.id), db)
-        await process_due_persona_slots(db)
+        try:
+            await register_todays_slots(str(persona.id), db)
+            await process_due_persona_slots(db)
+        except Exception:
+            db.rollback()
+            raise
 
     try:
         loop = asyncio.get_event_loop()
@@ -907,11 +911,14 @@ def _serialize_ai_persona(persona: models.AIPersona) -> dict:
     image_settings = None
     session = object_session(persona)
     if session is not None:
-        image_settings = (
-            session.query(models.ImagePromptSettings)
-            .filter(models.ImagePromptSettings.persona_id == persona.id)
-            .first()
-        )
+        try:
+            image_settings = (
+                session.query(models.ImagePromptSettings)
+                .filter(models.ImagePromptSettings.persona_id == persona.id)
+                .first()
+            )
+        except Exception:
+            image_settings = None
     return {
         "id": persona.id,
         "page_connection_id": persona.page_connection_id,
