@@ -298,7 +298,7 @@ function slotStatusClass(status: string) {
   return "bg-red-100 text-red-700"
 }
 
-function ScheduledSlotsView({ timezone }: { timezone: string }) {
+export function ScheduledSlotsView({ timezone }: { timezone: string }) {
   const [slots, setSlots] = React.useState<ScheduledSlotItem[]>([])
   const [loading, setLoading] = React.useState(true)
 
@@ -361,7 +361,7 @@ function ScheduledSlotsView({ timezone }: { timezone: string }) {
   )
 }
 
-function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; posts: Post[]; onConnected: () => void; timezone: string }) {
+export function HomeView({ pages, onConnected, timezone }: { pages: PageConnection[]; posts: Post[]; onConnected: () => void; timezone: string }) {
   const [dashboardData, setDashboardData] = React.useState<{ todays_slots: any[], recent_posts: any[] } | null>(null)
   const [loadingDashboard, setLoadingDashboard] = React.useState(true)
   const [dashboardError, setDashboardError] = React.useState<string | null>(null)
@@ -626,7 +626,7 @@ function FacebookConnectButton({ onConnected, className, urgent }: { onConnected
   )
 }
 
-function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timezone: string; onSaved: () => void }) {
+export function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timezone: string; onSaved: () => void }) {
   const router = useRouter()
   const publishablePages = pages.filter((page) => page.connection_status === "connected")
   const [selectedPageId, setSelectedPageId] = React.useState<number | null>(publishablePages[0]?.id ?? null)
@@ -888,7 +888,7 @@ function Composer({ pages, timezone, onSaved }: { pages: PageConnection[]; timez
   )
 }
 
-function StyleAnalyzerView({ pages }: { pages: PageConnection[] }) {
+export function StyleAnalyzerView({ pages }: { pages: PageConnection[] }) {
   const router = useRouter()
   const [step, setStep] = React.useState<"input" | "more_posts" | "analyzing">("input")
   const [primaryPost, setPrimaryPost] = React.useState("")
@@ -1061,7 +1061,7 @@ function StyleAnalyzerView({ pages }: { pages: PageConnection[] }) {
   )
 }
 
-function PageTrackerView({ pages }: { pages: PageConnection[] }) {
+export function PageTrackerView({ pages }: { pages: PageConnection[] }) {
   const [data, setData] = React.useState<TrackerDashboard | null>(null)
   const [url, setUrl] = React.useState("")
   const [name, setName] = React.useState("")
@@ -1303,7 +1303,7 @@ function applyTemplate(persona: AIPersona, template: string): AIPersona {
   }
 }
 
-function AISettingsView({ pages }: { pages: PageConnection[] }) {
+export function AISettingsView({ pages }: { pages: PageConnection[] }) {
   const router = useRouter()
   const { user } = useAuth()
   const userTimezone = user?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
@@ -2278,7 +2278,7 @@ function PerformanceInsightsPanel({ insights, personas, timezone }: { insights: 
   })}</React.Fragment>)}</div></CardContent></Card><div className="grid gap-4 lg:grid-cols-2"><Card><CardHeader><CardTitle>Top 3 Posts This Month</CardTitle></CardHeader><CardContent className="grid gap-3">{insights.top_posts.map((post) => <div key={post.id} className="grid gap-2 rounded-md border p-3"><div className="flex justify-between gap-3 text-sm"><span className="font-medium">{post.persona_name}</span><span className="text-slate-500">{formatDate(post.published_at || null, timezone)}</span></div><p className="text-sm text-slate-600 whitespace-pre-wrap break-words">{post.content}</p><div className="flex flex-wrap gap-3 text-xs text-slate-500"><span>Likes {post.likes_count}</span><span>Comments {post.comments_count}</span><span>Shares {post.shares_count}</span><span>Reach {post.reach_count}</span><span>Score {post.engagement_score.toFixed(1)}</span></div></div>)}{!insights.top_posts.length ? <p className="text-sm text-slate-500">No engagement snapshots yet.</p> : null}</CardContent></Card><Card><CardHeader><CardTitle>AI Recommendations</CardTitle></CardHeader><CardContent className="grid gap-2">{insights.recommendations.map((item) => <p key={item.id} className="rounded-md border p-3 text-sm text-slate-600">{item.text}</p>)}{!insights.recommendations.length ? <p className="text-sm text-slate-500">Recommendations will appear after the weekly learning job has enough data.</p> : null}</CardContent></Card></div></section>
 }
 
-function PostList({ title, posts, emptyText, emptyAction, timezone, published, onChanged }: { title: string; posts: Post[]; emptyText: string; emptyAction: string; timezone: string; published?: boolean; onChanged: () => void }) {
+export function PostList({ title, posts, emptyText, emptyAction, timezone, published, onChanged }: { title: string; posts: Post[]; emptyText: string; emptyAction: string; timezone: string; published?: boolean; onChanged: () => void }) {
   const [aiFilter, setAiFilter] = React.useState<"all" | "manual" | "ai">("all")
   const [publishing, setPublishing] = React.useState<number | null>(null)
   const [photocardEditPostId, setPhotocardEditPostId] = React.useState<number | null>(null)
@@ -2424,7 +2424,7 @@ function PostList({ title, posts, emptyText, emptyAction, timezone, published, o
   )
 }
 
-function AnalyticsView({ analytics, setAnalytics }: { analytics: Analytics | null; setAnalytics: (value: Analytics) => void }) {
+export function AnalyticsView({ analytics, setAnalytics }: { analytics: Analytics | null; setAnalytics: (value: Analytics) => void }) {
   async function changeRange(value: string) {
     const response = await api.get<Analytics>("/analytics", { params: { days: Number(value) } })
     setAnalytics(response.data)
@@ -2433,7 +2433,7 @@ function AnalyticsView({ analytics, setAnalytics }: { analytics: Analytics | nul
   return <><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><PageTitle title="Analytics" subtitle="Current performance across published posts." /><Select className="w-44" defaultValue="30" onChange={(event) => changeRange(event.target.value)}><option value="7">Last 7 Days</option><option value="30">Last 30 Days</option><option value="90">Last 3 Months</option></Select></div>{analytics ? <><section className="grid gap-4 md:grid-cols-4"><Stat label="Total posts published" value={analytics.total_posts} /><Stat label="Total likes received" value={analytics.total_likes} /><Stat label="Total comments received" value={analytics.total_comments} /><Stat label="Total shares received" value={analytics.total_shares} /></section><Card><CardContent className="flex h-64 items-end gap-1 p-6">{analytics.posts_per_day.map((day) => <div key={day.date} className="flex flex-1 flex-col items-center gap-2"><div className="w-full rounded-t bg-blue-700" style={{ height: `${Math.max(4, (day.count / max) * 210)}px` }} /><span className="hidden text-[10px] text-slate-500 md:block">{day.date.slice(5)}</span></div>)}</CardContent></Card></> : <Empty text="No analytics yet." action="/dashboard/create" />}</>
 }
 
-function SettingsView({ pages, timezone, onChanged }: { pages: PageConnection[]; timezone: string; onChanged: () => void }) {
+export function SettingsView({ pages, timezone, onChanged }: { pages: PageConnection[]; timezone: string; onChanged: () => void }) {
   const { user } = useAuth()
   const [email, setEmail] = React.useState(user?.email || "")
   const [tz, setTz] = React.useState(timezone)
@@ -2859,7 +2859,7 @@ function isPastScheduledSlot(post: Post) {
 }
 
 
-function TemplateLibraryView() {
+export function TemplateLibraryView() {
   const { imageTemplates, refreshImageTemplates } = useApp()
   const [selectedTemplate, setSelectedTemplate] = React.useState<any | null>(null)
   const [analyzing, setAnalyzing] = React.useState(false)

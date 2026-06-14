@@ -6,32 +6,34 @@ AUTH INVESTIGATION - FRONTEND AUTH CONTEXT
 
 LOGIN FLOW (login function):
 1. POST /auth/login → { access_token, token_type }
-2. Store access_token in localStorage("auth_token")
-3. Set token in React state
+2. Store access_token in localStorage(TOKEN_STORAGE_KEY)
+3. Eagerly set api.defaults.headers.common['Authorization']
 4. Call loadUser() → GET /users/me
 
 TOKEN STORAGE:
-- Primary: window.localStorage with key "auth_token" (survives page refresh)
+- Primary: window.localStorage with key TOKEN_STORAGE_KEY (survives page refresh)
 - Secondary: React state (token, user)
+- Tertiary: api.defaults.headers.common (eager header — beats any race window)
 
 TOKEN ATTACHMENT:
-- Axios request interceptor in api.ts reads localStorage("auth_token")
-- Adds Authorization: Bearer <token> to every request
-- Response interceptor handles 401 by clearing token + redirecting to /login
+- axios.ts request interceptor reads localStorage on every request (late binding)
+- initializeAuth sets the default header immediately on mount (early binding)
+- Together they guarantee no request ever goes out without a token
 
-ROOT CAUSE - USER FORGOTTEN AFTER LOGIN:
-- loadUser() was deleting the token on ANY error (network blip, cold start)
-- Even after successful login, if loadUser() failed, token was wiped
-- FIXED: loadUser() only sets user→null on failure; never touches the token
-- Token is only removed on explicit 401 (handled by Axios interceptor)
+HYDRATION ON MOUNT (initializeAuth):
+- Reads token from localStorage
+- Sets the Axios default Authorization header immediately
+- Validates with GET /users/me (3 retries inside loadUser for cold starts)
+- On 401: token is invalid — clear everything
+- On other errors: keep token, set user=null (network blip or cold start)
 
 TOKEN REFRESH:
-- On every API response, X-New-Token header is checked
-- If present, the new token is stored in localStorage
+- On every API response, X-New-Token header is checked (in api.ts)
+- If present, the new token is stored in localStorage + Axios defaults
 - This transparently refreshes expiring tokens without re-login
 
 SECRET_KEY:
-- Backend now REQUIRES SECRET_KEY as environment variable
+- Backend REQUIRES SECRET_KEY as environment variable
 - Raises ValueError on startup if not set
 - Must be a permanent value in Render env vars (never changes)
 */
@@ -40,6 +42,7 @@ import * as React from "react"
 import axios from "axios"
 
 import { api } from "@/lib/api"
+import { axiosInstance, TOKEN_STORAGE_KEY } from "@/lib/axios"
 
 type User = {
   id: number
@@ -98,15 +101,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   React.useEffect(() => {
-    const storedToken = window.localStorage.getItem("auth_token")
-    if (!storedToken) {
-      setIsLoading(false)
-      return
+    /**
+     * initializeAuth — runs once on mount to hydrate auth state from storage.
+     *
+     * Step 1: Read token from localStorage.
+     * Step 2: Eagerly attach it as the Axios default Authorization header.
+     *         This ensures even the very first API call (fired before the
+     *         per-request interceptor has had a chance to run) carries the token.
+     * Step 3: Validate the session with GET /users/me.
+     *         loadUser() has built-in 3-attempt retry for Render cold starts.
+     * Step 4: On 401 the interceptor in api.ts clears the token + redirects.
+     *         On other errors we keep the token and set user=null so the user
+     *         isn't silently logged out due to a transient network failure.
+     */
+    const initializeAuth = async () => {
+      const storedToken = typeof window !== "undefined"
+        ? window.localStorage.getItem(TOKEN_STORAGE_KEY)
+        : null
+
+      if (!storedToken) {
+        setIsLoading(false)
+        return
+      }
+
+      // Hydrate React state
+      setToken(storedToken)
+
+      // Eagerly set the default header — interceptors read localStorage
+      // per-request (late binding), but this covers the race window between
+      // mount and the first interceptor execution.
+      axiosInstance.defaults.headers.common["Authorization"] = `Bearer ${storedToken}`
+
+      try {
+        await loadUser()
+      } finally {
+        setIsLoading(false)
+      }
     }
 
-    setToken(storedToken)
-    setIsLoading(true)
-    loadUser().finally(() => setIsLoading(false))
+    initializeAuth()
   }, [loadUser])
 
   async function login(email: string, password: string) {
@@ -114,8 +147,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       email,
       password,
     })
-    window.localStorage.setItem("auth_token", response.data.access_token)
-    setToken(response.data.access_token)
+    const newToken = response.data.access_token
+
+    // Persist to storage
+    window.localStorage.setItem(TOKEN_STORAGE_KEY, newToken)
+    // Update React state
+    setToken(newToken)
+    // Eagerly set the Axios default header for any call that fires before
+    // the next interceptor cycle picks up the localStorage value.
+    axiosInstance.defaults.headers.common["Authorization"] = `Bearer ${newToken}`
+
     await loadUser()
   }
 
@@ -125,7 +166,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   function logout() {
-    window.localStorage.removeItem("auth_token")
+    window.localStorage.removeItem(TOKEN_STORAGE_KEY)
+    delete axiosInstance.defaults.headers.common["Authorization"]
     setToken(null)
     setUser(null)
   }

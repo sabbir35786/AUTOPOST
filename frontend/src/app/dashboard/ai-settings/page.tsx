@@ -1,5 +1,15 @@
-import { SocialPlatform } from "@/components/social-platform"
+"use client"
+
+import { useApp } from "@/contexts/app-context"
+import { AISettingsView } from "@/components/social-platform"
+import { Loader2 } from "lucide-react"
 
 export default function AISettingsPage() {
-  return <SocialPlatform view="ai-settings" />
+  const { pages, isInitialLoading } = useApp()
+
+  if (isInitialLoading) {
+    return <div className="flex justify-center py-16"><Loader2 className="size-6 animate-spin text-slate-400" /></div>
+  }
+
+  return <AISettingsView pages={pages} />
 }

@@ -4,63 +4,42 @@
 AUTH INVESTIGATION FINDINGS - API CLIENT
 ======================================
 
-TOKEN ATTACHMENT MECHANISM (lines 103-112):
-- Uses Axios request interceptor
-- Reads token from: window.localStorage.getItem("auth_token")
-- If token exists, calls setAuthHeader() (lines 80-90)
-- setAuthHeader() adds: Authorization: Bearer <token>
-- Applied to ALL outgoing requests automatically
+TOKEN ATTACHMENT MECHANISM:
+- Lives in axios.ts as a request interceptor on axiosInstance.
+- Reads token from: window.localStorage.getItem(TOKEN_STORAGE_KEY)
+- Adds Authorization: Bearer <token> to every outgoing request.
+- FormData Content-Type is stripped there too (browser sets the boundary).
 
-TIMEOUT CONFIGURATION (line 95):
-- Default timeout: 30_000ms (30 seconds)
-- test-full-flow overrides to 180_000ms (3 minutes) in social-platform.tsx
-- Reason: Render free-tier cold starts + LLM calls + image generation
+TIMEOUT CONFIGURATION:
+- Default timeout: 60_000ms (60 seconds) — elevated to absorb Render
+  free-tier cold starts which can take 30-60 s.
+- Defined in axios.ts; this file only adds response interceptors.
 
-BACKEND URL RESOLUTION (lines 8-27):
-- Localhost: uses http://localhost:8000 or configured backend
-- Production: uses /backend proxy on Vercel or configured remote
-- Default remote: https://autopost-1-ax2p.onrender.com
+BACKEND URL RESOLUTION (see axios.ts for full logic):
+- NEXT_PUBLIC_API_URL        (canonical — set this in .env.local / Vercel)
+- NEXT_PUBLIC_BACKEND_URL    (legacy alias)
+- https://autopost-1-ax2p.onrender.com  (hard-coded fallback)
 
-POTENTIAL ISSUES IDENTIFIED:
-1. 90-second timeout may be too long, causing slow UX
-2. No retry logic for failed requests
-3. No token refresh logic - if token expires, requests fail
-4. No error handling for 401 responses (could trigger auto-refresh)
+RESPONSE INTERCEPTORS (this file):
+1. X-New-Token header — transparently rotates the stored token.
+2. 401 — clears localStorage token and redirects to /auth/login.
+3. Blob error bodies — parsed to extract JSON detail for user-facing messages.
 */
 
-import axios, { AxiosHeaders, isAxiosError } from "axios"
+import { isAxiosError } from "axios"
+import { axiosInstance, TOKEN_STORAGE_KEY } from "./axios"
 
-const DEFAULT_REMOTE_BACKEND = "https://autopost-1-ax2p.onrender.com"
-const VERCEL_BACKEND_PROXY = "/backend"
+// Re-export helpers so consumers can import from a single place
+export { axiosInstance as api }
+export const API_BASE_URL: string = (axiosInstance.defaults.baseURL as string) ?? ""
 
-function getBackendUrl() {
-  const configuredBackend = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, "")
-
-  if (configuredBackend) {
-    return configuredBackend
-  }
-
-  if (typeof window !== "undefined") {
-    // Fallback to proxy only if explicitly configured
-    if (configuredBackend === VERCEL_BACKEND_PROXY) {
-      return VERCEL_BACKEND_PROXY
-    }
-  }
-
-  return DEFAULT_REMOTE_BACKEND
+export function getBackendOrigin(): string {
+  const base = axiosInstance.defaults.baseURL as string | undefined
+  if (base?.startsWith("http")) return base
+  return "https://autopost-1-ax2p.onrender.com"
 }
 
-export const API_BASE_URL = getBackendUrl()
-
-export function getBackendOrigin() {
-  const configuredBackend = process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, "")
-  if (configuredBackend?.startsWith("http")) {
-    return configuredBackend
-  }
-  return DEFAULT_REMOTE_BACKEND
-}
-
-export const BACKEND_ORIGIN = typeof window !== "undefined" ? getBackendOrigin() : DEFAULT_REMOTE_BACKEND
+export const BACKEND_ORIGIN = typeof window !== "undefined" ? getBackendOrigin() : "https://autopost-1-ax2p.onrender.com"
 
 export function getApiErrorMessage(error: unknown, fallback: string): string {
   if (!isAxiosError(error)) {
@@ -93,64 +72,47 @@ export function getApiErrorMessage(error: unknown, fallback: string): string {
   return fallback
 }
 
-export const api = axios.create({
-  baseURL: API_BASE_URL,
-  timeout: 30_000, // 30 seconds - reasonable timeout for API requests
-})
-
-function setAuthHeader(config: { headers?: unknown }, token: string) {
-  if (!config.headers) {
-    config.headers = new AxiosHeaders()
-  }
-  const headers = config.headers
-  if (headers instanceof AxiosHeaders) {
-    headers.set("Authorization", `Bearer ${token}`)
-    return
-  }
-  ;(headers as Record<string, string>).Authorization = `Bearer ${token}`
-}
-
-function stripFormDataContentType(config: { headers?: unknown; data?: unknown }) {
-  if (!(config.data instanceof FormData)) return
-  const headers = config.headers
-  if (!headers) return
-  if (headers instanceof AxiosHeaders) {
-    headers.delete("Content-Type")
-    return
-  }
-  delete (headers as Record<string, string>)["Content-Type"]
-}
-
-api.interceptors.request.use((config) => {
-  if (typeof window !== "undefined") {
-    const token = window.localStorage.getItem("auth_token")
-    if (token) {
-      setAuthHeader(config, token)
-    }
-    stripFormDataContentType(config)
-  }
-  return config
-})
-
-api.interceptors.response.use(
+// Response interceptors — token refresh + error normalisation
+axiosInstance.interceptors.response.use(
   (response) => {
-    // Token refresh: if the backend returned a new token, store it
+    // Clear cold start timer
+    if (typeof window !== "undefined") {
+      const timer = (response.config as any)._coldStartTimer
+      if (timer) window.clearTimeout(timer)
+      window.dispatchEvent(new CustomEvent("backend-cold-start", { detail: false }))
+    }
+
+    // Token refresh: if the backend issued a new token, store it and update
+    // the default header so subsequent requests don’t need to wait for a
+    // localStorage read.
     const newToken = response.headers?.["x-new-token"]
     if (newToken && typeof window !== "undefined") {
-      window.localStorage.setItem("auth_token", newToken)
+      window.localStorage.setItem(TOKEN_STORAGE_KEY, newToken)
+      // Eagerly update the default header so the very next call uses it.
+      axiosInstance.defaults.headers.common["Authorization"] = `Bearer ${newToken}`
     }
     return response
   },
   async (error) => {
-    // Handle 401 Unauthorized - token expired or invalid
-    if (isAxiosError(error) && error.response?.status === 401) {
-      // Clear the invalid token from localStorage
-      if (typeof window !== "undefined") {
-        window.localStorage.removeItem("auth_token")
+    // Clear cold start timer and handle timeout
+    if (typeof window !== "undefined") {
+      const timer = (error.config as any)?._coldStartTimer
+      if (timer) window.clearTimeout(timer)
+      window.dispatchEvent(new CustomEvent("backend-cold-start", { detail: false }))
+
+      if (error.code === "ECONNABORTED" || error.message?.includes("timeout")) {
+        window.dispatchEvent(new CustomEvent("backend-timeout"))
       }
-      // Redirect to login page if not already there
-      if (typeof window !== "undefined" && !window.location.pathname.includes("/auth")) {
-        window.location.href = "/auth/login"
+    }
+
+    // Handle 401 Unauthorized — token expired or invalid
+    if (isAxiosError(error) && error.response?.status === 401) {
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem(TOKEN_STORAGE_KEY)
+        delete axiosInstance.defaults.headers.common["Authorization"]
+        if (!window.location.pathname.includes("/auth")) {
+          window.location.href = "/auth/login"
+        }
       }
     }
 
