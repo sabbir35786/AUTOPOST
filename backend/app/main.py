@@ -420,33 +420,16 @@ app.include_router(schedule_routes_router)
 
 # ---------------------------------------------------------------------------
 # CORS — Dynamic, env-driven origin allowlist
-#
-# FRONTEND_URL is read from the FRONTEND_URL environment variable via
-# app/config.py (e.g. https://autopost-woad.vercel.app in production).
-# All localhost variants are included for local development.
-# allow_origin_regex covers any Vercel preview deployment automatically.
 # ---------------------------------------------------------------------------
-_allowed_origins: list[str] = [
-    origin
-    for origin in [
-        os.getenv("FRONTEND_URL", "").rstrip("/"),  # primary production frontend
-        FRONTEND_URL,                                # same, via config (normalised)
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-        "http://localhost:3002",
-        "http://127.0.0.1:3002",
-    ]
-    if origin  # drop empty strings that arise when env vars are unset
+allowed_origins = [
+    FRONTEND_URL,
+    "http://localhost:3000",
+    "http://127.0.0.1:3000"
 ]
-# De-duplicate while preserving order
-_allowed_origins = list(dict.fromkeys(_allowed_origins))
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_origin_regex=r"https://.*\.vercel\.app",  # Vercel preview deployments
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

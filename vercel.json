@@ -2,11 +2,12 @@
   "rewrites": [
     {
       "source": "/backend/:path*",
-      "destination": "https://autopost-1-ax2p.onrender.com/:path*"
+      "destination": "https://auto-poster-backend-production.up.railway.app/:path*"
     }
   ],
   "env": {
-    "NEXT_PUBLIC_BACKEND_URL": "https://autopost-1-ax2p.onrender.com",
+    "NEXT_PUBLIC_BACKEND_URL": "https://auto-poster-backend-production.up.railway.app",
+    "NEXT_PUBLIC_API_URL": "https://auto-poster-backend-production.up.railway.app",
     "NEXT_PUBLIC_FACEBOOK_APP_ID": "1297638102047989"
   }
 }

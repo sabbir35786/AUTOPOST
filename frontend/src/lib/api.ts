@@ -18,7 +18,7 @@ TIMEOUT CONFIGURATION:
 BACKEND URL RESOLUTION (see axios.ts for full logic):
 - NEXT_PUBLIC_API_URL        (canonical — set this in .env.local / Vercel)
 - NEXT_PUBLIC_BACKEND_URL    (legacy alias)
-- https://autopost-1-ax2p.onrender.com  (hard-coded fallback)
+- https://auto-poster-backend-production.up.railway.app  (hard-coded fallback)
 
 RESPONSE INTERCEPTORS (this file):
 1. X-New-Token header — transparently rotates the stored token.
@@ -36,10 +36,10 @@ export const API_BASE_URL: string = (axiosInstance.defaults.baseURL as string) ?
 export function getBackendOrigin(): string {
   const base = axiosInstance.defaults.baseURL as string | undefined
   if (base?.startsWith("http")) return base
-  return "https://autopost-1-ax2p.onrender.com"
+  return "https://auto-poster-backend-production.up.railway.app"
 }
 
-export const BACKEND_ORIGIN = typeof window !== "undefined" ? getBackendOrigin() : "https://autopost-1-ax2p.onrender.com"
+export const BACKEND_ORIGIN = typeof window !== "undefined" ? getBackendOrigin() : "https://auto-poster-backend-production.up.railway.app"
 
 export function getApiErrorMessage(error: unknown, fallback: string): string {
   if (!isAxiosError(error)) {

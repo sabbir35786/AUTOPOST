@@ -21,7 +21,7 @@
 
 import axios from "axios"
 
-const FALLBACK_BACKEND = "https://autopost-1-ax2p.onrender.com"
+const FALLBACK_BACKEND = "https://auto-poster-backend-production.up.railway.app"
 
 /**
  * Single source of truth for the localStorage key that stores the JWT.

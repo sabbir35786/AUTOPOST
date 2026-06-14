@@ -27,7 +27,7 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))  # 7 days in minutes
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://autopost-woad.vercel.app").rstrip("/")
-BACKEND_URL = os.getenv("BACKEND_URL", "https://autopost-1-ax2p.onrender.com").rstrip("/")
+BACKEND_URL = os.getenv("BACKEND_URL", "https://auto-poster-backend-production.up.railway.app").rstrip("/")
 APP_BASE_URL = os.getenv("APP_BASE_URL", BACKEND_URL)
 CRON_SECRET = os.getenv("CRON_SECRET", "your_cron_secret_here")
 
@@ -56,15 +56,15 @@ def _normalize_database_url(database_url: str) -> str:
 _database_url = os.getenv("DATABASE_URL")
 if not _database_url:
     raise RuntimeError(
-        "DATABASE_URL is required. Configure Render with the PostgreSQL connection "
-        "string; local SQLite fallback is disabled because Render's filesystem is ephemeral."
+        "DATABASE_URL is required. Configure Railway with the PostgreSQL connection "
+        "string; local SQLite fallback is disabled because the filesystem is ephemeral."
     )
 
 SQLALCHEMY_DATABASE_URL = _normalize_database_url(_database_url)
 if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
     raise RuntimeError(
         "SQLite DATABASE_URL is not allowed for this app. Use the PostgreSQL DATABASE_URL "
-        "from Render/Supabase so settings and Facebook page connections persist."
+        "from Railway/Supabase so settings and Facebook page connections persist."
     )
 FACEBOOK_APP_ID = os.getenv("FACEBOOK_APP_ID", "")
 FACEBOOK_APP_SECRET = os.getenv("FACEBOOK_APP_SECRET", "")
@@ -74,7 +74,7 @@ FACEBOOK_OAUTH_SCOPES = os.getenv(
 )
 FACEBOOK_REDIRECT_URI = os.getenv(
     "FACEBOOK_REDIRECT_URI",
-    "https://autopost-1-ax2p.onrender.com/auth/facebook/callback",
+    "https://auto-poster-backend-production.up.railway.app/auth/facebook/callback",
 )
 FACEBOOK_TOKEN_ENCRYPTION_KEY = os.getenv("FACEBOOK_TOKEN_ENCRYPTION_KEY", "")
 FACEBOOK_GRAPH_API_BASE_URL = os.getenv(
