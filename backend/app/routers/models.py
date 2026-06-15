@@ -15,7 +15,7 @@ class ModelSettingInput(BaseModel):
     task_category: str
     provider_name: str
     model_name: str
-    api_key: Optional[str] = None  # Raw string to be encrypted
+    api_key: Optional[str] = None
 
 class TestProviderRequest(BaseModel):
     provider_name: str
@@ -47,18 +47,22 @@ def save_model_settings(
             models.ModelSettings.task_category == setting.task_category
         ).first()
 
+        raw_api_key = setting.api_key.strip() if setting.api_key else ""
         encrypted_key = None
-        if setting.api_key:
+        if raw_api_key:
             from app.crypto import encrypt_token
-            encrypted_key = encrypt_token(setting.api_key)
+            encrypted_key = encrypt_token(raw_api_key)
         elif not existing:
             continue
 
         if existing:
+            provider_changed = existing.provider_name != setting.provider_name
             existing.provider_name = setting.provider_name
             existing.model_name = setting.model_name
             if encrypted_key:
                 existing.api_key_encrypted = encrypted_key
+            elif provider_changed:
+                existing.api_key_encrypted = None
             existing.updated_at = datetime.now(timezone.utc)
         else:
             new_setting = models.ModelSettings(
@@ -101,7 +105,7 @@ async def test_provider(
     current_user: models.User = Depends(get_current_user),
 ):
     provider = req.provider_name.lower()
-    api_key = req.api_key or ""
+    api_key = req.api_key.strip() if req.api_key else ""
     if not api_key and req.task_category:
         saved = db.query(models.ModelSettings).filter(
             models.ModelSettings.user_id == current_user.id,
