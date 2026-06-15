@@ -22,7 +22,7 @@ BACKEND URL RESOLUTION (see axios.ts for full logic):
 
 RESPONSE INTERCEPTORS (this file):
 1. X-New-Token header — transparently rotates the stored token.
-2. 401 — clears localStorage token and redirects to /auth/login.
+2. 401 — clears localStorage token and redirects to /login (skipped on auth pages).
 3. Blob error bodies — parsed to extract JSON detail for user-facing messages.
 */
 
@@ -106,12 +106,19 @@ axiosInstance.interceptors.response.use(
     }
 
     // Handle 401 Unauthorized — token expired or invalid
+    // Only redirect to login if we are NOT already on an auth page.
+    // This prevents the interceptor from swallowing 401 errors on /login
+    // (wrong-password) before the login form's catch block can show them.
     if (isAxiosError(error) && error.response?.status === 401) {
       if (typeof window !== "undefined") {
-        window.localStorage.removeItem(TOKEN_STORAGE_KEY)
-        delete axiosInstance.defaults.headers.common["Authorization"]
-        if (!window.location.pathname.includes("/auth")) {
-          window.location.href = "/auth/login"
+        const onAuthPage =
+          window.location.pathname === "/login" ||
+          window.location.pathname === "/register" ||
+          window.location.pathname.startsWith("/auth")
+        if (!onAuthPage) {
+          window.localStorage.removeItem(TOKEN_STORAGE_KEY)
+          delete axiosInstance.defaults.headers.common["Authorization"]
+          window.location.href = "/login"
         }
       }
     }

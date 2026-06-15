@@ -3,10 +3,10 @@
  *
  * WHY THIS FILE EXISTS:
  * ---------------------
- * Render's free tier spins down after 15 minutes of inactivity. The first
- * request after a cold start can take 30-60 seconds. A default 5-10 s timeout
- * would cause silent failures. We set 60 s here so that the backend has time
- * to boot before the request is abandoned.
+ * Railway spins down inactive deployments. The first request after a cold
+ * start can take 60-90 seconds. A default 5-10 s timeout would cause silent
+ * failures. We set 120 s here so that the backend has time to boot before the
+ * request is abandoned.
  *
  * BASE URL RESOLUTION ORDER:
  *   1. NEXT_PUBLIC_API_URL  (canonical — set this one)
@@ -49,9 +49,10 @@ function resolveBaseUrl(): string {
 export const axiosInstance = axios.create({
   baseURL: resolveBaseUrl(),
 
-  // 60 s — absorbs Render free-tier cold starts (30-60 s) plus normal latency.
+  // 120 s — Railway cold starts can take 60-90 s. We give extra headroom so
+  // the backend has time to boot before we give up and show the error banner.
   // Individual call sites can still pass { timeout: N } to override per-request.
-  timeout: 60_000,
+  timeout: 120_000,
 
   headers: {
     "Content-Type": "application/json",
@@ -85,10 +86,10 @@ axiosInstance.interceptors.request.use(
       delete (config.headers as Record<string, string>)["Content-Type"]
     }
 
-    // Start cold start timer (2 seconds)
+    // Start cold start timer — show the "waking up" banner after 3 s
     const timer = window.setTimeout(() => {
       window.dispatchEvent(new CustomEvent("backend-cold-start", { detail: true }))
-    }, 2000)
+    }, 3000)
     ;(config as any)._coldStartTimer = timer
 
     return config
