@@ -47,6 +47,7 @@ def create_database_tables() -> None:
         _ensure_product_blueprint_columns()
         _ensure_user_settings_table()
         _migrate_ai_page_settings_to_personas()
+        _ensure_background_asset_schema()
     except OperationalError as exc:
         message = str(exc.orig).lower() if getattr(exc, "orig", None) else str(exc).lower()
         
@@ -481,6 +482,67 @@ def _migrate_ai_page_settings_to_personas() -> None:
             "template_logo_url": "text",
         },
     )
+
+
+def _ensure_background_asset_schema() -> None:
+    """Rename legacy asset_type/value_json columns to type/config and migrate data."""
+    import json as _json
+    inspector = inspect(engine)
+    if not inspector.has_table("template_background_assets"):
+        return
+
+    existing_columns = {col["name"] for col in inspector.get_columns("template_background_assets")}
+
+    # Step 1: rename columns if still using old names
+    if "asset_type" in existing_columns and "type" not in existing_columns:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE template_background_assets RENAME COLUMN asset_type TO type"))
+                conn.execute(text("ALTER TABLE template_background_assets RENAME COLUMN value_json TO config"))
+            print("[MIGRATION] Renamed asset_type->type and value_json->config on template_background_assets")
+        except Exception as e:
+            print(f"[MIGRATION WARNING] Could not rename background asset columns: {e}")
+            return
+
+    # Step 2: migrate config JSON values from old format to new format
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text("SELECT id, type, config FROM template_background_assets")
+            ).mappings().all()
+
+            for row in rows:
+                bg_type = row["type"] or ""
+                config = row["config"]
+                if isinstance(config, str):
+                    try:
+                        config = _json.loads(config)
+                    except Exception:
+                        config = {}
+                config = config or {}
+
+                # Only migrate records that still use old config keys
+                if bg_type in ("solid_color", "solid") and "color_hex" in config and "hex" not in config:
+                    new_config = {"hex": config.get("color_hex", "#000000")}
+                    new_type = "solid"
+                elif bg_type in ("gradient", "gradient_linear") and "stops" in config and "from_hex" not in config:
+                    stops = config.get("stops", [])
+                    new_config = {
+                        "from_hex": stops[0] if stops else "#000000",
+                        "to_hex": stops[-1] if stops else "#ffffff",
+                        "angle_deg": 135,
+                    }
+                    new_type = "gradient_linear"
+                else:
+                    continue
+
+                conn.execute(
+                    text("UPDATE template_background_assets SET type=:t, config=:c WHERE id=:id"),
+                    {"t": new_type, "c": _json.dumps(new_config), "id": row["id"]},
+                )
+        print("[MIGRATION] Background asset config data migrated successfully")
+    except Exception as e:
+        print(f"[MIGRATION WARNING] Could not migrate background asset config data: {e}")
 
 
 def get_db():

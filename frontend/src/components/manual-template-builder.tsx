@@ -25,10 +25,10 @@ type AspectKey = keyof typeof ASPECT_PRESETS
 
 type BackgroundAsset = {
   id: string
-  asset_type: string
+  type: string
   label: string | null
   preview_url: string | null
-  value_json: Record<string, unknown>
+  config: Record<string, unknown>
 }
 
 type FontAsset = {
@@ -42,8 +42,8 @@ type SelectedBackground = {
   asset_id: string
   label: string
   preview_url: string | null
-  asset_type: string
-  value_json: Record<string, unknown>
+  type: string
+  config: Record<string, unknown>
 }
 
 type ColorOptionDraft = { color_hex: string; label: string }
@@ -109,11 +109,14 @@ function nextLayerId(layers: LayerDraft[]): string {
 }
 
 function backgroundSwatchStyle(asset: BackgroundAsset | SelectedBackground): React.CSSProperties {
-  const v = asset.value_json || {}
-  if (asset.asset_type === "gradient" && Array.isArray(v.stops)) {
-    return { background: `linear-gradient(135deg, ${(v.stops as string[]).join(", ")})` }
+  const v = asset.config || {}
+  if (asset.type === "gradient_linear" && v.from_hex && v.to_hex) {
+    return { background: `linear-gradient(${v.angle_deg || 135}deg, ${v.from_hex}, ${v.to_hex})` }
   }
-  const hex = String(v.color_hex || "#334155")
+  if (asset.type === "gradient_radial" && v.center_hex && v.edge_hex) {
+    return { background: `radial-gradient(circle, ${v.center_hex}, ${v.edge_hex})` }
+  }
+  const hex = String(v.hex || v.color_hex || "#334155")
   return { backgroundColor: hex }
 }
 
@@ -187,6 +190,8 @@ export function ManualTemplateBuilder({ onCancel, onSaved }: ManualTemplateBuild
   const [editingLayerId, setEditingLayerId] = React.useState<string | null>(null)
   const [previewUrl, setPreviewUrl] = React.useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = React.useState(false)
+  const [bgTab, setBgTab] = React.useState<"colors" | "gradients" | "photos">("colors")
+  const [uploadingBg, setUploadingBg] = React.useState(false)
   const previewUrlRef = React.useRef<string | null>(null)
 
   React.useEffect(() => {
@@ -291,12 +296,36 @@ export function ManualTemplateBuilder({ onCancel, onSaved }: ManualTemplateBuild
             asset_id: asset.id,
             label: asset.label || "Background",
             preview_url: asset.preview_url,
-            asset_type: asset.asset_type,
-            value_json: asset.value_json,
+            type: asset.type,
+            config: asset.config,
           },
         ],
       }
     })
+  }
+
+  async function handlePhotoUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploadingBg(true)
+    try {
+      const formData = new FormData()
+      formData.append("image", file)
+      formData.append("name", file.name.split(".")[0])
+      
+      const res = await api.post<BackgroundAsset>("/api/template-assets/backgrounds/upload", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      })
+      
+      setBackgroundAssets((prev) => [...prev, res.data])
+      toggleBackground(res.data)
+      toast.success("Photo uploaded successfully.")
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, "Failed to upload photo."))
+    } finally {
+      setUploadingBg(false)
+      if (e.target) e.target.value = ""
+    }
   }
 
   function updateBackgroundLabel(assetId: string, label: string) {
@@ -517,13 +546,49 @@ export function ManualTemplateBuilder({ onCancel, onSaved }: ManualTemplateBuild
             <p className="text-sm text-slate-600">
               Select 1–6 backgrounds. Click a tile to toggle; selected tiles show a checkmark.
             </p>
+            
+            <div className="flex border-b">
+              {(["colors", "gradients", "photos"] as const).map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setBgTab(tab)}
+                  className={cn(
+                    "px-4 py-2 text-sm font-medium border-b-2 capitalize",
+                    bgTab === tab ? "border-purple-600 text-purple-600" : "border-transparent text-slate-500 hover:text-slate-700"
+                  )}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+
             {loadingAssets ? (
               <div className="py-8 text-center">
                 <Loader2 className="size-6 animate-spin mx-auto text-slate-400" />
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-                {backgroundAssets.map((asset) => {
+                {bgTab === "photos" && (
+                  <label className="relative aspect-square rounded-lg border-2 border-dashed border-slate-300 hover:border-purple-400 flex flex-col items-center justify-center cursor-pointer transition-colors bg-slate-50">
+                    <input type="file" className="hidden" accept="image/jpeg,image/png" onChange={handlePhotoUpload} disabled={uploadingBg} />
+                    {uploadingBg ? (
+                      <Loader2 className="size-6 animate-spin text-purple-600" />
+                    ) : (
+                      <>
+                        <Plus className="size-6 text-slate-400 mb-2" />
+                        <span className="text-xs font-medium text-slate-600">Upload Photo</span>
+                      </>
+                    )}
+                  </label>
+                )}
+                {backgroundAssets
+                  .filter((a) => {
+                    if (bgTab === "colors") return a.type === "solid"
+                    if (bgTab === "gradients") return a.type.startsWith("gradient")
+                    return a.type === "image"
+                  })
+                  .map((asset) => {
                   const selected = state.selectedBackgrounds.some((b) => b.asset_id === asset.id)
                   return (
                     <button
@@ -544,7 +609,7 @@ export function ManualTemplateBuilder({ onCancel, onSaved }: ManualTemplateBuild
                         />
                       ) : null}
                       <span className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-xs px-2 py-1 truncate">
-                        {asset.label || asset.asset_type}
+                        {asset.label || asset.type}
                       </span>
                       {selected ? (
                         <span className="absolute top-2 right-2 rounded-full bg-purple-600 p-1 text-white">

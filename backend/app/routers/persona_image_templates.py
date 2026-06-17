@@ -405,12 +405,12 @@ def _validate_manual_layer_constraints(template_json: dict) -> None:
 
 
 _DEFAULT_BACKGROUND_ASSETS = [
-    ("Dark Navy", "solid_color", {"color_hex": "#1a1a2e"}),
-    ("Deep Purple", "solid_color", {"color_hex": "#2d1b69"}),
-    ("Charcoal Black", "solid_color", {"color_hex": "#222222"}),
-    ("Warm Cream", "solid_color", {"color_hex": "#f5f0e8"}),
-    ("Ocean Blue", "gradient", {"stops": ["#0f2027", "#203a43", "#2c5364"]}),
-    ("Sunset Glow", "gradient", {"stops": ["#ff6b6b", "#feca57", "#ff9ff3"]}),
+    ("Dark Navy", "solid", {"hex": "#1a1a2e"}),
+    ("Deep Purple", "solid", {"hex": "#2d1b69"}),
+    ("Charcoal Black", "solid", {"hex": "#222222"}),
+    ("Warm Cream", "solid", {"hex": "#f5f0e8"}),
+    ("Ocean Blue", "gradient_linear", {"from_hex": "#0f2027", "to_hex": "#2c5364", "angle_deg": 135}),
+    ("Sunset Glow", "gradient_linear", {"from_hex": "#ff6b6b", "to_hex": "#ff9ff3", "angle_deg": 135}),
 ]
 
 _DEFAULT_FONT_ASSETS = [
@@ -455,15 +455,15 @@ def _ensure_default_template_assets(db: Session, user_id: int) -> None:
 
     now = datetime.now(timezone.utc)
     if bg_count == 0:
-        for label, asset_type, value_json in _DEFAULT_BACKGROUND_ASSETS:
+        for label, asset_type, config in _DEFAULT_BACKGROUND_ASSETS:
             db.add(
                 models.TemplateBackgroundAsset(
                     id=str(uuid.uuid4()),
                     user_id=user_id,
-                    asset_type=asset_type,
+                    type=asset_type,
                     label=label,
                     preview_url=None,
-                    value_json=value_json,
+                    config=config,
                     created_at=now,
                 )
             )
@@ -498,10 +498,12 @@ def list_background_assets(
     return [
         {
             "id": row.id,
-            "asset_type": row.asset_type,
+            "asset_type": row.type,
+            "type": row.type,
             "label": row.label,
             "preview_url": row.preview_url,
-            "value_json": row.value_json or {},
+            "config": row.config or {},
+            "value_json": row.config or {},
         }
         for row in rows
     ]
@@ -528,6 +530,52 @@ def list_font_assets(
         }
         for row in rows
     ]
+
+
+@router.post("/api/template-assets/backgrounds/upload")
+async def upload_background_asset(
+    name: str = Form(...),
+    tags: str | None = Form(None),
+    image: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    image_bytes = await image.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Image is empty.")
+    
+    content_type = image.content_type or "image/jpeg"
+    if content_type not in ("image/jpeg", "image/png"):
+        raise HTTPException(status_code=400, detail="Only JPG and PNG are supported.")
+        
+    ext = ".png" if content_type == "image/png" else ".jpg"
+    object_path = f"backgrounds/{current_user.id}/{uuid.uuid4()}{ext}"
+    
+    try:
+        supabase_url = await _upload_to_supabase("image-templates", object_path, image_bytes, content_type)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(exc)}")
+        
+    row = models.TemplateBackgroundAsset(
+        id=str(uuid.uuid4()),
+        user_id=current_user.id,
+        type="image",
+        label=name.strip(),
+        preview_url=supabase_url,
+        config={"url": supabase_url, "fit": "cover"},
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    
+    return {
+        "id": row.id,
+        "type": row.type,
+        "label": row.label,
+        "preview_url": row.preview_url,
+        "config": row.config,
+    }
 
 
 def _image_template_response(row: models.ImageTemplate) -> dict:
@@ -733,20 +781,81 @@ async def _load_background_asset_image(
     if not asset:
         return Image.new("RGBA", (canvas_w, canvas_h), (40, 40, 40, 255))
 
-    value = asset.value_json or {}
-    asset_type = str(asset.asset_type or "").lower()
-    if asset_type == "solid_color":
-        return Image.new("RGBA", (canvas_w, canvas_h), _parse_hex_color(str(value.get("color_hex") or ""), default=(40, 40, 40, 255)))
-    if asset_type == "gradient":
-        stops = value.get("stops") or []
-        if isinstance(stops, list) and stops:
-            return _render_gradient_background([str(s) for s in stops], canvas_w, canvas_h)
-    image_url = asset.preview_url or value.get("image_url")
-    if image_url:
-        blob = await _download_bytes(str(image_url))
-        if blob:
-            return Image.open(io.BytesIO(blob)).convert("RGBA").resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
-    return Image.new("RGBA", (canvas_w, canvas_h), _parse_hex_color(str(value.get("color_hex") or ""), default=(40, 40, 40, 255)))
+    config = asset.config or {}
+    asset_type = str(asset.type or "").lower()
+
+    if asset_type == "solid":
+        return Image.new("RGBA", (canvas_w, canvas_h), _parse_hex_color(str(config.get("hex") or ""), default=(40, 40, 40, 255)))
+    
+    if asset_type == "gradient_linear":
+        stops = [str(config.get("from_hex") or "#000000"), str(config.get("to_hex") or "#ffffff")]
+        grad_img = _render_gradient_background(stops, canvas_w, canvas_h)
+        angle_deg = float(config.get("angle_deg") or 0)
+        if abs(angle_deg) > 0.1:
+            from PIL import ImageDraw
+            diag = int((canvas_w**2 + canvas_h**2)**0.5) + 1
+            large_grad = _render_gradient_background(stops, diag, diag)
+            rotated = large_grad.rotate(-angle_deg, resample=Image.Resampling.BICUBIC)
+            left = (diag - canvas_w) // 2
+            top = (diag - canvas_h) // 2
+            grad_img = rotated.crop((left, top, left + canvas_w, top + canvas_h))
+        return grad_img
+
+    if asset_type == "gradient_radial":
+        center_color = _parse_hex_color(str(config.get("center_hex") or "#ffffff"))
+        edge_color = _parse_hex_color(str(config.get("edge_hex") or "#000000"))
+        
+        c1 = f"rgba({center_color[0]},{center_color[1]},{center_color[2]},{center_color[3]})"
+        c2 = f"rgba({edge_color[0]},{edge_color[1]},{edge_color[2]},{edge_color[3]})"
+        
+        # Use simple pure PIL hack or ImageDraw
+        # Create a large radial gradient by drawing concentric circles
+        diag = int((canvas_w**2 + canvas_h**2)**0.5) + 1
+        img = Image.new("RGBA", (canvas_w, canvas_h), edge_color)
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(img)
+        cx, cy = canvas_w // 2, canvas_h // 2
+        r_max = diag // 2
+        
+        # Drawing 100 circles for gradient (not perfectly smooth but pure PIL)
+        # Or better: generate RGBA using a bytearray in pure python
+        arr = bytearray(canvas_w * canvas_h * 4)
+        r_c, g_c, b_c, a_c = center_color
+        r_e, g_e, b_e, a_e = edge_color
+        r_d, g_d, b_d, a_d = r_e - r_c, g_e - g_c, b_e - b_c, a_e - a_c
+        
+        idx = 0
+        for y in range(canvas_h):
+            dy = y - cy
+            dy2 = dy * dy
+            for x in range(canvas_w):
+                dx = x - cx
+                dist = (dx * dx + dy2)**0.5
+                t = min(1.0, dist / r_max)
+                arr[idx:idx+4] = [
+                    int(r_c + r_d * t),
+                    int(g_c + g_d * t),
+                    int(b_c + b_d * t),
+                    int(a_c + a_d * t)
+                ]
+                idx += 4
+        return Image.frombytes("RGBA", (canvas_w, canvas_h), bytes(arr))
+
+    if asset_type == "image":
+        image_url = config.get("url") or asset.preview_url
+        if image_url:
+            blob = await _download_bytes(str(image_url))
+            if blob:
+                img = Image.open(io.BytesIO(blob)).convert("RGBA")
+                fit = config.get("fit") or "cover"
+                if fit == "cover":
+                    from PIL import ImageOps
+                    img = ImageOps.fit(img, (canvas_w, canvas_h), Image.Resampling.LANCZOS)
+                else:
+                    img = img.resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
+                return img
+    
+    return Image.new("RGBA", (canvas_w, canvas_h), _parse_hex_color(str(config.get("hex") or ""), default=(40, 40, 40, 255)))
 
 
 _ASPECT_DIMENSIONS: dict[str, tuple[int, int]] = {
@@ -949,8 +1058,8 @@ def _suggested_template_name_from_description(description: str) -> str:
 def _score_background_for_description(asset: models.TemplateBackgroundAsset, description: str) -> int:
     desc = description.lower()
     label = (asset.label or "").lower()
-    value = asset.value_json or {}
-    hex_color = str(value.get("color_hex") or "").lower()
+    config = asset.config or {}
+    hex_color = str(config.get("hex") or config.get("from_hex") or "").lower()
     score = 0
 
     dark_terms = ("black", "dark", "space", "void", "navy", "charcoal", "night", "cinematic", "documentary")
@@ -962,7 +1071,7 @@ def _score_background_for_description(asset: models.TemplateBackgroundAsset, des
             score += 12
         if hex_color in ("#000000", "#222222", "#1a1a2e", "#2d1b69"):
             score += 10
-        if asset.asset_type == "gradient" and any(t in label for t in ("ocean", "blue")):
+        if "gradient" in asset.type and any(t in label for t in ("ocean", "blue")):
             score += 8
     if any(t in desc for t in light_terms):
         if "cream" in label or "warm" in label:
@@ -970,7 +1079,7 @@ def _score_background_for_description(asset: models.TemplateBackgroundAsset, des
     if any(t in desc for t in blue_terms):
         if "ocean" in label or "blue" in label:
             score += 10
-        if asset.asset_type == "gradient":
+        if "gradient" in asset.type:
             score += 4
     if score == 0:
         score = 1
@@ -1018,7 +1127,7 @@ def _normalize_generated_template_json(
                 cleaned_bg.append({"asset_id": aid, "label": label})
     if not cleaned_bg:
         for asset in _pick_backgrounds_for_description(description, bg_assets, max_count=3):
-            cleaned_bg.append({"asset_id": asset.id, "label": asset.label or asset.asset_type or "Background"})
+            cleaned_bg.append({"asset_id": asset.id, "label": asset.label or asset.type or "Background"})
     parsed["background_options"] = cleaned_bg[:6]
 
     font_map = {f.id: f for f in font_rows}
@@ -1248,7 +1357,7 @@ async def generate_template_from_description(
     )
 
     bg_lines = [
-        f"asset_id: {a.id}, label: {a.label or a.asset_type}, type: {a.asset_type}"
+        f"Background option: id={a.id}, type={a.type}, name='{a.label or a.type}'"
         for a in bg_assets
     ]
     font_lines = [f"asset_id: {f.id}, name: {f.display_name}" for f in font_rows]
