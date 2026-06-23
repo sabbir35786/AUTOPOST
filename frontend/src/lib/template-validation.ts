@@ -10,7 +10,7 @@ export type ValidationError = {
   message: string
 }
 
-const VALID_LAYER_TYPES = new Set(["text", "logo", "overlay"])
+const VALID_LAYER_TYPES = new Set(["text", "logo", "overlay", "shape", "divider"])
 const VALID_ROLES = new Set(["headline", "subheadline", "body"])
 const VALID_ALIGNS = new Set(["left", "center", "right"])
 const VALID_WEIGHTS = new Set(["bold", "regular"])
@@ -138,6 +138,95 @@ function validateLayer(
         })
       }
     })
+  }
+
+  if (type === "shape") {
+    const shapeType = String(layer.shape_type ?? "")
+    if (!["rectangle", "circle", "pill"].includes(shapeType)) {
+      errors.push({
+        path: `${prefix}.shape_type`,
+        message: `Layer ${layerNum}: shape_type must be rectangle, circle, or pill`,
+      })
+    }
+    const fillOpts = (layer.fill_color_options as unknown[]) ?? []
+    if (!fillOpts.length) {
+      errors.push({
+        path: `${prefix}.fill_color_options`,
+        message: `Layer ${layerNum}: at least one fill_color_option required`,
+      })
+    }
+    if (layer.opacity !== undefined && layer.opacity !== null) {
+      const op = Number(layer.opacity)
+      if (Number.isNaN(op) || op < 0 || op > 100) {
+        errors.push({
+          path: `${prefix}.opacity`,
+          message: `Layer ${layerNum}: opacity must be 0–100`,
+        })
+      }
+    }
+    if (layer.stroke_width !== undefined && layer.stroke_width !== null) {
+      const sw = Number(layer.stroke_width)
+      if (Number.isNaN(sw) || sw < 0) {
+        errors.push({
+          path: `${prefix}.stroke_width`,
+          message: `Layer ${layerNum}: stroke_width must be >= 0`,
+        })
+      }
+    }
+    if (layer.corner_radius !== undefined && layer.corner_radius !== null) {
+      const cr = Number(layer.corner_radius)
+      if (Number.isNaN(cr) || cr < 0) {
+        errors.push({
+          path: `${prefix}.corner_radius`,
+          message: `Layer ${layerNum}: corner_radius must be >= 0`,
+        })
+      }
+    }
+  }
+
+  if (type === "divider") {
+    const orient = String(layer.orientation ?? "")
+    if (!(orient === "horizontal" || orient === "diagonal")) {
+      errors.push({
+        path: `${prefix}.orientation`,
+        message: `Layer ${layerNum}: orientation must be horizontal or diagonal`,
+      })
+    }
+    const colorOpts = (layer.color_options as unknown[]) ?? []
+    if (!colorOpts.length) {
+      errors.push({
+        path: `${prefix}.color_options`,
+        message: `Layer ${layerNum}: at least one color_option required`,
+      })
+    }
+    const thk = Number(layer.thickness_px)
+    if (Number.isNaN(thk) || thk < 1) {
+      errors.push({
+        path: `${prefix}.thickness_px`,
+        message: `Layer ${layerNum}: thickness_px must be >= 1`,
+      })
+    }
+    const op = Number(layer.opacity)
+    if (Number.isNaN(op) || op < 0 || op > 100) {
+      errors.push({
+        path: `${prefix}.opacity`,
+        message: `Layer ${layerNum}: opacity must be 0–100`,
+      })
+    }
+    const wp = Number(layer.width_pct)
+    if (Number.isNaN(wp) || wp < 0 || wp > 100) {
+      errors.push({
+        path: `${prefix}.width_pct`,
+        message: `Layer ${layerNum}: width_pct must be 0–100`,
+      })
+    }
+    const yp = Number(layer.y_pct)
+    if (Number.isNaN(yp) || yp < 0 || yp > 100) {
+      errors.push({
+        path: `${prefix}.y_pct`,
+        message: `Layer ${layerNum}: y_pct must be 0–100`,
+      })
+    }
   }
 
   return errors

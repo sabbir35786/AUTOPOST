@@ -54,6 +54,7 @@ type TextLayerDraft = {
   type: "text"
   role: "headline" | "subheadline" | "body"
   z_index: number
+  opacity: number
   position_x_percent: number
   position_y_percent: number
   width_percent: number
@@ -70,6 +71,7 @@ type OverlayLayerDraft = {
   id: string
   type: "overlay"
   z_index: number
+  opacity: number
   position_x_percent: number
   position_y_percent: number
   width_percent: number
@@ -81,13 +83,24 @@ type LogoLayerDraft = {
   id: string
   type: "logo"
   z_index: number
+  opacity: number
   position_x_percent: number
   position_y_percent: number
   width_percent: number
   height_percent: number
 }
 
-type LayerDraft = TextLayerDraft | OverlayLayerDraft | LogoLayerDraft
+type FrameLayerDraft = {
+  id: string
+  type: "frame"
+  z_index: number
+  opacity: number
+  color_options: ColorOptionDraft[]
+  thickness_px: number
+  inset_px: number
+}
+
+type LayerDraft = TextLayerDraft | OverlayLayerDraft | LogoLayerDraft | FrameLayerDraft
 
 type BuilderState = {
   step: number
@@ -127,14 +140,21 @@ function serializeLayers(layers: LayerDraft[], fonts: FontAsset[]) {
       id: layer.id,
       type: layer.type,
       z_index: layer.z_index,
+      opacity: layer.opacity ?? 100,
+    }
+    
+    // For text, overlay, logo layers we need positional data
+    const positionalBase = layer.type !== "frame" ? {
+      ...base,
       position_x_percent: layer.position_x_percent,
       position_y_percent: layer.position_y_percent,
       width_percent: layer.width_percent,
       height_percent: layer.height_percent,
-    }
+    } : base
+
     if (layer.type === "text") {
       return {
-        ...base,
+        ...positionalBase,
         role: layer.role,
         font_options: layer.font_asset_ids.map((fid) => ({
           font_asset_id: fid,
@@ -148,7 +168,18 @@ function serializeLayers(layers: LayerDraft[], fonts: FontAsset[]) {
       }
     }
     if (layer.type === "overlay") {
-      return { ...base, color_options: layer.color_options }
+      return { ...positionalBase, color_options: layer.color_options }
+    }
+    if (layer.type === "logo") {
+      return positionalBase
+    }
+    if (layer.type === "frame") {
+      return {
+        ...base,
+        color_options: layer.color_options,
+        thickness_px: layer.thickness_px,
+        inset_px: layer.inset_px,
+      }
     }
     return base
   })
@@ -162,6 +193,8 @@ function buildTemplateJsonFromState(state: BuilderState, fonts: FontAsset[]) {
     background_options: state.selectedBackgrounds.map((b) => ({
       asset_id: b.asset_id,
       label: b.label.trim() || "Background",
+      type: b.type,
+      config: b.config,
     })),
     layers: serializeLayers(state.layers, fonts),
   }
@@ -337,7 +370,7 @@ export function ManualTemplateBuilder({ onCancel, onSaved }: ManualTemplateBuild
     }))
   }
 
-  function addLayer(type: "text" | "logo" | "overlay") {
+  function addLayer(type: "text" | "logo" | "overlay" | "frame") {
     const id = nextLayerId(state.layers)
     const z = state.layers.length ? Math.max(...state.layers.map((l) => l.z_index)) + 1 : 1
     let layer: LayerDraft
@@ -347,6 +380,7 @@ export function ManualTemplateBuilder({ onCancel, onSaved }: ManualTemplateBuild
         type: "text",
         role: "headline",
         z_index: z,
+        opacity: 100,
         position_x_percent: 10,
         position_y_percent: 38,
         width_percent: 80,
@@ -363,17 +397,29 @@ export function ManualTemplateBuilder({ onCancel, onSaved }: ManualTemplateBuild
         id,
         type: "overlay",
         z_index: z,
+        opacity: 100,
         position_x_percent: 0,
         position_y_percent: 0,
         width_percent: 100,
         height_percent: 100,
         color_options: [{ color_hex: "#000000", opacity: 0.4, label: "Dark" }],
       }
+    } else if (type === "frame") {
+      layer = {
+        id,
+        type: "frame",
+        z_index: z,
+        opacity: 100,
+        color_options: [{ color_hex: "#ffffff", label: "White" }],
+        thickness_px: 10,
+        inset_px: 0,
+      }
     } else {
       layer = {
         id,
         type: "logo",
         z_index: z,
+        opacity: 100,
         position_x_percent: 78,
         position_y_percent: 4,
         width_percent: 18,
@@ -666,6 +712,9 @@ export function ManualTemplateBuilder({ onCancel, onSaved }: ManualTemplateBuild
                 <Button type="button" size="sm" variant="outline" onClick={() => addLayer("overlay")}>
                   Overlay
                 </Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => addLayer("frame")}>
+                  Frame
+                </Button>
                 <Button type="button" size="sm" variant="ghost" onClick={() => setShowAddLayerPanel(false)}>
                   Cancel
                 </Button>
@@ -781,6 +830,9 @@ type LayerLayoutKey =
   | "width_percent"
   | "height_percent"
   | "z_index"
+  | "opacity"
+  | "thickness_px"
+  | "inset_px"
 
 function LayerEditor({
   layer,
@@ -816,11 +868,16 @@ function LayerEditor({
         </Button>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        {num("Position X %", "position_x_percent")}
-        {num("Position Y %", "position_y_percent")}
-        {num("Width %", "width_percent")}
-        {num("Height %", "height_percent")}
+        {layer.type !== "frame" ? (
+          <>
+            {num("Position X %", "position_x_percent")}
+            {num("Position Y %", "position_y_percent")}
+            {num("Width %", "width_percent")}
+            {num("Height %", "height_percent")}
+          </>
+        ) : null}
         {num("Z-index", "z_index", 0, 99)}
+        {num("Opacity %", "opacity", 0, 100)}
       </div>
 
       {layer.type === "text" ? (
@@ -944,6 +1001,19 @@ function LayerEditor({
 
       {layer.type === "logo" ? (
         <p className="text-sm text-slate-600 italic">Logo image comes from persona settings.</p>
+      ) : null}
+
+      {layer.type === "frame" ? (
+        <>
+          <div className="grid grid-cols-2 gap-3">
+            {num("Thickness px", "thickness_px", 1, 100)}
+            {num("Inset px", "inset_px", 0, 100)}
+          </div>
+          <TextColorEditor
+            options={layer.color_options}
+            onChange={(color_options) => onChange({ color_options })}
+          />
+        </>
       ) : null}
     </div>
   )

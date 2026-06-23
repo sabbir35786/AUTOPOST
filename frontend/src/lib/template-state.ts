@@ -2,6 +2,7 @@ import type { CSSProperties } from "react"
 import type {
   AspectKey,
   BackgroundAsset,
+  DividerLayer,
   FontAsset,
   LayerBase,
   ManualTemplateJson,
@@ -154,6 +155,49 @@ export function createDefaultLogoLayer(z: number, id: string): TemplateLayer {
     width_percent: 18,
     height_percent: 12,
     rotation_degrees: 0,
+  }
+}
+
+export function createDefaultShapeLayer(z: number, id: string): TemplateLayer {
+  return {
+    id,
+    type: "shape",
+    shape_type: "rectangle",
+    z_index: z,
+    position_x_percent: 10,
+    position_y_percent: 10,
+    width_percent: 80,
+    height_percent: 20,
+    rotation_degrees: 0,
+    fill_color_options: [{ color_hex: "#ffffff", label: "White" }],
+    stroke_color_options: [],
+    stroke_width: 0,
+    corner_radius: 0,
+    opacity: 100,
+  }
+}
+
+export function createDefaultDividerLayer(z: number, id: string): DividerLayer {
+  return {
+    id,
+    type: "divider",
+    orientation: "horizontal",
+    z_index: z,
+    position_x_percent: 0,
+    position_y_percent: 50,
+    width_percent: 100,
+    height_percent: 1,
+    rotation_degrees: 0,
+    color_options: [
+      { color_hex: "#ffffff", label: "White" },
+      { color_hex: "#000000", label: "Black" },
+    ],
+    thickness_px: 2,
+    opacity: 100,
+    width_pct: 80,
+    y_pct: 50,
+    x_start_pct: 10,
+    angle_deg: 0,
   }
 }
 

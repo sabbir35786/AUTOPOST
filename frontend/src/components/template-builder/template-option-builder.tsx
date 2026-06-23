@@ -9,7 +9,9 @@ import {
   Image as ImageIcon,
   Layers,
   Loader2,
+  Minus,
   Plus,
+  Square,
   Trash2,
   Type,
 } from "lucide-react"
@@ -23,8 +25,10 @@ import { Select } from "@/components/ui/select"
 import { api, getApiErrorMessage } from "@/lib/api"
 import {
   backgroundSwatchStyle,
+  createDefaultDividerLayer,
   createDefaultLogoLayer,
   createDefaultOverlayLayer,
+  createDefaultShapeLayer,
   createDefaultTextLayer,
   nextLayerId,
   nextZIndex,
@@ -53,6 +57,8 @@ type Props = {
 function layerIcon(type: string) {
   if (type === "text") return <Type className="size-4" />
   if (type === "logo") return <ImageIcon className="size-4" />
+  if (type === "shape") return <Square className="size-4" />
+  if (type === "divider") return <Minus className="size-4" />
   return <Layers className="size-4" />
 }
 
@@ -181,12 +187,14 @@ export function TemplateOptionBuilder({
     setJson({ layers: json.layers.filter((l) => l.id !== id) })
   }
 
-  function addLayer(type: "text" | "logo" | "overlay") {
+  function addLayer(type: "text" | "logo" | "overlay" | "shape" | "divider") {
     const id = nextLayerId(json.layers)
     const z = nextZIndex(json.layers)
     let layer: TemplateLayer
     if (type === "text") layer = createDefaultTextLayer(z, id, fonts)
     else if (type === "overlay") layer = createDefaultOverlayLayer(z, id)
+    else if (type === "shape") layer = createDefaultShapeLayer(z, id)
+    else if (type === "divider") layer = createDefaultDividerLayer(z, id)
     else layer = createDefaultLogoLayer(z, id)
     setJson({ layers: [...json.layers, layer] })
     setExpanded((e) => ({ ...e, [id]: true }))
@@ -302,6 +310,12 @@ export function TemplateOptionBuilder({
               </Button>
               <Button type="button" size="sm" variant="outline" onClick={() => addLayer("logo")}>
                 Logo
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => addLayer("shape")}>
+                Shape
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => addLayer("divider")}>
+                Divider
               </Button>
               <Button type="button" size="sm" variant="outline" onClick={() => addLayer("overlay")}>
                 Overlay

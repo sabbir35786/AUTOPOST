@@ -89,7 +89,11 @@ def render_text_layer_pango(
     layer_width_px: int,
     layer_height_px: int,
     text_align: str,
-    font_weight: str
+    font_weight: str,
+    stroke_color_hex: str | None = None,
+    stroke_width_px: int = 0,
+    highlight_bg_hex: str | None = None,
+    fit_mode: str = "fixed"
 ) -> Image.Image:
     if not PANGO_AVAILABLE:
         print(f"[Info] Using PIL fallback renderer for text: '{text[:40]}...'")
@@ -102,48 +106,81 @@ def render_text_layer_pango(
             "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
             "/usr/share/fonts/opentype/noto/NotoSansBengali-Regular.ttf",
         ]
-        font_obj = None
-        for fp in font_candidates:
-            try:
-                font_obj = ImageFont.truetype(fp, font_size_px)
-                break
-            except Exception:
-                continue
-        if font_obj is None:
-            font_obj = ImageFont.load_default()
+        
+        # Binary search for auto_fit
+        if fit_mode == "auto_fit":
+            low, high = 10, 120
+            best_size = 10
+            best_font = None
+            while low <= high:
+                mid = (low + high) // 2
+                font_obj = None
+                for fp in font_candidates:
+                    try:
+                        font_obj = ImageFont.truetype(fp, mid)
+                        break
+                    except Exception:
+                        continue
+                if font_obj is None:
+                    font_obj = ImageFont.load_default()
+                bbox = draw.textbbox((0, 0), text, font=font_obj)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+                if tw <= layer_width_px and th <= layer_height_px:
+                    best_size = mid
+                    best_font = font_obj
+                    low = mid + 1
+                else:
+                    high = mid - 1
+            font_size_px = best_size
+            font_obj = best_font
+            if font_obj is None:
+                font_obj = ImageFont.load_default()
+        else:
+            font_obj = None
+            for fp in font_candidates:
+                try:
+                    font_obj = ImageFont.truetype(fp, font_size_px)
+                    break
+                except Exception:
+                    continue
+            if font_obj is None:
+                font_obj = ImageFont.load_default()
+
         bbox = draw.textbbox((0, 0), text, font=font_obj)
         tw = bbox[2] - bbox[0]
         th = bbox[3] - bbox[1]
         x = max(0, (layer_width_px - tw) // 2) if text_align == 'center' else 0
         y = max(0, (layer_height_px - th) // 2)
+
+        # Highlight Box
+        if highlight_bg_hex:
+            hr, hg, hb, ha = _parse_hex_color(highlight_bg_hex, default=(255, 255, 0, 255))
+            pad_x, pad_y = 8, 4
+            hx1, hy1 = max(0, x - pad_x), max(0, y - pad_y)
+            hx2, hy2 = min(layer_width_px, x + tw + pad_x), min(layer_height_px, y + th + pad_y)
+            draw.rounded_rectangle([hx1, hy1, hx2, hy2], radius=4, fill=(hr, hg, hb, ha))
+
+        # Stroke (PIL fallback: 4 offsets)
+        if stroke_width_px > 0 and stroke_color_hex:
+            sr, sg, sb, sa = _parse_hex_color(stroke_color_hex, default=(0, 0, 0, 255))
+            stroke_fill = (sr, sg, sb, 255)
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                draw.text((x + dx * stroke_width_px, y + dy * stroke_width_px), text, font=font_obj, fill=stroke_fill)
+
         draw.text((x, y), text, font=font_obj, fill=text_color_hex)
         return img
 
     print(f"[Info] Using Pango/Cairo renderer for text: '{text[:40]}...'")
 
-    # Create transparent Cairo surface
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, layer_width_px, layer_height_px)
     ctx = cairo.Context(surface)
-    
-    # Transparent background
     ctx.set_source_rgba(0, 0, 0, 0)
     ctx.paint()
     
-    # Parse color
-    hex_color = text_color_hex.lstrip('#')
-    if len(hex_color) == 3:
-        hex_color = ''.join(c*2 for c in hex_color)
-    r = int(hex_color[0:2], 16) / 255
-    g = int(hex_color[2:4], 16) / 255
-    b = int(hex_color[4:6], 16) / 255
-    ctx.set_source_rgba(r, g, b, 1.0)
-    
-    # Create Pango layout
     layout = PangoCairo.create_layout(ctx)
-    layout.set_width(layer_width_px * Pango.SCALE)
     layout.set_wrap(Pango.WrapMode.WORD_CHAR)
     
-    # Set alignment
     align_map = {
         'center': Pango.Alignment.CENTER,
         'right': Pango.Alignment.RIGHT,
@@ -151,46 +188,90 @@ def render_text_layer_pango(
     }
     layout.set_alignment(align_map.get(text_align, Pango.Alignment.LEFT))
     
-    # Set font using font description with script-aware fallbacks.
-    # Pango accepts a comma-separated family list — it will use the first font
-    # that has a glyph for each character. Pango + Harfbuzz handle the actual
-    # shaping (Bengali conjuncts, Arabic cursive forms, Devanagari matras, etc.)
-    # regardless of which font family is selected.
+    custom_family = _get_font_family_name(font_path) if font_path else ""
+    fallback_families = [
+        "Nirmala UI", "Noto Sans Bengali", "Noto Serif Bengali", "Noto Sans Arabic",
+        "Noto Sans Devanagari", "Noto Sans", "Segoe UI", "sans-serif",
+    ]
+    all_families = ", ".join([custom_family] + fallback_families) if custom_family else ", ".join(fallback_families)
+    
+    layout.set_text(text, -1)
+
+    # Auto-fit binary search
+    if fit_mode == "auto_fit":
+        low, high = 10, 120
+        best_size = 10
+        while low <= high:
+            mid = (low + high) // 2
+            font_desc = Pango.FontDescription()
+            font_desc.set_absolute_size(mid * Pango.SCALE)
+            font_desc.set_weight(Pango.Weight.BOLD if font_weight == 'bold' else Pango.Weight.NORMAL)
+            font_desc.set_family(all_families)
+            layout.set_font_description(font_desc)
+            
+            layout.set_width(layer_width_px * Pango.SCALE)
+            tw, th = layout.get_pixel_size()
+            
+            if tw <= layer_width_px and th <= layer_height_px:
+                best_size = mid
+                low = mid + 1
+            else:
+                high = mid - 1
+        font_size_px = best_size
+
     font_desc = Pango.FontDescription()
     font_desc.set_absolute_size(font_size_px * Pango.SCALE)
     font_desc.set_weight(Pango.Weight.BOLD if font_weight == 'bold' else Pango.Weight.NORMAL)
-
-    # Build a family list: custom font first, then cross-platform fallbacks
-    # Windows: Nirmala UI covers Bengali, Devanagari; Segoe UI has wide coverage
-    # Linux: Noto fonts cover all scripts
-    custom_family = _get_font_family_name(font_path) if font_path else ""
-    fallback_families = [
-        "Nirmala UI",
-        "Noto Sans Bengali",
-        "Noto Serif Bengali",
-        "Noto Sans Arabic",
-        "Noto Sans Devanagari",
-        "Noto Sans",
-        "Segoe UI",
-        "sans-serif",
-    ]
-    if custom_family:
-        all_families = ", ".join([custom_family] + fallback_families)
-    else:
-        all_families = ", ".join(fallback_families)
-
     font_desc.set_family(all_families)
     layout.set_font_description(font_desc)
-    layout.set_text(text, -1)
+    layout.set_width(layer_width_px * Pango.SCALE)
     
-    # Calculate vertical centering
-    text_width, text_height = layout.get_pixel_size()
+    ink_rect, logical_rect = layout.get_pixel_extents()
+    text_width, text_height = logical_rect.width, logical_rect.height
+    
     y_offset = max(0, (layer_height_px - text_height) // 2)
+    x_offset = 0
     
-    ctx.move_to(0, y_offset)
-    PangoCairo.show_layout(ctx, layout)
-    
-    # Convert Cairo surface to PIL Image
+    # Highlight Box
+    if highlight_bg_hex:
+        hr, hg, hb, ha = _parse_hex_color(highlight_bg_hex, default=(255, 255, 0, 255))
+        pad_x, pad_y = 8, 4
+        rx = x_offset + logical_rect.x - pad_x
+        ry = y_offset + logical_rect.y - pad_y
+        rw = logical_rect.width + pad_x * 2
+        rh = logical_rect.height + pad_y * 2
+        
+        ctx.set_source_rgba(hr/255.0, hg/255.0, hb/255.0, ha/255.0)
+        radius = 4
+        # approximate rounded rect via path operations
+        ctx.move_to(rx + radius, ry)
+        ctx.line_to(rx + rw - radius, ry)
+        ctx.curve_to(rx + rw, ry, rx + rw, ry, rx + rw, ry + radius)
+        ctx.line_to(rx + rw, ry + rh - radius)
+        ctx.curve_to(rx + rw, ry + rh, rx + rw, ry + rh, rx + rw - radius, ry + rh)
+        ctx.line_to(rx + radius, ry + rh)
+        ctx.curve_to(rx, ry + rh, rx, ry + rh, rx, ry + rh - radius)
+        ctx.line_to(rx, ry + radius)
+        ctx.curve_to(rx, ry, rx, ry, rx + radius, ry)
+        ctx.fill()
+
+    ctx.move_to(x_offset, y_offset)
+
+    tr, tg, tb, ta = _parse_hex_color(text_color_hex, default=(255, 255, 255, 255))
+    tr, tg, tb = tr/255.0, tg/255.0, tb/255.0
+
+    if stroke_width_px > 0 and stroke_color_hex:
+        sr, sg, sb, sa = _parse_hex_color(stroke_color_hex, default=(0, 0, 0, 255))
+        PangoCairo.layout_path(ctx, layout)
+        ctx.set_source_rgba(sr/255.0, sg/255.0, sb/255.0, sa/255.0)
+        ctx.set_line_width(stroke_width_px)
+        ctx.stroke_preserve()
+        ctx.set_source_rgba(tr, tg, tb, 1.0)
+        ctx.fill()
+    else:
+        ctx.set_source_rgba(tr, tg, tb, 1.0)
+        PangoCairo.show_layout(ctx, layout)
+
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
@@ -556,13 +637,17 @@ async def upload_background_asset(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(exc)}")
         
+    config_data = {"url": supabase_url, "fit": "cover"}
+    if tags:
+        config_data["tags"] = tags.strip()
+
     row = models.TemplateBackgroundAsset(
         id=str(uuid.uuid4()),
         user_id=current_user.id,
         type="image",
         label=name.strip(),
         preview_url=supabase_url,
-        config={"url": supabase_url, "fit": "cover"},
+        config=config_data,
         created_at=datetime.now(timezone.utc),
     )
     db.add(row)
@@ -887,10 +972,18 @@ def _composite_layer_onto_base(
     w: int,
     h: int,
     rotation_degrees: float | None,
+    opacity: float = 100.0,
 ) -> Image.Image:
-    """Paste layer content onto base, optionally rotating around the layer box center."""
+    """Paste layer content onto base, optionally rotating around the layer box center, and applying opacity."""
     canvas_w, canvas_h = base.size
-    content = layer_img
+    content = layer_img.convert("RGBA")
+    
+    if opacity < 100.0:
+        # Multiply alpha channel by opacity/100
+        alpha = content.getchannel("A")
+        alpha = alpha.point(lambda p: int(p * (opacity / 100.0)))
+        content.putalpha(alpha)
+
     if content.size != (w, h) and w > 0 and h > 0:
         content = content.resize((w, h), Image.Resampling.LANCZOS)
 
@@ -942,6 +1035,99 @@ def _assemble_manual_template_preview(
         elif layer_type == "logo" and logo_img is not None:
             img_box = _fit_within(logo_img, w, h)
             base = _composite_layer_onto_base(base, img_box, x, y, w, h, rotation)
+        elif layer_type == "shape":
+            from PIL import ImageDraw
+            shape_type = str(layer.get("shape_type") or "rectangle").lower()
+            fill_hex = str(_first_option(layer.get("fill_color_options") or [], "color_hex") or "#ffffff")
+            fr, fg, fb, _ = _parse_hex_color(fill_hex, default=(255, 255, 255, 255))
+            
+            stroke_width = int(layer.get("stroke_width") or 0)
+            stroke_color = None
+            if stroke_width > 0:
+                stroke_hex = str(_first_option(layer.get("stroke_color_options") or [], "color_hex") or "#000000")
+                sr, sg, sb, _ = _parse_hex_color(stroke_hex, default=(0, 0, 0, 255))
+                stroke_color = (sr, sg, sb, 255)
+                
+            shape_img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(shape_img)
+            
+            # Anti-aliasing scaling
+            aa_scale = 4
+            big_w, big_h = w * aa_scale, h * aa_scale
+            big_img = Image.new("RGBA", (big_w, big_h), (0, 0, 0, 0))
+            big_draw = ImageDraw.Draw(big_img)
+            big_stroke_width = stroke_width * aa_scale
+            
+            if shape_type == "circle":
+                big_draw.ellipse([0, 0, big_w - 1, big_h - 1], fill=(fr, fg, fb, 255), outline=stroke_color, width=big_stroke_width)
+            elif shape_type == "pill":
+                big_draw.rounded_rectangle([0, 0, big_w - 1, big_h - 1], radius=min(big_w, big_h) // 2, fill=(fr, fg, fb, 255), outline=stroke_color, width=big_stroke_width)
+            else: # rectangle
+                cr = int(layer.get("corner_radius") or 0) * aa_scale
+                if cr > 0:
+                    big_draw.rounded_rectangle([0, 0, big_w - 1, big_h - 1], radius=cr, fill=(fr, fg, fb, 255), outline=stroke_color, width=big_stroke_width)
+                else:
+                    big_draw.rectangle([0, 0, big_w - 1, big_h - 1], fill=(fr, fg, fb, 255), outline=stroke_color, width=big_stroke_width)
+                    
+            shape_img = big_img.resize((w, h), Image.Resampling.LANCZOS)
+            
+            layer_opacity = 100.0
+            if layer.get("opacity") is not None:
+                try:
+                    layer_opacity = float(layer["opacity"])
+                except (TypeError, ValueError):
+                    pass
+            base = _composite_layer_onto_base(base, shape_img, x, y, w, h, rotation, opacity=layer_opacity)
+        elif layer_type == "divider":
+            from PIL import ImageDraw
+            import math
+            
+            orientation = str(layer.get("orientation") or "horizontal").lower()
+            color_hex = str(_first_option(layer.get("color_options") or [], "color_hex") or "#ffffff")
+            cr, cg, cb, _ = _parse_hex_color(color_hex, default=(255, 255, 255, 255))
+            
+            thickness = int(layer.get("thickness_px") or 2)
+            
+            # Start and width percentages
+            x_start_pct = float(layer.get("x_start_pct") or 0)
+            width_pct = float(layer.get("width_pct") or 100)
+            y_pct = float(layer.get("y_pct") or 50)
+            
+            x_start_px = int(round((x_start_pct / 100.0) * canvas_w))
+            line_w_px = int(round((width_pct / 100.0) * canvas_w))
+            y_px = int(round((y_pct / 100.0) * canvas_h))
+            
+            x_end_px = x_start_px + line_w_px
+            y_end_px = y_px
+            
+            if orientation == "diagonal":
+                angle_deg = float(layer.get("angle_deg") or 0)
+                # calculate vertical drop based on angle
+                drop = int(round(math.tan(math.radians(angle_deg)) * line_w_px))
+                y_end_px += drop
+                
+            divider_img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(divider_img)
+            
+            # Antialiasing scaling
+            aa_scale = 4
+            big_canvas_w, big_canvas_h = canvas_w * aa_scale, canvas_h * aa_scale
+            big_img = Image.new("RGBA", (big_canvas_w, big_canvas_h), (0, 0, 0, 0))
+            big_draw = ImageDraw.Draw(big_img)
+            
+            p1 = (x_start_px * aa_scale, y_px * aa_scale)
+            p2 = (x_end_px * aa_scale, y_end_px * aa_scale)
+            big_draw.line([p1, p2], fill=(cr, cg, cb, 255), width=thickness * aa_scale)
+            
+            divider_img = big_img.resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
+            
+            layer_opacity = 100.0
+            if layer.get("opacity") is not None:
+                try:
+                    layer_opacity = float(layer["opacity"])
+                except (TypeError, ValueError):
+                    pass
+            base = _composite_layer_onto_base(base, divider_img, 0, 0, canvas_w, canvas_h, rotation, opacity=layer_opacity)
         elif layer_type == "text":
             role = str(layer.get("role") or "body").lower()
             text_str = _PLACEHOLDER_BY_ROLE.get(role, _PLACEHOLDER_BY_ROLE["body"])
@@ -960,6 +1146,11 @@ def _assemble_manual_template_preview(
             align_opts = layer.get("text_align_options") or ["center"]
             align = str(align_opts[0] if align_opts else "center").strip().lower()
             
+            stroke_color_hex = str(layer.get("stroke_color_hex") or "") if layer.get("stroke_color_hex") else None
+            stroke_width_px = int(layer.get("stroke_width_px") or 0)
+            highlight_bg_hex = str(layer.get("highlight_bg_hex") or "") if layer.get("highlight_bg_hex") else None
+            fit_mode = str(layer.get("fit_mode") or "fixed")
+
             text_layer = render_text_layer_pango(
                 text=text_str,
                 font_path=font_path_used,
@@ -968,7 +1159,11 @@ def _assemble_manual_template_preview(
                 layer_width_px=w,
                 layer_height_px=h,
                 text_align=align,
-                font_weight=weight
+                font_weight=weight,
+                stroke_color_hex=stroke_color_hex,
+                stroke_width_px=stroke_width_px,
+                highlight_bg_hex=highlight_bg_hex,
+                fit_mode=fit_mode
             )
             logger.info(
                 'Text layer %s: script=%s font=%s size=%spx text="%s"',
@@ -1028,6 +1223,40 @@ _MANUAL_TEMPLATE_JSON_REFERENCE = """{
       "width_percent": 18,
       "height_percent": 12,
       "rotation_degrees": 0
+    },
+    {
+      "id": "layer_4",
+      "type": "shape",
+      "shape_type": "rectangle|circle|pill",
+      "z_index": 3,
+      "position_x_percent": 10,
+      "position_y_percent": 10,
+      "width_percent": 80,
+      "height_percent": 20,
+      "rotation_degrees": 0,
+      "fill_color_options": [{"color_hex": "#ffffff", "label": "string"}],
+      "stroke_color_options": [{"color_hex": "#000000", "label": "string"}],
+      "stroke_width": 4,
+      "corner_radius": 12,
+      "opacity": 100
+    },
+    {
+      "id": "layer_5",
+      "type": "divider",
+      "z_index": 4,
+      "position_x_percent": 0,
+      "position_y_percent": 50,
+      "width_percent": 100,
+      "height_percent": 1,
+      "rotation_degrees": 0,
+      "orientation": "horizontal|diagonal",
+      "color_options": [{"color_hex": "#ffffff", "label": "string"}],
+      "thickness_px": 2,
+      "opacity": 100,
+      "width_pct": 80,
+      "y_pct": 50,
+      "x_start_pct": 10,
+      "angle_deg": 0
     }
   ]
 }"""
@@ -1214,6 +1443,10 @@ def _normalize_generated_template_json(
                     "font_size_max_percent": float(layer.get("font_size_max_percent") or 7),
                     "text_align_options": aligns,
                     "font_weight": weight,
+                    "stroke_color_hex": layer.get("stroke_color_hex"),
+                    "stroke_width_px": layer.get("stroke_width_px"),
+                    "highlight_bg_hex": layer.get("highlight_bg_hex"),
+                    "fit_mode": layer.get("fit_mode"),
                 }
             )
         elif layer_type == "overlay":
@@ -2090,10 +2323,15 @@ def build_image_instruction_prompt(
     bg_options = template_json.get("background_options") or []
     if bg_options:
         bg_lines = ["BACKGROUND — choose exactly one:"]
-        for opt in bg_options:
+        for i, opt in enumerate(bg_options):
             asset_id = opt.get("asset_id")
             label = opt.get("label", "Unnamed")
-            bg_lines.append(f"- asset_id: {asset_id} | label: {label}")
+            bg_type = opt.get("type", "unknown")
+            config = opt.get("config", {})
+            tags_str = ""
+            if "tags" in config:
+                tags_str = f", tags='{config['tags']}'"
+            bg_lines.append(f"- Background option {i+1}: type='{bg_type}', name='{label}'{tags_str}, asset_id='{asset_id}'")
         user_parts.append("\n".join(bg_lines))
     
     # 4. Layers sorted by z_index
@@ -2158,8 +2396,51 @@ def build_image_instruction_prompt(
                 overlay_lines.append(f"- color_hex: {chex} | opacity: {opac} | label: {clbl}")
             
             user_parts.append("\n".join(overlay_lines))
+            
+        elif layer_type == "frame":
+            frame_lines = [f"FRAME LAYER {layer_id}"]
+            frame_lines.append("Choose frame color from:")
+            color_opts = layer.get("color_options") or []
+            for copt in color_opts:
+                chex = copt.get("color_hex")
+                clbl = copt.get("label", chex)
+                frame_lines.append(f"- color_hex: {chex} | label: {clbl}")
+            
+            user_parts.append("\n".join(frame_lines))
+            
+        elif layer_type == "shape":
+            shape_lines = [f"SHAPE LAYER {layer_id}"]
+            shape_lines.append("Choose fill color from:")
+            fill_opts = layer.get("fill_color_options") or []
+            for copt in fill_opts:
+                chex = copt.get("color_hex")
+                clbl = copt.get("label", chex)
+                shape_lines.append(f"- color_hex: {chex} | label: {clbl}")
+                
+            stroke_opts = layer.get("stroke_color_options") or []
+            if stroke_opts:
+                shape_lines.append("Choose stroke color from:")
+                for copt in stroke_opts:
+                    chex = copt.get("color_hex")
+                    clbl = copt.get("label", chex)
+                    shape_lines.append(f"- color_hex: {chex} | label: {clbl}")
+                    
+            user_parts.append("\n".join(shape_lines))
+            
+        elif layer_type == "divider":
+            divider_lines = [f"DIVIDER LAYER {layer_id}"]
+            divider_lines.append("Choose color from:")
+            color_opts = layer.get("color_options") or []
+            for copt in color_opts:
+                chex = copt.get("color_hex")
+                clbl = copt.get("label", chex)
+                divider_lines.append(f"- color_hex: {chex} | label: {clbl}")
+            user_parts.append("\n".join(divider_lines))
         
-        # Logo layers: no prompt section, LLM doesn't decide anything
+        # Logo layers: no prompt section for content, but LLM can specify opacity
+        
+        if layer_type in ("text", "overlay", "logo", "frame", "shape", "divider"):
+            user_parts.append(f"For layer {layer_id}, you can specify global 'opacity' between 0 and 100.")
     
     # 5. Expected response format (dynamic based on actual layers)
     response_lines = ["Return a JSON object with exactly this structure:"]
@@ -2171,29 +2452,44 @@ def build_image_instruction_prompt(
     
     response_lines.append('  "layers": [')
     
-    # For each text layer
+    # Group layers for JSON response format
     text_layers = [l for l in layers if str(l.get("type") or "").lower() == "text"]
-    for idx, tlayer in enumerate(text_layers):
-        response_lines.append("    {")
-        response_lines.append(f'      "layer_id": "{tlayer.get("id")}",')
-        response_lines.append('      "text": "generated text here",')
-        response_lines.append('      "font_asset_id": "one of the font_asset_ids listed above",')
-        response_lines.append('      "color_hex": "one of the color_hex values listed above",')
-        response_lines.append('      "font_size_percent": 5.5,')
-        response_lines.append('      "text_align": "one of the text_align_options listed above"')
-        response_lines.append("    }" + ("," if idx < len(text_layers) - 1 else ""))
-    
-    # For each overlay layer
     overlay_layers = [l for l in layers if str(l.get("type") or "").lower() == "overlay"]
-    if overlay_layers and text_layers:
-        response_lines.append("    ,")
+    logo_layers = [l for l in layers if str(l.get("type") or "").lower() == "logo"]
+    frame_layers = [l for l in layers if str(l.get("type") or "").lower() == "frame"]
+    shape_layers = [l for l in layers if str(l.get("type") or "").lower() == "shape"]
+    divider_layers = [l for l in layers if str(l.get("type") or "").lower() == "divider"]
     
-    for idx, olayer in enumerate(overlay_layers):
+    all_render_layers = text_layers + overlay_layers + logo_layers + frame_layers + shape_layers + divider_layers
+    
+    for idx, layer in enumerate(all_render_layers):
+        layer_type = str(layer.get("type") or "").lower()
         response_lines.append("    {")
-        response_lines.append(f'      "layer_id": "{olayer.get("id")}",')
-        response_lines.append('      "color_hex": "one of the color_hex values listed above",')
-        response_lines.append('      "opacity": 0.35')
-        response_lines.append("    }" + ("," if idx < len(overlay_layers) - 1 else ""))
+        response_lines.append(f'      "layer_id": "{layer.get("id")}",')
+        
+        if layer_type == "text":
+            response_lines.append('      "text": "generated text here",')
+            response_lines.append('      "font_asset_id": "one of the font_asset_ids listed above",')
+            response_lines.append('      "color_hex": "one of the color_hex values listed above",')
+            response_lines.append('      "font_size_percent": 5.5,')
+            response_lines.append('      "text_align": "one of the text_align_options listed above",')
+        elif layer_type == "overlay":
+            response_lines.append('      "color_hex": "one of the color_hex values listed above",')
+            # legacy overlay opacity field (optional but good for compatibility)
+            response_lines.append('      "opacity": 0.35,')
+        elif layer_type == "frame":
+            response_lines.append('      "color_hex": "one of the color_hex values listed above",')
+            response_lines.append('      "thickness_px": 4,')
+        elif layer_type == "shape":
+            response_lines.append('      "fill_color_hex": "one of the fill color_hex values listed above",')
+            if layer.get("stroke_color_options"):
+                response_lines.append('      "stroke_color_hex": "one of the stroke color_hex values listed above",')
+        elif layer_type == "divider":
+            response_lines.append('      "color_hex": "one of the color_hex values listed above",')
+            
+        # Global opacity for ALL layers
+        response_lines.append('      "opacity": 100.0')
+        response_lines.append("    }" + ("," if idx < len(all_render_layers) - 1 else ""))
     
     response_lines.append("  ]")
     response_lines.append("}")
@@ -2349,6 +2645,14 @@ def _validate_and_clamp_llm_instructions(template_json: dict, raw: dict, logger:
                 color_hex = first_color_hex
                 opacity = first_opacity
 
+            # the legacy overlay validation expects "opacity" to be the 0-1 color opacity.
+            # but we also have global layer opacity. to avoid name clash, the legacy overlay opacity
+            # was just called "opacity". Wait, my previous multi_replace called it "color_opacity".
+            # The prompt says: "for each layer, it can now specify opacity."
+            # If the layer is overlay, the legacy config also had color options with "opacity".
+            # To be safe, we just let the legacy overlay opacity be handled as before, and for the global opacity, 
+            # we'll let the compositor read it. Actually, I can just append it all to the result.
+            
             clamped_layers.append(
                 {
                     "layer_id": layer_id,
@@ -2356,6 +2660,96 @@ def _validate_and_clamp_llm_instructions(template_json: dict, raw: dict, logger:
                     "opacity": max(0.0, min(1.0, opacity)),
                 }
             )
+        elif layer_type == "logo":
+            clamped_layers.append({"layer_id": layer_id})
+        elif layer_type == "frame":
+            color_options = layer.get("color_options") or []
+            allowed_colors = {str(c.get("color_hex")).lower() for c in color_options if c.get("color_hex")}
+            
+            color_hex = str(incoming.get("color_hex") or "").strip().lower()
+            if color_hex and not color_hex.startswith("#"):
+                color_hex = f"#{color_hex}"
+            
+            first_color = str(_first_option(color_options, "color_hex") or "#ffffff")
+            if allowed_colors and color_hex.lower() not in allowed_colors:
+                if color_hex:
+                    logger.warning(f"Layer {layer_id}: LLM returned invalid color_hex '{color_hex}', using fallback '{first_color}'")
+                color_hex = first_color
+            
+            thickness_px = incoming.get("thickness_px")
+            if thickness_px is None:
+                thickness_px = layer.get("thickness_px", 4)
+            
+            clamped_layers.append(
+                {
+                    "layer_id": layer_id,
+                    "color_hex": color_hex,
+                    "thickness_px": thickness_px,
+                }
+            )
+        elif layer_type == "shape":
+            fill_options = layer.get("fill_color_options") or []
+            allowed_fill = {str(c.get("color_hex")).lower() for c in fill_options if c.get("color_hex")}
+            
+            fill_color = str(incoming.get("fill_color_hex") or "").strip().lower()
+            if fill_color and not fill_color.startswith("#"):
+                fill_color = f"#{fill_color}"
+                
+            first_fill = str(_first_option(fill_options, "color_hex") or "#ffffff")
+            if allowed_fill and fill_color.lower() not in allowed_fill:
+                if fill_color:
+                    logger.warning(f"Layer {layer_id}: LLM returned invalid fill_color_hex '{fill_color}', using fallback '{first_fill}'")
+                fill_color = first_fill
+                
+            out_shape = {
+                "layer_id": layer_id,
+                "fill_color_hex": fill_color,
+            }
+            
+            stroke_options = layer.get("stroke_color_options") or []
+            if stroke_options:
+                allowed_stroke = {str(c.get("color_hex")).lower() for c in stroke_options if c.get("color_hex")}
+                stroke_color = str(incoming.get("stroke_color_hex") or "").strip().lower()
+                if stroke_color and not stroke_color.startswith("#"):
+                    stroke_color = f"#{stroke_color}"
+                    
+                first_stroke = str(_first_option(stroke_options, "color_hex") or "#000000")
+                if allowed_stroke and stroke_color.lower() not in allowed_stroke:
+                    if stroke_color:
+                        logger.warning(f"Layer {layer_id}: LLM returned invalid stroke_color_hex '{stroke_color}', using fallback '{first_stroke}'")
+                    stroke_color = first_stroke
+                out_shape["stroke_color_hex"] = stroke_color
+                
+            clamped_layers.append(out_shape)
+            
+        elif layer_type == "divider":
+            color_options = layer.get("color_options") or []
+            allowed_colors = {str(c.get("color_hex")).lower() for c in color_options if c.get("color_hex")}
+            
+            color_hex = str(incoming.get("color_hex") or "").strip().lower()
+            if color_hex and not color_hex.startswith("#"):
+                color_hex = f"#{color_hex}"
+                
+            first_color = str(_first_option(color_options, "color_hex") or "#ffffff")
+            if allowed_colors and color_hex.lower() not in allowed_colors:
+                if color_hex:
+                    logger.warning(f"Layer {layer_id}: LLM returned invalid color_hex '{color_hex}', using fallback '{first_color}'")
+                color_hex = first_color
+                
+            clamped_layers.append({
+                "layer_id": layer_id,
+                "color_hex": color_hex,
+            })
+            
+        # Handle global opacity for all layers
+        last_added = clamped_layers[-1] if clamped_layers and clamped_layers[-1].get("layer_id") == layer_id else None
+        if last_added is not None:
+            if "opacity" in incoming and incoming.get("opacity") is not None and layer_type != "overlay":
+                try:
+                    op = float(incoming["opacity"])
+                    last_added["opacity"] = max(0.0, min(100.0, op))
+                except (TypeError, ValueError):
+                    pass
 
     return {"chosen_background_asset_id": chosen_bg, "layers": clamped_layers}
 
@@ -2523,23 +2917,118 @@ def _assemble_from_llm_instructions(
 
         rotation = _layer_rotation_degrees(layer)
         instr = layer_map.get(layer_id, {})
+        
+        # Determine global layer opacity (0-100)
+        layer_opacity = 100.0
+        if "opacity" in instr and instr.get("opacity") is not None:
+            try:
+                layer_opacity = float(instr["opacity"])
+            except (TypeError, ValueError):
+                pass
+        elif "opacity" in layer and layer.get("opacity") is not None:
+            try:
+                layer_opacity = float(layer["opacity"])
+            except (TypeError, ValueError):
+                pass
+        layer_opacity = max(0.0, min(100.0, layer_opacity))
+
         if layer_type == "overlay":
             color_hex = str(instr.get("color_hex") or _first_option(layer.get("color_options") or [], "color_hex") or "#000000")
             try:
-                opacity = float(instr.get("opacity"))
-            except (TypeError, ValueError):
-                opacity = float(
+                # the overlay color option opacity is separate (0-1.0)
+                color_opacity = float(
                     (layer.get("color_options") or [{}])[0].get("opacity")
                     if layer.get("color_options")
                     else 0.35
                 )
+            except (TypeError, ValueError):
+                color_opacity = 0.35
             r, g, b, _ = _parse_hex_color(color_hex, default=(0, 0, 0, 255))
-            opacity = max(0.0, min(1.0, opacity))
-            overlay = Image.new("RGBA", (w, h), (r, g, b, int(round(opacity * 255))))
-            base = _composite_layer_onto_base(base, overlay, x, y, w, h, rotation)
+            color_opacity = max(0.0, min(1.0, color_opacity))
+            overlay = Image.new("RGBA", (w, h), (r, g, b, int(round(color_opacity * 255))))
+            base = _composite_layer_onto_base(base, overlay, x, y, w, h, rotation, opacity=layer_opacity)
         elif layer_type == "logo" and logo_img is not None:
             img_box = _fit_within(logo_img, w, h)
-            base = _composite_layer_onto_base(base, img_box, x, y, w, h, rotation)
+            base = _composite_layer_onto_base(base, img_box, x, y, w, h, rotation, opacity=layer_opacity)
+        elif layer_type == "shape":
+            from PIL import ImageDraw
+            shape_type = str(layer.get("shape_type") or "rectangle").lower()
+            fill_hex = str(instr.get("fill_color_hex") or _first_option(layer.get("fill_color_options") or [], "color_hex") or "#ffffff")
+            fr, fg, fb, _ = _parse_hex_color(fill_hex, default=(255, 255, 255, 255))
+            
+            stroke_width = int(layer.get("stroke_width") or 0)
+            stroke_color = None
+            if stroke_width > 0:
+                stroke_hex = str(instr.get("stroke_color_hex") or _first_option(layer.get("stroke_color_options") or [], "color_hex") or "#000000")
+                sr, sg, sb, _ = _parse_hex_color(stroke_hex, default=(0, 0, 0, 255))
+                stroke_color = (sr, sg, sb, 255)
+            
+            shape_img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(shape_img)
+            
+            # Anti-aliasing scaling
+            aa_scale = 4
+            big_w, big_h = w * aa_scale, h * aa_scale
+            big_img = Image.new("RGBA", (big_w, big_h), (0, 0, 0, 0))
+            big_draw = ImageDraw.Draw(big_img)
+            big_stroke_width = stroke_width * aa_scale
+            
+            if shape_type == "circle":
+                big_draw.ellipse([0, 0, big_w - 1, big_h - 1], fill=(fr, fg, fb, 255), outline=stroke_color, width=big_stroke_width)
+            elif shape_type == "pill":
+                big_draw.rounded_rectangle([0, 0, big_w - 1, big_h - 1], radius=min(big_w, big_h) // 2, fill=(fr, fg, fb, 255), outline=stroke_color, width=big_stroke_width)
+            else: # rectangle
+                cr = int(layer.get("corner_radius") or 0) * aa_scale
+                if cr > 0:
+                    big_draw.rounded_rectangle([0, 0, big_w - 1, big_h - 1], radius=cr, fill=(fr, fg, fb, 255), outline=stroke_color, width=big_stroke_width)
+                else:
+                    big_draw.rectangle([0, 0, big_w - 1, big_h - 1], fill=(fr, fg, fb, 255), outline=stroke_color, width=big_stroke_width)
+                    
+            shape_img = big_img.resize((w, h), Image.Resampling.LANCZOS)
+            base = _composite_layer_onto_base(base, shape_img, x, y, w, h, rotation, opacity=layer_opacity)
+        elif layer_type == "divider":
+            from PIL import ImageDraw
+            import math
+            
+            orientation = str(layer.get("orientation") or "horizontal").lower()
+            color_hex = str(instr.get("color_hex") or _first_option(layer.get("color_options") or [], "color_hex") or "#ffffff")
+            cr, cg, cb, _ = _parse_hex_color(color_hex, default=(255, 255, 255, 255))
+            
+            thickness = int(layer.get("thickness_px") or 2)
+            
+            # Start and width percentages
+            x_start_pct = float(layer.get("x_start_pct") or 0)
+            width_pct = float(layer.get("width_pct") or 100)
+            y_pct = float(layer.get("y_pct") or 50)
+            
+            x_start_px = int(round((x_start_pct / 100.0) * canvas_w))
+            line_w_px = int(round((width_pct / 100.0) * canvas_w))
+            y_px = int(round((y_pct / 100.0) * canvas_h))
+            
+            x_end_px = x_start_px + line_w_px
+            y_end_px = y_px
+            
+            if orientation == "diagonal":
+                angle_deg = float(layer.get("angle_deg") or 0)
+                # calculate vertical drop based on angle
+                drop = int(round(math.tan(math.radians(angle_deg)) * line_w_px))
+                y_end_px += drop
+                
+            divider_img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(divider_img)
+            
+            # Antialiasing scaling
+            aa_scale = 4
+            big_canvas_w, big_canvas_h = canvas_w * aa_scale, canvas_h * aa_scale
+            big_img = Image.new("RGBA", (big_canvas_w, big_canvas_h), (0, 0, 0, 0))
+            big_draw = ImageDraw.Draw(big_img)
+            
+            p1 = (x_start_px * aa_scale, y_px * aa_scale)
+            p2 = (x_end_px * aa_scale, y_end_px * aa_scale)
+            big_draw.line([p1, p2], fill=(cr, cg, cb, 255), width=thickness * aa_scale)
+            
+            divider_img = big_img.resize((canvas_w, canvas_h), Image.Resampling.LANCZOS)
+            base = _composite_layer_onto_base(base, divider_img, 0, 0, canvas_w, canvas_h, rotation, opacity=layer_opacity)
         elif layer_type == "text":
             text_str = str(instr.get("text") or "").strip()
             if not text_str:
@@ -2576,7 +3065,51 @@ def _assemble_from_llm_instructions(
                 font_px,
                 text_str[:30],
             )
-            base = _composite_layer_onto_base(base, text_layer, x, y, w, h, rotation)
+            base = _composite_layer_onto_base(base, text_layer, x, y, w, h, rotation, opacity=layer_opacity)
+
+    # Frame layer is drawn last if present
+    for layer in layers:
+        if str(layer.get("type") or "").lower() == "frame":
+            layer_id = str(layer.get("id") or "")
+            instr = layer_map.get(layer_id, {})
+            
+            # Determine global layer opacity (0-100)
+            layer_opacity = 100.0
+            if "opacity" in instr and instr.get("opacity") is not None:
+                try:
+                    layer_opacity = float(instr["opacity"])
+                except (TypeError, ValueError):
+                    pass
+            elif "opacity" in layer and layer.get("opacity") is not None:
+                try:
+                    layer_opacity = float(layer["opacity"])
+                except (TypeError, ValueError):
+                    pass
+            layer_opacity = max(0.0, min(100.0, layer_opacity))
+            
+            color_hex = str(instr.get("color_hex") or layer.get("color_hex") or "#ffffff")
+            try:
+                thickness_px = int(instr.get("thickness_px") or layer.get("thickness_px") or 4)
+            except (TypeError, ValueError):
+                thickness_px = 4
+            
+            try:
+                inset_px = int(layer.get("inset_px") or 0)
+            except (TypeError, ValueError):
+                inset_px = 0
+            
+            r, g, b, _ = _parse_hex_color(color_hex, default=(255, 255, 255, 255))
+            frame_alpha = int(round(255 * (layer_opacity / 100.0)))
+            
+            from PIL import ImageDraw
+            frame_overlay = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(frame_overlay)
+            draw.rectangle(
+                [inset_px, inset_px, canvas_w - inset_px, canvas_h - inset_px],
+                outline=(r, g, b, frame_alpha),
+                width=thickness_px
+            )
+            base = Image.alpha_composite(base, frame_overlay)
 
     return _image_to_png_bytes(base)
 

@@ -48,6 +48,10 @@ export type TextLayer = LayerBase & {
   font_size_max_percent: number
   text_align_options: ("left" | "center" | "right")[]
   font_weight: "bold" | "regular"
+  stroke_color_hex?: string
+  stroke_width_px?: number
+  highlight_bg_hex?: string
+  fit_mode?: "fixed" | "auto_fit"
 }
 
 export type OverlayLayer = LayerBase & {
@@ -59,7 +63,29 @@ export type LogoLayer = LayerBase & {
   type: "logo"
 }
 
-export type TemplateLayer = TextLayer | OverlayLayer | LogoLayer
+export type DividerLayer = LayerBase & {
+  type: "divider"
+  orientation: "horizontal" | "diagonal"
+  color_options: ColorOption[]
+  thickness_px: number
+  opacity: number
+  width_pct: number
+  y_pct: number
+  x_start_pct: number
+  angle_deg?: number
+}
+
+export type ShapeLayer = LayerBase & {
+  type: "shape"
+  shape_type: "rectangle" | "circle" | "pill"
+  fill_color_options: ColorOption[]
+  stroke_color_options?: ColorOption[]
+  stroke_width?: number
+  corner_radius?: number
+  opacity?: number
+}
+
+export type TemplateLayer = TextLayer | OverlayLayer | LogoLayer | ShapeLayer | DividerLayer
 
 export type BackgroundOption = {
   asset_id: string

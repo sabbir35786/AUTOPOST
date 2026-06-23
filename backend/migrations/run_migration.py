@@ -24,6 +24,7 @@ MIGRATIONS = [
     '12 rebuild_image_templates_system.sql',
     '13 drop_layers_json_column.sql',
     '14 add_updated_at_to_image_templates.sql',
+    '20_expand_background_assets.sql',
 ]
 
 def split_sql_statements(sql_script: str) -> list:
