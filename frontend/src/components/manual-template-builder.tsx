@@ -853,7 +853,7 @@ function LayerEditor({
         min={min}
         max={max}
         step={0.1}
-        value={Number(layer[key])}
+        value={Number((layer as any)[key])}
         onChange={(e) => onChange({ [key]: Number(e.target.value) } as Partial<LayerDraft>)}
       />
     </div>
