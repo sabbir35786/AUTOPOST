@@ -2064,6 +2064,78 @@ def _parse_hex_color(value: str | None, *, default=(0, 0, 0, 0)) -> tuple[int, i
     return default
 
 
+def _srgb_to_linear(c: float) -> float:
+    """Convert a single sRGB channel value (0-1) to linear light."""
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _relative_luminance(r: int, g: int, b: int) -> float:
+    """Calculate WCAG relative luminance from 8-bit RGB values."""
+    r_lin = _srgb_to_linear(r / 255.0)
+    g_lin = _srgb_to_linear(g / 255.0)
+    b_lin = _srgb_to_linear(b / 255.0)
+    return 0.2126 * r_lin + 0.7152 * g_lin + 0.0722 * b_lin
+
+
+def analyze_zone_luminance(
+    background_image: "Image.Image",
+    x_pct: float,
+    y_pct: float,
+    width_pct: float,
+    height_pct: float,
+) -> dict:
+    """
+    Analyze the luminance of a rectangular zone in a background image.
+
+    Parameters are percentages (0-100) of the canvas dimensions.
+    Returns a dict with:
+      - "category": "light" | "dark"
+      - "avg_color": (r, g, b) average pixel color of the zone
+      - "luminance": float relative luminance (0-1)
+    """
+    try:
+        img_w, img_h = background_image.size
+        x1 = max(0, int(round(x_pct / 100.0 * img_w)))
+        y1 = max(0, int(round(y_pct / 100.0 * img_h)))
+        x2 = min(img_w, int(round((x_pct + width_pct) / 100.0 * img_w)))
+        y2 = min(img_h, int(round((y_pct + height_pct) / 100.0 * img_h)))
+
+        if x2 <= x1 or y2 <= y1:
+            return {"category": "dark", "avg_color": (0, 0, 0), "luminance": 0.0}
+
+        region = background_image.crop((x1, y1, x2, y2)).convert("RGB")
+        pixels = list(region.getdata())
+        n = len(pixels)
+        if n == 0:
+            return {"category": "dark", "avg_color": (0, 0, 0), "luminance": 0.0}
+
+        avg_r = int(sum(p[0] for p in pixels) / n)
+        avg_g = int(sum(p[1] for p in pixels) / n)
+        avg_b = int(sum(p[2] for p in pixels) / n)
+        L = _relative_luminance(avg_r, avg_g, avg_b)
+        category = "light" if L > 0.35 else "dark"
+        return {"category": category, "avg_color": (avg_r, avg_g, avg_b), "luminance": L}
+    except Exception as exc:
+        print(f"[WARN] analyze_zone_luminance failed: {exc}")
+        return {"category": "dark", "avg_color": (0, 0, 0), "luminance": 0.0}
+
+
+def _calculate_contrast_ratio(hex_color: str, bg_rgb: tuple) -> float:
+    """
+    Calculate WCAG contrast ratio between a foreground hex color and a background RGB tuple.
+    Returns the ratio (1-21). Higher is more contrast.
+    """
+    try:
+        r, g, b, _ = _parse_hex_color(hex_color, default=(255, 255, 255, 255))
+        L_fg = _relative_luminance(r, g, b)
+        L_bg = _relative_luminance(bg_rgb[0], bg_rgb[1], bg_rgb[2])
+        lighter = max(L_fg, L_bg)
+        darker = min(L_fg, L_bg)
+        return (lighter + 0.05) / (darker + 0.05)
+    except Exception:
+        return 1.0
+
+
 def _get_font(weight: str, size_px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     candidates: list[str] = []
     w = (weight or "regular").strip().lower()
@@ -2290,6 +2362,7 @@ def build_image_instruction_prompt(
     template_json: dict,
     input_text: str,
     persona: models.AIPersona | None = None,
+    zone_analysis: dict | None = None,
 ) -> tuple[str, str]:
     """
     Build system and user messages for LLM template instructions.
@@ -2377,6 +2450,20 @@ def build_image_instruction_prompt(
             align_opts = layer.get("text_align_options") or ["center"]
             text_lines.append(f"Choose text_align from: {', '.join(align_opts)}")
             
+            # Luminance constraint (Module 7 — Auto Contrast)
+            if zone_analysis and str(layer_id) in zone_analysis:
+                zone = zone_analysis[str(layer_id)]
+                if zone["category"] == "light":
+                    text_lines.append(
+                        "CONSTRAINT: This text sits on a LIGHT background zone — "
+                        "you MUST choose a dark text color (e.g. near-black or dark brand color)."
+                    )
+                else:
+                    text_lines.append(
+                        "CONSTRAINT: This text sits on a DARK background zone — "
+                        "you MUST choose a light text color (e.g. white or light brand color)."
+                    )
+
             # Generation instruction
             language = persona.language if persona else "English"
             text_lines.append(f"Generate the text content for this layer based on the post. Max words: {max_words}")
@@ -2517,7 +2604,12 @@ def _first_option(options: list, key: str):
     return options[0].get(key) if isinstance(options[0], dict) else None
 
 
-def _validate_and_clamp_llm_instructions(template_json: dict, raw: dict, logger: logging.Logger | None = None) -> dict:
+def _validate_and_clamp_llm_instructions(
+    template_json: dict,
+    raw: dict,
+    logger: logging.Logger | None = None,
+    zone_analysis: dict | None = None,
+) -> dict:
     """
     Validate LLM response strictly. Every value must come from template options.
     Use first option as fallback. Log every fallback used.
@@ -2576,6 +2668,20 @@ def _validate_and_clamp_llm_instructions(template_json: dict, raw: dict, logger:
                 if color_hex:
                     logger.warning(f"Layer {layer_id}: LLM returned invalid color_hex '{color_hex}', using fallback '{first_color}'")
                 color_hex = first_color
+
+            # WCAG AA contrast enforcement (Module 7 — Auto Contrast)
+            if zone_analysis and str(layer_id) in zone_analysis:
+                zone = zone_analysis[str(layer_id)]
+                avg_bg = zone.get("avg_color", (128, 128, 128))
+                ratio = _calculate_contrast_ratio(color_hex, avg_bg)
+                if ratio < 4.5:
+                    override = "#000000" if zone["category"] == "light" else "#ffffff"
+                    logger.warning(
+                        f"Layer {layer_id}: color '{color_hex}' has contrast ratio {ratio:.2f} "
+                        f"against {zone['category']} background (avg={avg_bg}) — "
+                        f"overriding with '{override}' for WCAG AA compliance."
+                    )
+                    color_hex = override
 
             # Font size validation
             min_pct = float(layer.get("font_size_min_percent") or 1.0)
@@ -2759,8 +2865,12 @@ def _generate_llm_instructions(
     post: models.PostLog,
     persona: models.AIPersona,
     template_json: dict,
+    zone_analysis: dict | None = None,
 ) -> dict:
-    prompt = _build_llm_instruction_prompt(post, persona, template_json)
+    system_msg, user_msg = build_image_instruction_prompt(
+        template_json, post.content or "", persona, zone_analysis=zone_analysis
+    )
+    prompt = f"{system_msg}\n\n{user_msg}"
     result = generate_post_text_for_user(
         user_id=post.user_id,
         prompt=prompt,
@@ -2806,7 +2916,8 @@ def _generate_llm_instructions(
             parsed = {}
     if not isinstance(parsed, dict):
         parsed = {}
-    return _validate_and_clamp_llm_instructions(template_json, parsed)
+    return _validate_and_clamp_llm_instructions(template_json, parsed, zone_analysis=zone_analysis)
+
 
 
 def _allowed_background_asset_ids(template_json: dict) -> set[str]:
@@ -3261,14 +3372,42 @@ async def _run_post_image_generation(
             generation.status = "generating_styling"
             db.commit()
 
+            # Module 7 — Auto Contrast: analyze first background option luminance for each text layer
+            zone_analysis: dict = {}
+            try:
+                bg_options = template_json.get("background_options") or []
+                if bg_options:
+                    first_bg_asset_id = str(bg_options[0].get("asset_id") or "")
+                    canvas_w_hint = int(template_json.get("canvas_width") or 1080)
+                    canvas_h_hint = int(template_json.get("canvas_height") or 1080)
+                    print(f"[IMG-GEN] Analyzing background luminance for text zones (first bg: {first_bg_asset_id})...")
+                    hint_bg_img = await _load_background_asset_image(db, user_id, first_bg_asset_id, canvas_w_hint, canvas_h_hint)
+                    for layer in template_json.get("layers") or []:
+                        if str(layer.get("type") or "").lower() == "text":
+                            lid = str(layer.get("id") or "")
+                            x_pct = float(layer.get("position_x_percent") or 0)
+                            y_pct = float(layer.get("position_y_percent") or 0)
+                            w_pct = float(layer.get("width_percent") or 100)
+                            h_pct = float(layer.get("height_percent") or 10)
+                            result = analyze_zone_luminance(hint_bg_img, x_pct, y_pct, w_pct, h_pct)
+                            zone_analysis[lid] = result
+                            print(
+                                f"[IMG-GEN] Layer '{lid}' zone: category={result['category']}, "
+                                f"luminance={result['luminance']:.3f}, avg_color={result['avg_color']}"
+                            )
+            except Exception as exc:
+                print(f"[IMG-GEN] WARNING: Zone luminance analysis failed, skipping: {exc}")
+                zone_analysis = {}
+
             print(f"[IMG-GEN] Generating LLM styling instructions (background pick, text, colors)...")
-            llm_instructions = _generate_llm_instructions(db, post, persona, template_json)
+            llm_instructions = _generate_llm_instructions(db, post, persona, template_json, zone_analysis=zone_analysis)
             print(f"[IMG-GEN] LLM chose background asset: {llm_instructions.get('chosen_background_asset_id')}")
             print(f"[IMG-GEN] LLM generated {len(llm_instructions.get('layers', []))} layer instructions")
             generation.llm_instructions = llm_instructions
             generation.overlay_texts = []
             generation.background_generation_prompt = None
             db.commit()
+
 
             canvas_w = int(template_json.get("canvas_width") or 1080)
             canvas_h = int(template_json.get("canvas_height") or 1080)
