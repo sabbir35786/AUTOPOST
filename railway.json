@@ -6,6 +6,6 @@
   "deploy": {
     "numReplicas": 1,
     "restartPolicyType": "always",
-    "startCommand": "python backend/start_server.py"
+    "startCommand": "python start_server.py"
   }
 }
